@@ -9,7 +9,9 @@ import (
 
 func TestDelete(t *testing.T) {
 
-	ts, err := benchtop.Create("test.data", []benchtop.ColumnDef{
+	dr, err := benchtop.NewBSONDriver("test.data")
+
+	ts, err := dr.New("test.data", []benchtop.ColumnDef{
 		{Path: "data", Type: benchtop.Int64},
 		{Path: "id", Type: benchtop.String},
 	})
@@ -19,20 +21,19 @@ func TestDelete(t *testing.T) {
 	}
 
 	totalCount := 100
-	offsets := []int64{}
 	for i := 0; i < totalCount; i++ {
-		o, err := ts.Add(map[string]any{
-			"id":   fmt.Sprintf("key_%d", i),
+		key := fmt.Sprintf("key_%d", i)
+		err := ts.Add([]byte(key), map[string]any{
+			"id":   key,
 			"data": i,
 		})
 		if err != nil {
 			t.Error(err)
 		}
-		offsets = append(offsets, o)
 	}
 
 	count := 0
-	r, err := ts.ListOffsets()
+	r, err := ts.Keys()
 	if err != nil {
 		t.Error(err)
 	}
@@ -48,18 +49,21 @@ func TestDelete(t *testing.T) {
 	}
 
 	deleteCount := 0
-	for i := range offsets {
+	keys, _ := ts.Keys()
+	i := 0
+	for k := range keys {
 		if i%3 == 0 {
-			err := ts.Delete(offsets[i])
+			err := ts.Delete(k)
 			if err != nil {
 				t.Error(err)
 			}
 			deleteCount++
+			i++
 		}
 	}
 
 	count = 0
-	r, _ = ts.ListOffsets()
+	r, _ = ts.Keys()
 	for range r {
 		count++
 	}

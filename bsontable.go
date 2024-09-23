@@ -1,58 +1,87 @@
 package benchtop
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"sync"
+
+	"github.com/cockroachdb/pebble"
 
 	"go.mongodb.org/mongo-driver/bson"
 	//NOTE: try github.com/dgraph-io/ristretto for cache
 )
 
-const (
-	markBit  = uint64(1) << 63
-	markMask = ^(uint64(1) << 63)
-)
+type BSONDriver struct {
+	base string
+	db   *pebble.DB
 
-type BsonTable struct {
-	columns     []ColumnDef
-	columnMap   map[string]int
-	handle      *os.File
-	indexHandle *os.File
-
-	handleLock *sync.Mutex
-	indexLock  *sync.Mutex
+	tables sync.Map
 }
 
-func Create(path string, columns []ColumnDef) (TableStore, error) {
-	out := BsonTable{columns: columns, handleLock: &sync.Mutex{}, indexLock: &sync.Mutex{}, columnMap: map[string]int{}}
-	f, err := os.Create(path)
+type BSONTable struct {
+	columns   []ColumnDef
+	columnMap map[string]int
+	handle    *os.File
+	db        *pebble.DB
+
+	handleLock *sync.Mutex
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	if err == nil {
+		return true
+	}
+	return err != os.ErrNotExist
+}
+
+func NewBSONDriver(path string) (TableDriver, error) {
+	db, err := pebble.Open(path, &pebble.Options{})
 	if err != nil {
 		return nil, err
 	}
+	tableDir := filepath.Join(path, "TABLES")
+	if fileExists(tableDir) {
+		os.Mkdir(tableDir, 0700)
+	}
+	return &BSONDriver{base: path, db: db}, nil
+}
+
+func (dr *BSONDriver) Get(name string) (TableStore, error) {
+	d, ok := dr.tables.Load(name)
+	if ok {
+		return d.(*BSONTable), nil
+	}
+	return nil, fmt.Errorf("not found")
+}
+
+func (dr *BSONDriver) New(name string, columns []ColumnDef) (TableStore, error) {
+	out := BSONTable{columns: columns, handleLock: &sync.Mutex{}, columnMap: map[string]int{}}
+	tPath := filepath.Join(dr.base, "TABLES", name)
+	f, err := os.Create(tPath)
+	if err != nil {
+		return nil, err
+	}
+	out.handle = f
 
 	for n, d := range columns {
 		out.columnMap[d.Path] = n
 	}
-
-	out.handle = f
-	i, err := os.Create(path + ".idx")
-	if err != nil {
-		f.Close()
-		return nil, err
-	}
-	out.indexHandle = i
+	out.db = dr.db
+	dr.tables.Store(name, out)
 	return &out, nil
 }
 
-func (b *BsonTable) Close() {
+func (b *BSONTable) Close() {
 	b.handle.Close()
-	b.indexHandle.Close()
+	b.db.Close()
 }
 
-func (b *BsonTable) GetColumns() []ColumnDef {
+func (b *BSONTable) GetColumns() []ColumnDef {
 	return b.columns
 }
 
@@ -70,13 +99,13 @@ func checkType(val any, t FieldType) (any, error) {
 	return val, nil
 }
 
-func (b *BsonTable) Add(entry map[string]any) (int64, error) {
+func (b *BSONTable) Add(id []byte, entry map[string]any) error {
 	columns := []any{}
 	for _, c := range b.columns {
 		if e, ok := entry[c.Path]; ok {
 			v, err := checkType(e, c.Type)
 			if err != nil {
-				return -1, err
+				return err
 			}
 			columns = append(columns, v)
 		} else {
@@ -91,48 +120,43 @@ func (b *BsonTable) Add(entry map[string]any) (int64, error) {
 	}
 	bData, err := bson.Marshal(bson.D{{Key: "columns", Value: columns}, {Key: "data", Value: other}})
 	if err != nil {
-		return -1, err
+		return err
 	}
 	b.handleLock.Lock()
 	defer b.handleLock.Unlock()
 	offset, err := b.handle.Seek(0, io.SeekEnd)
 	if err != nil {
-		return -1, err
+		return err
 	}
 	b.handle.Write(bData)
-	buf := make([]byte, 8) //binary.MaxVarintLen64)
-	b.indexLock.Lock()
-	defer b.indexLock.Unlock()
-	binary.LittleEndian.PutUint64(buf, uint64(offset))
-	b.indexHandle.Seek(0, io.SeekEnd)
-	b.indexHandle.Write(buf)
-	return offset, nil
-}
 
-func (b *BsonTable) colUnpack(v bson.RawElement, colType FieldType) any {
-	if colType == String {
-		return v.Value().StringValue()
-	} else if colType == Double {
-		return v.Value().Double()
-	} else if colType == Int64 {
-		return v.Value().Int64()
-	}
+	value := NewPosValue(uint64(offset), uint64(len(bData)))
+	idKey := NewIDKey(id)
+	b.db.Set(idKey, value, nil)
+
 	return nil
 }
 
-func (b *BsonTable) Get(offset int64, fields ...string) (map[string]any, error) {
+func (b *BSONTable) Get(id []byte, fields ...string) (map[string]any, error) {
 	b.handleLock.Lock()
 	defer b.handleLock.Unlock()
-	b.handle.Seek(offset, io.SeekStart)
+
+	offset, _, err := b.getBlockPos(id)
+	if err != nil {
+		return nil, err
+	}
+
+	//The first 4 bytes of the BSON block is the size
+	b.handle.Seek(int64(offset), io.SeekStart)
 	sizeBytes := []byte{0x00, 0x00, 0x00, 0x00}
-	_, err := b.handle.Read(sizeBytes)
+	_, err = b.handle.Read(sizeBytes)
 	if err != nil {
 		return nil, err
 	}
 	bSize := int32(binary.LittleEndian.Uint32(sizeBytes))
 	b.handle.Seek(-4, io.SeekCurrent)
 	rowData := make([]byte, bSize)
-	b.handle.Read(rowData)
+	b.handle.Read(rowData) //read the full block
 	bd := bson.Raw(rowData)
 	columns := bd.Index(0).Value().Array()
 	out := map[string]any{}
@@ -159,31 +183,48 @@ func (b *BsonTable) Get(offset int64, fields ...string) (map[string]any, error) 
 	return out, nil
 }
 
-func (b *BsonTable) ListOffsets() (chan int64, error) {
-	out := make(chan int64, 10)
+func (b *BSONTable) colUnpack(v bson.RawElement, colType FieldType) any {
+	if colType == String {
+		return v.Value().StringValue()
+	} else if colType == Double {
+		return v.Value().Double()
+	} else if colType == Int64 {
+		return v.Value().Int64()
+	}
+	return nil
+}
 
+func (b *BSONTable) getBlockPos(id []byte) (uint64, uint64, error) {
+	idKey := NewIDKey(id)
+	val, closer, err := b.db.Get(idKey)
+	if err != nil {
+		return 0, 0, err
+	}
+	offset, size := ParsePosValue(val)
+	closer.Close()
+	return offset, size, nil
+}
+
+func (b *BSONTable) Keys() (chan []byte, error) {
+	out := make(chan []byte, 10)
 	go func() {
 		defer close(out)
-		b.indexLock.Lock()
-		defer b.indexLock.Unlock()
-		b.indexHandle.Seek(0, io.SeekStart)
-		for {
-			buf := make([]byte, 8)
-			_, err := b.indexHandle.Read(buf)
-			if err == io.EOF {
-				break
-			}
-			var offset = binary.LittleEndian.Uint64(buf)
-			v := int64(offset)
-			if v >= 0 {
-				out <- v
-			}
+		prefix := []byte{keyPrefix}
+		it, _ := b.db.NewIter(&pebble.IterOptions{LowerBound: prefix})
+		for ; it.Valid() && bytes.HasPrefix(it.Key(), prefix); it.Next() {
+			out <- ParseIDKey(it.Key())
 		}
 	}()
-
 	return out, nil
 }
 
+func (b *BSONTable) Scan(filter []FieldFilter, fields ...string) chan map[string]any {
+	//TODO
+
+	return nil
+}
+
+/*
 func getUint64(f *os.File, pos int64) (uint64, error) {
 	f.Seek(pos, io.SeekStart)
 	buf := make([]byte, 8)
@@ -239,54 +280,58 @@ func (b *BsonTable) OffsetToPosition(offset int64) (int64, error) {
 	}
 	return 0, fmt.Errorf("not found")
 }
+*/
 
-func (b *BsonTable) Delete(offset int64) error {
+func (b *BSONTable) Delete(id []byte) error {
 	//Do something here
-	pos, err := b.OffsetToPosition(offset)
-	if err != nil {
-		return err
-	}
-	b.indexLock.Lock()
-	defer b.indexLock.Unlock()
-	b.indexHandle.Seek(pos<<3, io.SeekStart)
-	buf := make([]byte, 8)
-	binary.LittleEndian.PutUint64(buf, uint64(offset)|markBit)
-	b.indexHandle.Write(buf)
+	/*
+		pos, err := b.OffsetToPosition(offset)
+		if err != nil {
+			return err
+		}
+		b.indexLock.Lock()
+		defer b.indexLock.Unlock()
+		b.indexHandle.Seek(pos<<3, io.SeekStart)
+		buf := make([]byte, 8)
+		binary.LittleEndian.PutUint64(buf, uint64(offset)|markBit)
+		b.indexHandle.Write(buf)
+	*/
 	return nil
 }
 
-func (b *BsonTable) Compact() error {
-	b.indexLock.Lock()
-	defer b.indexLock.Unlock()
+func (b *BSONTable) Compact() error {
+	/*
+		b.indexLock.Lock()
+		defer b.indexLock.Unlock()
 
-	info, err := b.indexHandle.Stat()
-	if err != nil {
-		return err
-	}
-	size := info.Size()
-	count := size / 8
-
-	sampleSize := int64(10)
-
-	sampleStart := count - sampleSize
-	if sampleStart < 0 {
-		sampleStart = 0
-	}
-	moveSet := []int64{}
-
-	b.indexHandle.Seek(sampleStart<<3, io.SeekStart)
-	for curSample := sampleStart; curSample < count; curSample++ {
-		buf := make([]byte, 8)
-		b.indexHandle.Read(buf)
-		val := binary.LittleEndian.Uint64(buf)
-		if val&markBit == markBit {
-
-		} else {
-			moveSet = append(moveSet, int64(val))
+		info, err := b.indexHandle.Stat()
+		if err != nil {
+			return err
 		}
-	}
+		size := info.Size()
+		count := size / 8
 
-	fmt.Printf("readytomove: %#v\n", moveSet)
+		sampleSize := int64(10)
 
+		sampleStart := count - sampleSize
+		if sampleStart < 0 {
+			sampleStart = 0
+		}
+		moveSet := []int64{}
+
+		b.indexHandle.Seek(sampleStart<<3, io.SeekStart)
+		for curSample := sampleStart; curSample < count; curSample++ {
+			buf := make([]byte, 8)
+			b.indexHandle.Read(buf)
+			val := binary.LittleEndian.Uint64(buf)
+			if val&markBit == markBit {
+
+			} else {
+				moveSet = append(moveSet, int64(val))
+			}
+		}
+
+		fmt.Printf("readytomove: %#v\n", moveSet)
+	*/
 	return nil
 }

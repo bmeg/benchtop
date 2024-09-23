@@ -5,17 +5,28 @@ import (
 	"go.mongodb.org/mongo-driver/bson/bsontype"
 )
 
-type TableStore interface {
-	Close()
-	GetColumns() []ColumnDef
-	Add(row map[string]any) (int64, error)
-	Get(offset int64, fields ...string) (map[string]any, error)
-	ListOffsets() (chan int64, error)
+type FieldFilter struct {
+	Field string
+	Value string
+}
 
-	OffsetToPosition(offset int64) (int64, error)
+type TableDriver interface {
+	New(name string, columns []ColumnDef) (TableStore, error)
+	Get(name string) (TableStore, error)
+}
+
+type TableStore interface {
+	GetColumns() []ColumnDef
+	Add(key []byte, row map[string]any) error
+	Get(key []byte, fields ...string) (map[string]any, error)
+	Delete(key []byte) error
+
+	Scan(filter []FieldFilter, fields ...string) chan map[string]any
+
+	Keys() (chan []byte, error)
 
 	Compact() error
-	Delete(offset int64) error
+	Close()
 }
 
 type FieldType bsontype.Type

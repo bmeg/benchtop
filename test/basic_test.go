@@ -25,7 +25,12 @@ var data = map[string]map[string]any{
 
 func TestInsert(t *testing.T) {
 
-	ts, err := benchtop.Create("test.data", []benchtop.ColumnDef{
+	dr, err := benchtop.NewBSONDriver("test.data")
+	if err != nil {
+		t.Error(err)
+	}
+
+	ts, err := dr.New("table_1", []benchtop.ColumnDef{
 		{Path: "field1", Type: benchtop.Double},
 		{Path: "name", Type: benchtop.String},
 	})
@@ -34,18 +39,15 @@ func TestInsert(t *testing.T) {
 		t.Error(err)
 	}
 
-	offsets := map[string]int64{}
-
 	for k, r := range data {
-		o, err := ts.Add(r)
+		err := ts.Add([]byte(k), r)
 		if err != nil {
 			t.Error(err)
 		}
-		offsets[k] = o
 	}
 
-	for k, o := range offsets {
-		post, err := ts.Get(o)
+	for k := range data {
+		post, err := ts.Get([]byte(k))
 		fmt.Printf("%#v\n", post)
 		if err != nil {
 			t.Error(err)
@@ -55,39 +57,18 @@ func TestInsert(t *testing.T) {
 			origVal := orig[key]
 			postVal := post[key]
 			if origVal != postVal {
-				t.Errorf("offset: %d: %s != %s", o, origVal, postVal)
+				t.Errorf("offset: %s: %s != %s", k, origVal, postVal)
 			}
 		}
 	}
-
-	for k, o := range offsets {
-		post, err := ts.Get(o, "name")
-		fmt.Printf("%#v\n", post)
-		if err != nil {
-			t.Error(err)
-		}
-		orig := data[k]
-		for key := range post {
-			if key != "name" {
-				t.Errorf("Get Select returned field %s", key)
-			} else {
-				origVal := orig[key]
-				postVal := post[key]
-				if origVal != postVal {
-					t.Errorf("offset: %d: %s != %s", o, origVal, postVal)
-				}
-			}
-		}
-	}
-
-	offsetList, err := ts.ListOffsets()
+	keyList, err := ts.Keys()
 	if err != nil {
 		t.Error(err)
 	}
 	oCount := 0
-	for i := range offsetList {
+	for i := range keyList {
 		oCount++
-		fmt.Printf("%d\n", i)
+		fmt.Printf("%s\n", i)
 	}
 	fmt.Printf("Offset count: %d\n", oCount)
 
