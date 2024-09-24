@@ -21,15 +21,30 @@ Written using [Pebble](https://github.com/cockroachdb/)
 
 The user ID is provided by the user, but should be checked to ensure it is unique. 
 
+**Value**
+|bytes|0:4|4:...|
+|-|-|-------|
+|type|[]byte|
+|Desc|BSON formatted Column definitions|
+
+First is the Table system ID, which is used as a prefix during key lookup. Then rest 
+of the bytes describe a list of columns and their data types.
+
+#### Table ID
+**Key**
+|bytes|0|5:...     |
+|-|-|---------|
+|type|T|uint32|
+|Desc|prefix|system table ID|
+
+The generated ID for a table. 
 
 **Value**
 |bytes|0:4|4:...|
 |-|-|-------|
-|type|uint32[]byte|
-|Desc|table system ID|BSON formatted Column definitions|
+|type|[]byte|
+|Desc|User ID of table|
 
-First is the Table system ID, which is used as a prefix during key lookup. Then rest 
-of the bytes describe a list of columns and their data types.
 
 #### ID Entries
 These map the user specified ID to a data block specified with offset and size.

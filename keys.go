@@ -1,32 +1,66 @@
 package benchtop
 
-import "encoding/binary"
+import (
+	"encoding/binary"
+)
 
-var keyPrefix = byte('k')
+var idPrefix = byte('T')
+var namePrefix = byte('t')
 var posPrefix = byte('p')
 
-func NewIDKey(id []byte) []byte {
+func NewNameKey(id []byte) []byte {
 	out := make([]byte, len(id)+1)
-	out[0] = keyPrefix
+	out[0] = namePrefix
 	for i := 0; i < len(id); i++ {
 		out[i+1] = id[i]
 	}
 	return out
 }
 
-func ParseIDKey(key []byte) []byte {
-	return key[1:]
-}
-
-func NewPosKey(pos uint64) []byte {
-	out := make([]byte, 9)
-	out[0] = posPrefix
-	binary.LittleEndian.PutUint64(out[1:], pos)
+func ParseNameKey(key []byte) []byte {
+	//duplicate the key, because pebble reuses memory
+	out := make([]byte, len(key)-1)
+	for i := 0; i < len(key)-1; i++ {
+		out[i] = key[i+1]
+	}
 	return out
 }
 
-func ParsePosKey(key []byte) uint64 {
-	return binary.LittleEndian.Uint64(key[1:])
+func NewIDKey(id uint32) []byte {
+	out := make([]byte, 5)
+	out[0] = idPrefix
+	binary.LittleEndian.PutUint32(out[1:], id)
+	return out
+}
+
+func ParseIDKey(key []byte) uint32 {
+	return binary.LittleEndian.Uint32(key[1:])
+}
+
+func NewPosKey(table uint32, name []byte) []byte {
+	out := make([]byte, 5+len(name))
+	out[0] = posPrefix
+	binary.LittleEndian.PutUint32(out[1:], table)
+	for i := 0; i < len(name); i++ {
+		out[i+5] = name[i]
+	}
+	return out
+}
+
+func ParsePosKey(key []byte) (uint32, []byte) {
+	//duplicate the key, because pebble reuses memory
+	out := make([]byte, len(key)-5)
+	for i := 0; i < len(key)-5; i++ {
+		out[i] = key[i+5]
+	}
+	return binary.LittleEndian.Uint32(key[1:]), out
+}
+
+func NewPosKeyPrefix(table uint32) []byte {
+	out := make([]byte, 5)
+	out[0] = posPrefix
+	binary.LittleEndian.PutUint32(out[1:], table)
+	return out
 }
 
 func NewPosValue(offset uint64, size uint64) []byte {

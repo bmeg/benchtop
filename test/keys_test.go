@@ -1,4 +1,4 @@
-package benchtop_test
+package test
 
 import (
 	"testing"
@@ -9,8 +9,8 @@ import (
 func TestIDParse(t *testing.T) {
 
 	id := "key-0001"
-	key := benchtop.NewIDKey([]byte(id))
-	pID := benchtop.ParseIDKey(key)
+	key := benchtop.NewNameKey([]byte(id))
+	pID := benchtop.ParseNameKey(key)
 
 	if id != string(pID) {
 		t.Errorf("%s != %s", id, pID)
@@ -19,11 +19,17 @@ func TestIDParse(t *testing.T) {
 }
 
 func TestPosKeyParse(t *testing.T) {
-	pos := uint64(12345)
-	key := benchtop.NewPosKey(pos)
-	pPos := benchtop.ParsePosKey(key)
-	if pos != pPos {
-		t.Errorf("%d != %d", pos, pPos)
+	tableId := uint32(5)
+	name := []byte("MyKey")
+
+	key := benchtop.NewPosKey(tableId, name)
+	nTableId, nName := benchtop.ParsePosKey(key)
+	if tableId != nTableId {
+		t.Errorf("%d != %d", tableId, nTableId)
+	}
+	if string(name) != string(nName) {
+		t.Errorf("%d != %d", name, nName)
+		t.Errorf("%s != %s", string(name), string(nName))
 	}
 }
 

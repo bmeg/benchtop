@@ -19,15 +19,16 @@ type BSONDriver struct {
 	base string
 	db   *pebble.DB
 
-	tables sync.Map
+	lock   sync.Mutex
+	tables map[string]*BSONTable
 }
 
 type BSONTable struct {
-	columns   []ColumnDef
-	columnMap map[string]int
-	handle    *os.File
-	db        *pebble.DB
-
+	columns    []ColumnDef
+	columnMap  map[string]int
+	handle     *os.File
+	db         *pebble.DB
+	tableId    uint32
 	handleLock *sync.Mutex
 }
 
@@ -48,32 +49,89 @@ func NewBSONDriver(path string) (TableDriver, error) {
 	if fileExists(tableDir) {
 		os.Mkdir(tableDir, 0700)
 	}
-	return &BSONDriver{base: path, db: db}, nil
+	return &BSONDriver{base: path, db: db, tables: map[string]*BSONTable{}}, nil
+}
+
+func (dr *BSONDriver) Close() {
+	for _, i := range dr.tables {
+		i.handle.Close()
+	}
+	dr.db.Close()
 }
 
 func (dr *BSONDriver) Get(name string) (TableStore, error) {
-	d, ok := dr.tables.Load(name)
-	if ok {
-		return d.(*BSONTable), nil
+	dr.lock.Lock()
+	defer dr.lock.Unlock()
+
+	if x, ok := dr.tables[name]; ok {
+		return x, nil
 	}
-	return nil, fmt.Errorf("not found")
+
+	nkey := NewNameKey([]byte(name))
+	value, closer, err := dr.db.Get(nkey)
+	if err != nil {
+		return nil, err
+	}
+	tinfo := TableInfo{}
+	bson.Unmarshal(value, &tinfo)
+	closer.Close()
+
+	tPath := filepath.Join(dr.base, "TABLES", name)
+
+	f, err := os.Open(tPath)
+	if err != nil {
+		return nil, err
+	}
+
+	out := &BSONTable{
+		columns: tinfo.Columns,
+		db:      dr.db,
+		tableId: tinfo.Id,
+		handle:  f,
+	}
+	dr.tables[name] = out
+
+	return out, nil
 }
 
 func (dr *BSONDriver) New(name string, columns []ColumnDef) (TableStore, error) {
-	out := BSONTable{columns: columns, handleLock: &sync.Mutex{}, columnMap: map[string]int{}}
+	dr.lock.Lock()
+	defer dr.lock.Unlock()
+
+	out := &BSONTable{columns: columns, handleLock: &sync.Mutex{}, columnMap: map[string]int{}}
 	tPath := filepath.Join(dr.base, "TABLES", name)
 	f, err := os.Create(tPath)
 	if err != nil {
 		return nil, err
 	}
 	out.handle = f
-
 	for n, d := range columns {
 		out.columnMap[d.Path] = n
 	}
+
+	//get unique id
+	prefix := []byte{idPrefix}
+	it, _ := dr.db.NewIter(&pebble.IterOptions{LowerBound: prefix})
+	maxID := uint32(0)
+	for ; it.Valid() && bytes.HasPrefix(it.Key(), prefix); it.Next() {
+		value := ParseIDKey(it.Key())
+		maxID = value
+	}
+	it.Close()
+
+	newID := maxID + 1
+	idKey := NewIDKey(newID)
+	dr.db.Set(idKey, []byte(name), nil)
+
+	tdata, _ := bson.Marshal(TableInfo{Columns: columns, Id: newID})
+
+	nkey := NewNameKey([]byte(name))
+
+	dr.db.Set(nkey, tdata, nil)
+
 	out.db = dr.db
-	dr.tables.Store(name, out)
-	return &out, nil
+	dr.tables[name] = out
+	return out, nil
 }
 
 func (b *BSONTable) Close() {
@@ -95,11 +153,11 @@ func checkType(val any, t FieldType) (any, error) {
 			return val, fmt.Errorf("not int64")
 		}
 	}
-
 	return val, nil
 }
 
 func (b *BSONTable) Add(id []byte, entry map[string]any) error {
+	//pack named columns
 	columns := []any{}
 	for _, c := range b.columns {
 		if e, ok := entry[c.Path]; ok {
@@ -112,6 +170,7 @@ func (b *BSONTable) Add(id []byte, entry map[string]any) error {
 			columns = append(columns, nil)
 		}
 	}
+	//pack all other data
 	other := map[string]any{}
 	for k, v := range entry {
 		if _, ok := b.columnMap[k]; !ok {
@@ -122,6 +181,7 @@ func (b *BSONTable) Add(id []byte, entry map[string]any) error {
 	if err != nil {
 		return err
 	}
+	//append to end of block file
 	b.handleLock.Lock()
 	defer b.handleLock.Unlock()
 	offset, err := b.handle.Seek(0, io.SeekEnd)
@@ -131,8 +191,8 @@ func (b *BSONTable) Add(id []byte, entry map[string]any) error {
 	b.handle.Write(bData)
 
 	value := NewPosValue(uint64(offset), uint64(len(bData)))
-	idKey := NewIDKey(id)
-	b.db.Set(idKey, value, nil)
+	posKey := NewPosKey(b.tableId, id)
+	b.db.Set(posKey, value, nil)
 
 	return nil
 }
@@ -195,7 +255,7 @@ func (b *BSONTable) colUnpack(v bson.RawElement, colType FieldType) any {
 }
 
 func (b *BSONTable) getBlockPos(id []byte) (uint64, uint64, error) {
-	idKey := NewIDKey(id)
+	idKey := NewPosKey(b.tableId, id)
 	val, closer, err := b.db.Get(idKey)
 	if err != nil {
 		return 0, 0, err
@@ -209,11 +269,15 @@ func (b *BSONTable) Keys() (chan []byte, error) {
 	out := make(chan []byte, 10)
 	go func() {
 		defer close(out)
-		prefix := []byte{keyPrefix}
+		prefix := NewPosKeyPrefix(b.tableId)
 		it, _ := b.db.NewIter(&pebble.IterOptions{LowerBound: prefix})
+		it.SeekGE(prefix)
 		for ; it.Valid() && bytes.HasPrefix(it.Key(), prefix); it.Next() {
-			out <- ParseIDKey(it.Key())
+			_, value := ParsePosKey(it.Key())
+			fmt.Printf("Key Parse: %s %s\n", it.Key(), value)
+			out <- value
 		}
+		it.Close()
 	}()
 	return out, nil
 }
@@ -282,20 +346,10 @@ func (b *BsonTable) OffsetToPosition(offset int64) (int64, error) {
 }
 */
 
-func (b *BSONTable) Delete(id []byte) error {
-	//Do something here
-	/*
-		pos, err := b.OffsetToPosition(offset)
-		if err != nil {
-			return err
-		}
-		b.indexLock.Lock()
-		defer b.indexLock.Unlock()
-		b.indexHandle.Seek(pos<<3, io.SeekStart)
-		buf := make([]byte, 8)
-		binary.LittleEndian.PutUint64(buf, uint64(offset)|markBit)
-		b.indexHandle.Write(buf)
-	*/
+func (b *BSONTable) Delete(name []byte) error {
+	posKey := NewPosKey(b.tableId, name)
+	b.db.Delete(posKey, nil)
+	//TODO: mark the space so it can be reclaimed
 	return nil
 }
 

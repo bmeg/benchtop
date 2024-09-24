@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/bmeg/benchtop"
+	"github.com/bmeg/benchtop/util"
 )
 
 var data = map[string]map[string]any{
@@ -23,9 +24,42 @@ var data = map[string]map[string]any{
 	},
 }
 
-func TestInsert(t *testing.T) {
+func TestOpenClose(t *testing.T) {
+	name := "test.data" + util.RandomString(5)
+	dr, err := benchtop.NewBSONDriver(name)
+	if err != nil {
+		t.Error(err)
+	}
 
-	dr, err := benchtop.NewBSONDriver("test.data")
+	_, err = dr.New("table_1", []benchtop.ColumnDef{
+		{Path: "field1", Type: benchtop.Double},
+		{Path: "name", Type: benchtop.String},
+	})
+
+	if err != nil {
+		t.Error(err)
+	}
+	dr.Close()
+
+	or, err := benchtop.NewBSONDriver(name)
+	if err != nil {
+		t.Error(err)
+	}
+	ot, err := or.Get("table_1")
+	if err != nil {
+		t.Error(err)
+	}
+
+	if len(ot.GetColumns()) != 2 {
+		t.Errorf("Incorrect re-open")
+	}
+	or.Close()
+}
+
+func TestInsert(t *testing.T) {
+	dbname := "test.data" + util.RandomString(5)
+
+	dr, err := benchtop.NewBSONDriver(dbname)
 	if err != nil {
 		t.Error(err)
 	}
@@ -57,7 +91,7 @@ func TestInsert(t *testing.T) {
 			origVal := orig[key]
 			postVal := post[key]
 			if origVal != postVal {
-				t.Errorf("offset: %s: %s != %s", k, origVal, postVal)
+				t.Errorf("key value: %s: %s != %s", k, origVal, postVal)
 			}
 		}
 	}
@@ -68,11 +102,15 @@ func TestInsert(t *testing.T) {
 	oCount := 0
 	for i := range keyList {
 		oCount++
+		if _, ok := data[string(i)]; !ok {
+			t.Errorf("Unknown key returned: %s", i)
+		}
 		fmt.Printf("%s\n", i)
 	}
-	fmt.Printf("Offset count: %d\n", oCount)
+	if oCount != len(data) {
+		t.Errorf("Incorrect key count %d != %d", oCount, len(data))
+	}
 
 	ts.Compact()
-
-	ts.Close()
+	dr.Close()
 }

@@ -10,9 +10,20 @@ type FieldFilter struct {
 	Value string
 }
 
+type TableInfo struct {
+	Id      uint32      `json:"id"`
+	Columns []ColumnDef `json:"columns"`
+}
+
+type ColumnDef struct {
+	Path string    `json:"path"`
+	Type FieldType `json:"type"`
+}
+
 type TableDriver interface {
 	New(name string, columns []ColumnDef) (TableStore, error)
 	Get(name string) (TableStore, error)
+	Close()
 }
 
 type TableStore interface {
@@ -36,8 +47,3 @@ const (
 	Int64  FieldType = FieldType(bson.TypeInt64)
 	String FieldType = FieldType(bson.TypeString)
 )
-
-type ColumnDef struct {
-	Path string    `json:"path"`
-	Type FieldType `json:"type"`
-}
