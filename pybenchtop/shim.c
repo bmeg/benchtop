@@ -8,5 +8,5 @@ int _go_PyDict_Check(PyObject *p) {
 }
 
 char * _go_PyStr_AsString(PyObject *p) {
-    return PyUnicode_AsUTF8(p);
+    return (char *)PyUnicode_AsUTF8(p);
 }

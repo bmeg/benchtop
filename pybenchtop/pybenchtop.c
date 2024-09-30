@@ -10,7 +10,8 @@
 #include "structmember.h"
 #include "pybenchtop.h"
 
-// Benchtop Driver class
+
+//Header stuff
 
 typedef struct {
     PyObject_HEAD
@@ -18,19 +19,30 @@ typedef struct {
     uintptr_t driver;
 } Driver;
 
+typedef struct {
+    PyObject_HEAD
+    //table here
+    uintptr_t table;
+} Table;
 
-static void Driver_dealloc(Driver* self){
-    if (self->driver != 0) {
-        DriverClose(self->driver);
-    }
-    //self->ob_type->tp_free((PyObject*)self);
-}
+static PyTypeObject TableType;
+static int Table_init(Table *self, PyObject *args, PyObject *kwds);
+
+// Benchtop Driver class
 
 static PyObject * Driver_new(PyTypeObject *type, PyObject *args, PyObject *kwds) {
     Driver *self;
     self = (Driver *)type->tp_alloc(type, 0);
     self->driver = 0;
     return (PyObject *)self;
+}
+
+static void Driver_dealloc(Driver* self){
+    if (self->driver != 0) {
+        DriverClose(self->driver);
+    }
+    self->driver = 0;
+    //self->ob_type->tp_free((PyObject*)self);
 }
 
 static int Driver_init(Driver *self, PyObject *args, PyObject *kwds) {
@@ -53,9 +65,27 @@ static PyObject * Driver_newtable(Driver *self, PyObject *args, PyObject *kwds) 
 
     uintptr_t table = NewTable(self->driver, tableName, columnDef);
 
-    return PyUnicode_FromFormat("Cool test bro");
+    PyObject *argList = Py_BuildValue("(Os)", self, tableName);
+    printf("Calling Object!\n");
+    //PyObject *obj = PyObject_CallObject(&TableType, argList);
+
+    PyObject *obj = PyObject_New(Table, &TableType);
+    if (Table_init(obj, argList, NULL) != 0) {
+        printf("table init error\n");
+    }
+
+    Py_DECREF(argList);
+    printf("Returning objct\n");
+    return obj;
 }
 
+static PyObject * Driver_close(Driver *self, PyObject *args, PyObject *kwds) {
+    if (self->driver != 0) {
+        DriverClose(self->driver);
+    }
+    self->driver = 0;
+    Py_RETURN_NONE;
+}
 
 static PyMemberDef Driver_members[] = {
     {NULL}  /* Sentinel */
@@ -63,6 +93,7 @@ static PyMemberDef Driver_members[] = {
 
 static PyMethodDef Driver_methods[] = {
     {"new", (PyCFunction)Driver_newtable, METH_VARARGS, "Generate a new table",},
+    {"close", (PyCFunction)Driver_close, METH_VARARGS, "Close database",},
     {NULL}  /* Sentinel */
 };
 
@@ -84,10 +115,87 @@ static PyTypeObject DriverType = {
 // Table interface
 
 
-static PyObject * hello_world(PyObject *self, PyObject *args) {
-    HelloWorld();
-    return PyLong_FromLongLong(0);
+
+static PyObject * Table_new(PyTypeObject *type, PyObject *args, PyObject *kwds) {
+    printf("Calling table new\n");
+    Table *self;
+    self = (Table *)type->tp_alloc(type, 0);
+    self->table = 0;
+    return (PyObject *)self;
 }
+
+static void Table_dealloc(Table* self){
+    if (self->table != 0) {
+        CloseTable(self->table);
+    }
+    //self->ob_type->tp_free((PyObject*)self);
+}
+
+static int Table_init(Table *self, PyObject *args, PyObject *kwds) {
+    printf("Calling table init\n");
+    char *name;
+    PyObject *pyObj;
+
+    if (! PyArg_ParseTuple(args, "Os", &pyObj, &name))
+        return -1;
+
+    //check pyobject to ensure it is a driver
+    Driver *dr = (Driver *)pyObj;
+
+    uintptr_t tb = GetTable(dr->driver, name);
+    if (tb == 0) {
+        printf("null table returned\n");
+    }
+    self->table = tb;
+    return 0;
+}
+
+static PyObject * Table_add(Table *self, PyObject *args, PyObject *kwds) {
+    char *key;
+    PyObject *data;
+
+    if (! PyArg_ParseTuple(args, "sO", &key, &data))
+       Py_RETURN_NONE;
+
+    AddDataTable(self->table, key, data);
+    return PyUnicode_FromFormat("Running table add");
+}
+
+static PyObject * Table_get(Table *self, PyObject *args, PyObject *kwds) {
+    char *key;
+    
+    if (! PyArg_ParseTuple(args, "s", &key))
+        Py_RETURN_NONE;
+
+    PyObject *data = GetDataTable(self->table, key);
+    return PyUnicode_FromFormat("Running table get");
+}
+
+static PyMemberDef Table_members[] = {
+    {NULL}  /* Sentinel */
+};
+
+static PyMethodDef Table_methods[] = {
+    {"add", (PyCFunction)Table_add, METH_VARARGS, "Add data to table",},
+    {"get", (PyCFunction)Table_get, METH_VARARGS, "Get data from table",},
+    {NULL}  /* Sentinel */
+};
+
+
+static PyTypeObject TableType = {
+    PyVarObject_HEAD_INIT(NULL, 0)
+    .tp_name = "pybenchtop.Table",
+    .tp_doc = "Custom objects",
+    .tp_basicsize = sizeof(Table),
+    .tp_itemsize = 0,
+    .tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE ,
+    .tp_new = Table_new,
+    .tp_init = (initproc) Table_init,
+    .tp_dealloc = (destructor) Table_dealloc,
+    .tp_members = Table_members,
+    .tp_methods = Table_methods,
+};
+
 
 // Add methods to the class here
 static PyMethodDef BenchMethods[] = {

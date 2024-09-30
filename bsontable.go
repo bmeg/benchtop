@@ -135,8 +135,9 @@ func (dr *BSONDriver) New(name string, columns []ColumnDef) (TableStore, error) 
 }
 
 func (b *BSONTable) Close() {
-	b.handle.Close()
-	b.db.Close()
+	//because the table could be opened by other threads, don't actually close
+	//b.handle.Close()
+	//b.db.Close()
 }
 
 func (b *BSONTable) GetColumns() []ColumnDef {

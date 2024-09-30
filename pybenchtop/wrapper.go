@@ -75,14 +75,62 @@ func NewTable(d uintptr, name *C.char, def *C.PyObject) uintptr {
 	}
 	dr := cgo.Handle(d).Value().(benchtop.TableDriver)
 
-	table := dr.New(gname, cdef)
+	table, err := dr.New(gname, cdef)
+	if err != nil {
+		return 0
+	}
 	out := uintptr(cgo.NewHandle(table))
 	return out
 }
 
-//export HelloWorld
-func HelloWorld() {
-	fmt.Printf("Hello world!!\n")
+//export GetTable
+func GetTable(d uintptr, name *C.char) uintptr {
+	dr := cgo.Handle(d).Value().(benchtop.TableDriver)
+	table, err := dr.Get(C.GoString(name))
+	if err != nil {
+		return 0
+	}
+	return uintptr(cgo.NewHandle(table))
+}
+
+//export CloseTable
+func CloseTable(tb uintptr) {
+	table := cgo.Handle(tb).Value().(benchtop.TableStore)
+	table.Close()
+}
+
+//export AddDataTable
+func AddDataTable(tb uintptr, name *C.char, obj *C.PyObject) {
+	data := PyDict2Go(obj)
+	table := cgo.Handle(tb).Value().(benchtop.TableStore)
+	table.Add([]byte(C.GoString(name)), data)
+}
+
+//export GetDataTable
+func GetDataTable(t uintptr, name *C.char) *C.PyObject {
+	return nil
+}
+
+func PyDict2Go(obj *C.PyObject) map[string]any {
+	out := map[string]any{}
+	items := C.PyDict_Items(obj)
+	itemCount := C.PyList_Size(items)
+	for i := 0; i < int(itemCount); i++ {
+		it := C.PyList_GetItem(items, C.Py_ssize_t(i))
+		key := C.PyTuple_GetItem(it, 0)
+		var keyBytes *C.char = C._go_PyStr_AsString(key)
+		keyStr := C.GoString(keyBytes)
+		value := C.PyTuple_GetItem(it, 1)
+		out[keyStr] = PyObject2Go(value)
+	}
+	return out
+}
+
+func PyObject2Go(obj *C.PyObject) any {
+	if C._go_PyDict_Check(obj) != 0 {
+		return PyDict2Go(obj)
+	} //TODO: other types
+	return nil
 }
 
 func main() {}
