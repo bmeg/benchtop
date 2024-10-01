@@ -7,6 +7,14 @@ int _go_PyDict_Check(PyObject *p) {
     return PyDict_Check(p);
 }
 
-char * _go_PyStr_AsString(PyObject *p) {
+int _go_PyUnicode_Check(PyObject *p) {
+    return PyUnicode_Check(p);
+}
+
+int _go_PyFloat_Check(PyObject *p) {
+    return PyFloat_Check(p);
+}
+
+char * _go_PyUnicode_AsUTF8(PyObject *p) {
     return (char *)PyUnicode_AsUTF8(p);
 }

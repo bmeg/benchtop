@@ -54,7 +54,7 @@ func NewTable(d uintptr, name *C.char, def *C.PyObject) uintptr {
 			it := C.PyList_GetItem(items, C.Py_ssize_t(i))
 			fmt.Printf("\tItem %#v\n", it)
 			key := C.PyTuple_GetItem(it, 0)
-			var keyBytes *C.char = C._go_PyStr_AsString(key)
+			var keyBytes *C.char = C._go_PyUnicode_AsUTF8(key)
 			keyStr := C.GoString(keyBytes)
 			fmt.Printf("Key: %s\n", keyStr)
 
@@ -62,7 +62,7 @@ func NewTable(d uintptr, name *C.char, def *C.PyObject) uintptr {
 			if C.PyType_Check(value) != 0 {
 				// typeName := C.PyType_GetName(value) // added in 3.12
 				valueName := C.PyObject_GetAttrString(value, nameField)
-				valueNameCStr := C._go_PyStr_AsString((*C.PyObject)(valueName))
+				valueNameCStr := C._go_PyUnicode_AsUTF8((*C.PyObject)(valueName))
 				valueNameStr := C.GoString(valueNameCStr)
 				if valueNameStr == "float" {
 					fmt.Printf("Type float\n")
@@ -107,8 +107,13 @@ func AddDataTable(tb uintptr, name *C.char, obj *C.PyObject) {
 }
 
 //export GetDataTable
-func GetDataTable(t uintptr, name *C.char) *C.PyObject {
-	return nil
+func GetDataTable(tb uintptr, name *C.char) *C.PyObject {
+	table := cgo.Handle(tb).Value().(benchtop.TableStore)
+	data, err := table.Get([]byte(C.GoString(name)))
+	if err != nil {
+		return nil
+	}
+	return Go2PyObject(data)
 }
 
 func PyDict2Go(obj *C.PyObject) map[string]any {
@@ -118,7 +123,7 @@ func PyDict2Go(obj *C.PyObject) map[string]any {
 	for i := 0; i < int(itemCount); i++ {
 		it := C.PyList_GetItem(items, C.Py_ssize_t(i))
 		key := C.PyTuple_GetItem(it, 0)
-		var keyBytes *C.char = C._go_PyStr_AsString(key)
+		var keyBytes *C.char = C._go_PyUnicode_AsUTF8(key)
 		keyStr := C.GoString(keyBytes)
 		value := C.PyTuple_GetItem(it, 1)
 		out[keyStr] = PyObject2Go(value)
@@ -129,8 +134,33 @@ func PyDict2Go(obj *C.PyObject) map[string]any {
 func PyObject2Go(obj *C.PyObject) any {
 	if C._go_PyDict_Check(obj) != 0 {
 		return PyDict2Go(obj)
+	} else if C._go_PyUnicode_Check(obj) != 0 {
+		s := C._go_PyUnicode_AsUTF8(obj)
+		return C.GoString(s)
+	} else if C._go_PyFloat_Check(obj) != 0 {
+		return C.PyFloat_AsDouble(obj)
 	} //TODO: other types
 	return nil
+}
+
+func Go2PyObject(data any) *C.PyObject {
+
+	switch value := data.(type) {
+	case map[string]any:
+		out := C.PyDict_New()
+		for k, v := range value {
+			vObj := Go2PyObject(v)
+			C.PyDict_SetItemString(out, C.CString(k), vObj)
+		}
+		return out
+	case float32:
+		return C.PyFloat_FromDouble(C.double(float64(value)))
+	case float64:
+		return C.PyFloat_FromDouble(C.double(float64(value)))
+	case string:
+		return C.PyUnicode_FromString(C.CString(value))
+	}
+	return C.Py_None
 }
 
 func main() {}

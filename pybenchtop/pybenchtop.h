@@ -90,7 +90,7 @@ extern GoUintptr NewTable(GoUintptr d, char* name, PyObject* def);
 extern GoUintptr GetTable(GoUintptr d, char* name);
 extern void CloseTable(GoUintptr tb);
 extern void AddDataTable(GoUintptr tb, char* name, PyObject* obj);
-extern PyObject* GetDataTable(GoUintptr t, char* name);
+extern PyObject* GetDataTable(GoUintptr tb, char* name);
 
 #ifdef __cplusplus
 }

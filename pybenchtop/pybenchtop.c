@@ -168,7 +168,7 @@ static PyObject * Table_get(Table *self, PyObject *args, PyObject *kwds) {
         Py_RETURN_NONE;
 
     PyObject *data = GetDataTable(self->table, key);
-    return PyUnicode_FromFormat("Running table get");
+    return data;
 }
 
 static PyMemberDef Table_members[] = {
