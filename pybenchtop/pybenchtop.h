@@ -21,12 +21,10 @@ typedef struct { const char *p; ptrdiff_t n; } _GoString_;
 
 #line 3 "wrapper.go"
 
-
  #define Py_LIMITED_API
  #include <Python.h>
  #include <stdint.h> // for uintptr_t
  #include "shim.h"
- int PyArg_ParseTuple_LL(PyObject *, long long *, long long *);
 
 #line 1 "cgo-generated-wrapper"
 

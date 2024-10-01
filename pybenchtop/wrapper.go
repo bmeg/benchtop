@@ -1,12 +1,10 @@
 package main
 
-// #cgo pkg-config: python3
-// #cgo LDFLAGS: -lpython3.12
+// #cgo pkg-config: python3-embed
 // #define Py_LIMITED_API
 // #include <Python.h>
 // #include <stdint.h> // for uintptr_t
 // #include "shim.h"
-// int PyArg_ParseTuple_LL(PyObject *, long long *, long long *);
 import "C"
 
 import (
@@ -15,6 +13,7 @@ import (
 	"unsafe"
 
 	"github.com/bmeg/benchtop"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
 //export NewDriver
@@ -59,7 +58,7 @@ func NewTable(d uintptr, name *C.char, def *C.PyObject) uintptr {
 			fmt.Printf("Key: %s\n", keyStr)
 
 			value := C.PyTuple_GetItem(it, 1)
-			if C.PyType_Check(value) != 0 {
+			if C._go_PyType_Check(value) != 0 {
 				// typeName := C.PyType_GetName(value) // added in 3.12
 				valueName := C.PyObject_GetAttrString(value, nameField)
 				valueNameCStr := C._go_PyUnicode_AsUTF8((*C.PyObject)(valueName))
@@ -131,14 +130,27 @@ func PyDict2Go(obj *C.PyObject) map[string]any {
 	return out
 }
 
+func PyList2Go(obj *C.PyObject) []any {
+	out := []any{}
+	for i := 0; i < int(C.PyList_Size(obj)); i++ {
+		item := C._go_PyList_GetItem(obj, C.int(i))
+		out = append(out, PyObject2Go(item))
+	}
+	return out
+}
+
 func PyObject2Go(obj *C.PyObject) any {
 	if C._go_PyDict_Check(obj) != 0 {
 		return PyDict2Go(obj)
+	} else if C._go_PyList_Check(obj) != 0 {
+		return PyList2Go(obj)
 	} else if C._go_PyUnicode_Check(obj) != 0 {
 		s := C._go_PyUnicode_AsUTF8(obj)
 		return C.GoString(s)
 	} else if C._go_PyFloat_Check(obj) != 0 {
 		return C.PyFloat_AsDouble(obj)
+	} else if C._go_PyLong_Check(obj) != 0 {
+		return C.PyLong_AsLong(obj)
 	} //TODO: other types
 	return nil
 }
@@ -153,12 +165,32 @@ func Go2PyObject(data any) *C.PyObject {
 			C.PyDict_SetItemString(out, C.CString(k), vObj)
 		}
 		return out
+	case []any:
+		out := C.PyList_New(0)
+		for _, v := range value {
+			vObj := Go2PyObject(v)
+			C.PyList_Append(out, vObj)
+		}
+		return out
+	case primitive.A:
+		out := C.PyList_New(0)
+		for _, v := range value {
+			vObj := Go2PyObject(v)
+			C.PyList_Append(out, vObj)
+		}
+		return out
+	case int64:
+		return C.PyLong_FromLong(C.long(int64(value)))
+	case int32:
+		return C.PyLong_FromLong(C.long(int64(value)))
 	case float32:
 		return C.PyFloat_FromDouble(C.double(float64(value)))
 	case float64:
 		return C.PyFloat_FromDouble(C.double(float64(value)))
 	case string:
 		return C.PyUnicode_FromString(C.CString(value))
+	default:
+		fmt.Printf("Unknown type: %#v\n", value)
 	}
 	return C.Py_None
 }
