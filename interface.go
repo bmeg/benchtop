@@ -26,6 +26,11 @@ type TableDriver interface {
 	Close()
 }
 
+type Entry struct {
+	Key   []byte
+	Value map[string]any
+}
+
 type TableStore interface {
 	GetColumns() []ColumnDef
 	Add(key []byte, row map[string]any) error
@@ -35,6 +40,8 @@ type TableStore interface {
 	Scan(filter []FieldFilter, fields ...string) chan map[string]any
 
 	Keys() (chan []byte, error)
+
+	Load(chan Entry) error
 
 	Compact() error
 	Close()

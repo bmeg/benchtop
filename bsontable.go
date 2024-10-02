@@ -32,6 +32,10 @@ type BSONTable struct {
 	handleLock *sync.Mutex
 }
 
+type dbSet interface {
+	Set(id []byte, val []byte, opts *pebble.WriteOptions) error
+}
+
 func fileExists(path string) bool {
 	_, err := os.Stat(path)
 	if err == nil {
@@ -157,28 +161,42 @@ func checkType(val any, t FieldType) (any, error) {
 	return val, nil
 }
 
-func (b *BSONTable) Add(id []byte, entry map[string]any) error {
-	//pack named columns
+func (b *BSONTable) packData(entry map[string]any) (bson.D, error) {
+	// pack named columns
 	columns := []any{}
 	for _, c := range b.columns {
 		if e, ok := entry[c.Path]; ok {
 			v, err := checkType(e, c.Type)
 			if err != nil {
-				return err
+				return nil, err
 			}
 			columns = append(columns, v)
 		} else {
 			columns = append(columns, nil)
 		}
 	}
-	//pack all other data
+	// pack all other data
 	other := map[string]any{}
 	for k, v := range entry {
 		if _, ok := b.columnMap[k]; !ok {
 			other[k] = v
 		}
 	}
-	bData, err := bson.Marshal(bson.D{{Key: "columns", Value: columns}, {Key: "data", Value: other}})
+	return bson.D{{Key: "columns", Value: columns}, {Key: "data", Value: other}}, nil
+}
+
+func (b *BSONTable) addIDKey(db dbSet, name []byte, offset, size uint64) {
+	value := NewPosValue(uint64(offset), size)
+	posKey := NewPosKey(b.tableId, name)
+	db.Set(posKey, value, nil)
+}
+
+func (b *BSONTable) Add(id []byte, entry map[string]any) error {
+	dData, err := b.packData(entry)
+	if err != nil {
+		return err
+	}
+	bData, err := bson.Marshal(dData)
 	if err != nil {
 		return err
 	}
@@ -191,9 +209,7 @@ func (b *BSONTable) Add(id []byte, entry map[string]any) error {
 	}
 	b.handle.Write(bData)
 
-	value := NewPosValue(uint64(offset), uint64(len(bData)))
-	posKey := NewPosKey(b.tableId, id)
-	b.db.Set(posKey, value, nil)
+	b.addIDKey(b.db, id, uint64(offset), uint64(len(bData)))
 
 	return nil
 }
@@ -287,6 +303,81 @@ func (b *BSONTable) Scan(filter []FieldFilter, fields ...string) chan map[string
 	//TODO
 
 	return nil
+}
+
+func (b *BSONTable) Load(inputs chan Entry) error {
+
+	b.handleLock.Lock()
+	defer b.handleLock.Unlock()
+	offset, err := b.handle.Seek(0, io.SeekEnd)
+	if err != nil {
+		return err
+	}
+
+	b.bulkWrite(func(s dbSet) error {
+		for entry := range inputs {
+			dData, err := b.packData(entry.Value)
+			if err != nil {
+				//log
+			}
+			bData, err := bson.Marshal(dData)
+			if err != nil {
+				//log
+			}
+			writeSize, err := b.handle.Write(bData)
+			b.addIDKey(s, entry.Key, uint64(offset), uint64(writeSize))
+			offset += int64(writeSize)
+		}
+		return nil
+	})
+
+	return nil
+}
+
+type pebbleBulkWrite struct {
+	db              *pebble.DB
+	batch           *pebble.Batch
+	highest, lowest []byte
+	curSize         int
+}
+
+const (
+	maxWriterBuffer = 3 << 30
+)
+
+func copyBytes(in []byte) []byte {
+	out := make([]byte, len(in))
+	copy(out, in)
+	return out
+}
+
+func (pbw *pebbleBulkWrite) Set(id []byte, val []byte, opts *pebble.WriteOptions) error {
+	pbw.curSize += len(id) + len(val)
+	if pbw.highest == nil || bytes.Compare(id, pbw.highest) > 0 {
+		pbw.highest = copyBytes(id)
+	}
+	if pbw.lowest == nil || bytes.Compare(id, pbw.lowest) < 0 {
+		pbw.lowest = copyBytes(id)
+	}
+	err := pbw.batch.Set(id, val, opts)
+	if pbw.curSize > maxWriterBuffer {
+		pbw.batch.Commit(nil)
+		pbw.batch.Reset()
+		pbw.curSize = 0
+	}
+	return err
+}
+
+func (b *BSONTable) bulkWrite(u func(s dbSet) error) error {
+	batch := b.db.NewBatch()
+	ptx := &pebbleBulkWrite{b.db, batch, nil, nil, 0}
+	err := u(ptx)
+	batch.Commit(nil)
+	batch.Close()
+	if ptx.lowest != nil && ptx.highest != nil {
+		b.db.Compact(ptx.lowest, ptx.highest, true)
+	}
+	return err
 }
 
 /*
