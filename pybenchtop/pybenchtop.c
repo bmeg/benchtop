@@ -63,6 +63,7 @@ static PyObject * Driver_newtable(Driver *self, PyObject *args, PyObject *kwds) 
 
     printf("Adding table: %s\n", tableName);
 
+    //TODO: should we release this table?
     uintptr_t table = NewTable(self->driver, tableName, columnDef);
 
     PyObject *argList = Py_BuildValue("(Os)", self, tableName);
@@ -76,6 +77,20 @@ static PyObject * Driver_newtable(Driver *self, PyObject *args, PyObject *kwds) 
 
     Py_DECREF(argList);
     printf("Returning objct\n");
+    return obj;
+}
+
+
+static PyObject * Driver_gettable(Driver *self, PyObject *args, PyObject *kwds) {
+    char *tableName;
+    if (! PyArg_ParseTuple(args, "s", &tableName))
+        return NULL;
+    PyObject *argList = Py_BuildValue("(Os)", self, tableName);
+    PyObject *obj = PyObject_New(Table, &TableType);
+    if (Table_init(obj, argList, NULL) != 0) {
+        printf("table init error\n");
+    }
+    Py_DECREF(argList);
     return obj;
 }
 
@@ -93,6 +108,7 @@ static PyMemberDef Driver_members[] = {
 
 static PyMethodDef Driver_methods[] = {
     {"new", (PyCFunction)Driver_newtable, METH_VARARGS, "Generate a new table",},
+    {"get", (PyCFunction)Driver_gettable, METH_VARARGS, "Get an existing table",},
     {"close", (PyCFunction)Driver_close, METH_VARARGS, "Close database",},
     {NULL}  /* Sentinel */
 };
@@ -144,8 +160,11 @@ static int Table_init(Table *self, PyObject *args, PyObject *kwds) {
 
     uintptr_t tb = GetTable(dr->driver, name);
     if (tb == 0) {
-        printf("null table returned\n");
+        printf("Table not found\n");
+        PyErr_SetString(PyExc_TypeError, "table not found");
+        return -1;  
     }
+    printf("Returning Table\n");
     self->table = tb;
     return 0;
 }
@@ -168,6 +187,10 @@ static PyObject * Table_get(Table *self, PyObject *args, PyObject *kwds) {
         Py_RETURN_NONE;
 
     PyObject *data = GetDataTable(self->table, key);
+    if (data == NULL) {
+        PyErr_SetString(PyExc_TypeError, "table not found");
+        return NULL;
+    }    
     return data;
 }
 

@@ -23,6 +23,7 @@ type ColumnDef struct {
 type TableDriver interface {
 	New(name string, columns []ColumnDef) (TableStore, error)
 	Get(name string) (TableStore, error)
+	List() []string
 	Close()
 }
 

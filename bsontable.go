@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"sync"
@@ -29,7 +30,7 @@ type BSONTable struct {
 	handle     *os.File
 	db         *pebble.DB
 	tableId    uint32
-	handleLock *sync.Mutex
+	handleLock sync.Mutex
 }
 
 type dbSet interface {
@@ -57,6 +58,7 @@ func NewBSONDriver(path string) (TableDriver, error) {
 }
 
 func (dr *BSONDriver) Close() {
+	log.Println("Closing driver")
 	for _, i := range dr.tables {
 		i.handle.Close()
 	}
@@ -98,11 +100,41 @@ func (dr *BSONDriver) Get(name string) (TableStore, error) {
 	return out, nil
 }
 
+func (dr *BSONDriver) getMaxTableID() uint32 {
+	// get unique id
+	prefix := []byte{idPrefix}
+	it, _ := dr.db.NewIter(&pebble.IterOptions{LowerBound: prefix})
+	maxID := uint32(0)
+	for it.SeekGE(prefix); it.Valid() && bytes.HasPrefix(it.Key(), prefix); it.Next() {
+		value := ParseIDKey(it.Key())
+		maxID = value
+	}
+	it.Close()
+	return maxID
+}
+
+func (dr *BSONDriver) addTableEntry(id uint32, name string, columns []ColumnDef) error {
+	tdata, _ := bson.Marshal(TableInfo{Columns: columns, Id: id})
+	nkey := NewNameKey([]byte(name))
+	return dr.db.Set(nkey, tdata, nil)
+}
+
+func (dr *BSONDriver) addTableID(newID uint32, name string) error {
+	idKey := NewIDKey(newID)
+	return dr.db.Set(idKey, []byte(name), nil)
+}
+
 func (dr *BSONDriver) New(name string, columns []ColumnDef) (TableStore, error) {
+
+	p, _ := dr.Get(name)
+	if p != nil {
+		return p, fmt.Errorf("table %s already exists", name)
+	}
+
 	dr.lock.Lock()
 	defer dr.lock.Unlock()
 
-	out := &BSONTable{columns: columns, handleLock: &sync.Mutex{}, columnMap: map[string]int{}}
+	out := &BSONTable{columns: columns, handleLock: sync.Mutex{}, columnMap: map[string]int{}}
 	tPath := filepath.Join(dr.base, "TABLES", name)
 	f, err := os.Create(tPath)
 	if err != nil {
@@ -113,29 +145,30 @@ func (dr *BSONDriver) New(name string, columns []ColumnDef) (TableStore, error) 
 		out.columnMap[d.Path] = n
 	}
 
-	//get unique id
-	prefix := []byte{idPrefix}
-	it, _ := dr.db.NewIter(&pebble.IterOptions{LowerBound: prefix})
-	maxID := uint32(0)
-	for ; it.Valid() && bytes.HasPrefix(it.Key(), prefix); it.Next() {
-		value := ParseIDKey(it.Key())
-		maxID = value
+	newID := dr.getMaxTableID() + 1
+
+	if err := dr.addTableID(newID, name); err != nil {
+		log.Printf("Error: %s", err)
 	}
-	it.Close()
-
-	newID := maxID + 1
-	idKey := NewIDKey(newID)
-	dr.db.Set(idKey, []byte(name), nil)
-
-	tdata, _ := bson.Marshal(TableInfo{Columns: columns, Id: newID})
-
-	nkey := NewNameKey([]byte(name))
-
-	dr.db.Set(nkey, tdata, nil)
-
+	if err := dr.addTableEntry(newID, name, columns); err != nil {
+		log.Printf("Error: %s", err)
+	}
 	out.db = dr.db
+	out.tableId = newID
 	dr.tables[name] = out
 	return out, nil
+}
+
+func (dr *BSONDriver) List() []string {
+	out := []string{}
+	prefix := []byte{namePrefix}
+	it, _ := dr.db.NewIter(&pebble.IterOptions{LowerBound: prefix})
+	for it.SeekGE(prefix); it.Valid() && bytes.HasPrefix(it.Key(), prefix); it.Next() {
+		value := ParseNameKey(it.Key())
+		out = append(out, string(value))
+	}
+	it.Close()
+	return out
 }
 
 func (b *BSONTable) Close() {
@@ -185,8 +218,8 @@ func (b *BSONTable) packData(entry map[string]any) (bson.D, error) {
 	return bson.D{{Key: "columns", Value: columns}, {Key: "data", Value: other}}, nil
 }
 
-func (b *BSONTable) addIDKey(db dbSet, name []byte, offset, size uint64) {
-	value := NewPosValue(uint64(offset), size)
+func (b *BSONTable) addTableEntryInfo(db dbSet, name []byte, offset, size uint64) {
+	value := NewPosValue(offset, size)
 	posKey := NewPosKey(b.tableId, name)
 	db.Set(posKey, value, nil)
 }
@@ -208,8 +241,7 @@ func (b *BSONTable) Add(id []byte, entry map[string]any) error {
 		return err
 	}
 	b.handle.Write(bData)
-
-	b.addIDKey(b.db, id, uint64(offset), uint64(len(bData)))
+	b.addTableEntryInfo(b.db, id, uint64(offset), uint64(len(bData)))
 
 	return nil
 }
@@ -286,12 +318,14 @@ func (b *BSONTable) Keys() (chan []byte, error) {
 	out := make(chan []byte, 10)
 	go func() {
 		defer close(out)
+
 		prefix := NewPosKeyPrefix(b.tableId)
-		it, _ := b.db.NewIter(&pebble.IterOptions{LowerBound: prefix})
-		it.SeekGE(prefix)
-		for ; it.Valid() && bytes.HasPrefix(it.Key(), prefix); it.Next() {
+		it, err := b.db.NewIter(&pebble.IterOptions{})
+		if err != nil {
+			log.Printf("error: %s", err)
+		}
+		for it.SeekGE(prefix); it.Valid() && bytes.HasPrefix(it.Key(), prefix); it.Next() {
 			_, value := ParsePosKey(it.Key())
-			fmt.Printf("Key Parse: %s %s\n", it.Key(), value)
 			out <- value
 		}
 		it.Close()
@@ -325,7 +359,10 @@ func (b *BSONTable) Load(inputs chan Entry) error {
 				//log
 			}
 			writeSize, err := b.handle.Write(bData)
-			b.addIDKey(s, entry.Key, uint64(offset), uint64(writeSize))
+			if err != nil {
+				log.Printf("Loading error: %s", err)
+			}
+			b.addTableEntryInfo(s, entry.Key, uint64(offset), uint64(writeSize))
 			offset += int64(writeSize)
 		}
 		return nil
