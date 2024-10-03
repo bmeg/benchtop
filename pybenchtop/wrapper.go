@@ -87,6 +87,7 @@ func GetTable(d uintptr, name *C.char) uintptr {
 	dr := cgo.Handle(d).Value().(benchtop.TableDriver)
 	table, err := dr.Get(C.GoString(name))
 	if err != nil {
+		fmt.Printf("Error: %s\n", err)
 		return 0
 	}
 	return uintptr(cgo.NewHandle(table))

@@ -2,6 +2,37 @@
 
 
 
+## Command line
+
+Build:
+```
+make
+```
+
+### Load data
+```
+benchtop load test.data embeddings test.ndjson
+```
+ - `test.data` : name of archive
+ - `embeddings` : name of table
+ - `test.ndjson` : file to be loaded
+
+### List tables
+```
+benchtop tables test.data
+```
+
+### Get keys
+```
+benchtop keys test.data embeddings
+```
+
+### Get records
+```
+benchtop get test.data embeddings <key1> <key2> ...
+```
+
+
 ## Format
 
 Data is stored in a large binary files and index using [Pebble Key Value storage](https://github.com/cockroachdb/pebble).

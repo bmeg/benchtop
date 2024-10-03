@@ -23,7 +23,13 @@ type ColumnDef struct {
 type TableDriver interface {
 	New(name string, columns []ColumnDef) (TableStore, error)
 	Get(name string) (TableStore, error)
+	List() []string
 	Close()
+}
+
+type Entry struct {
+	Key   []byte
+	Value map[string]any
 }
 
 type TableStore interface {
@@ -35,6 +41,8 @@ type TableStore interface {
 	Scan(filter []FieldFilter, fields ...string) chan map[string]any
 
 	Keys() (chan []byte, error)
+
+	Load(chan Entry) error
 
 	Compact() error
 	Close()
