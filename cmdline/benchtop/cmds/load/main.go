@@ -2,6 +2,7 @@ package load
 
 import (
 	"encoding/json"
+	"log"
 
 	"github.com/bmeg/benchtop"
 	"github.com/bmeg/benchtop/util"
@@ -51,6 +52,8 @@ var Cmd = &cobra.Command{
 				if key, ok := data[keyField]; ok {
 					keyStr := key.(string)
 					records <- benchtop.Entry{Key: []byte(keyStr), Value: data}
+				} else {
+					log.Printf("Key %s not found", keyField)
 				}
 				bar.Add(1)
 			}
