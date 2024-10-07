@@ -126,7 +126,8 @@ func PyDict2Go(obj *C.PyObject) map[string]any {
 		var keyBytes *C.char = C._go_PyUnicode_AsUTF8(key)
 		keyStr := C.GoString(keyBytes)
 		value := C.PyTuple_GetItem(it, 1)
-		out[keyStr] = PyObject2Go(value)
+		obj := PyObject2Go(value)
+		out[keyStr] = obj
 	}
 	return out
 }
@@ -164,6 +165,7 @@ func Go2PyObject(data any) *C.PyObject {
 		for k, v := range value {
 			vObj := Go2PyObject(v)
 			C.PyDict_SetItemString(out, C.CString(k), vObj)
+			C.Py_DECREF(vObj)
 		}
 		return out
 	case []any:
@@ -171,6 +173,7 @@ func Go2PyObject(data any) *C.PyObject {
 		for _, v := range value {
 			vObj := Go2PyObject(v)
 			C.PyList_Append(out, vObj)
+			C.Py_DECREF(vObj)
 		}
 		return out
 	case primitive.A:
@@ -178,6 +181,7 @@ func Go2PyObject(data any) *C.PyObject {
 		for _, v := range value {
 			vObj := Go2PyObject(v)
 			C.PyList_Append(out, vObj)
+			C.Py_DECREF(vObj)
 		}
 		return out
 	case int64:

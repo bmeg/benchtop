@@ -188,7 +188,7 @@ static PyObject * Table_get(Table *self, PyObject *args, PyObject *kwds) {
 
     PyObject *data = GetDataTable(self->table, key);
     if (data == NULL) {
-        PyErr_SetString(PyExc_TypeError, "table not found");
+        PyErr_SetString(PyExc_TypeError, "data not found");
         return NULL;
     }    
     return data;
