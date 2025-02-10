@@ -5,24 +5,18 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"path/filepath"
 	"sync"
 
+	"github.com/bmeg/grip/log"
+
 	"github.com/cockroachdb/pebble"
 
+	"github.com/dgraph-io/ristretto/v2"
 	"go.mongodb.org/mongo-driver/bson"
 	//NOTE: try github.com/dgraph-io/ristretto for cache
 )
-
-type BSONDriver struct {
-	base string
-	db   *pebble.DB
-
-	lock   sync.Mutex
-	tables map[string]*BSONTable
-}
 
 type BSONTable struct {
 	columns    []ColumnDef
@@ -30,57 +24,34 @@ type BSONTable struct {
 	handle     *os.File
 	db         *pebble.DB
 	tableId    uint32
-	handleLock sync.Mutex
+	handleLock sync.RWMutex
+	cache      *ristretto.Cache[[]byte, map[string]any]
 }
 
 type dbSet interface {
 	Set(id []byte, val []byte, opts *pebble.WriteOptions) error
 }
 
-func fileExists(path string) bool {
-	_, err := os.Stat(path)
-	if err == nil {
-		return true
-	}
-	return err != os.ErrNotExist
-}
-
-func NewBSONDriver(path string) (TableDriver, error) {
-	db, err := pebble.Open(path, &pebble.Options{})
-	if err != nil {
-		return nil, err
-	}
-	tableDir := filepath.Join(path, "TABLES")
-	if fileExists(tableDir) {
-		os.Mkdir(tableDir, 0700)
-	}
-	return &BSONDriver{base: path, db: db, tables: map[string]*BSONTable{}}, nil
-}
-
-func (dr *BSONDriver) Close() {
-	log.Println("Closing driver")
-	for _, i := range dr.tables {
-		i.handle.Close()
-	}
-	dr.db.Close()
-}
-
 func (dr *BSONDriver) Get(name string) (TableStore, error) {
-	dr.lock.Lock()
-	defer dr.lock.Unlock()
+	dr.lock.RLock()
+	defer dr.lock.RUnlock()
 
 	if x, ok := dr.tables[name]; ok {
 		return x, nil
 	}
 
-	nkey := NewNameKey([]byte(name))
-	value, closer, err := dr.db.Get(nkey)
-	if err != nil {
-		return nil, err
+	tinfo, exists := dr.infoCache[name]
+	fmt.Println("TINFO1: ", tinfo)
+	if !exists {
+		nkey := NewNameKey([]byte(name))
+		value, closer, err := dr.db.Get(nkey)
+		if err != nil {
+			return nil, err
+		}
+		bson.Unmarshal(value, &tinfo)
+		closer.Close()
+		dr.infoCache[name] = tinfo
 	}
-	tinfo := TableInfo{}
-	bson.Unmarshal(value, &tinfo)
-	closer.Close()
 
 	tPath := filepath.Join(dr.base, "TABLES", name)
 
@@ -114,6 +85,9 @@ func (dr *BSONDriver) getMaxTableID() uint32 {
 }
 
 func (dr *BSONDriver) addTableEntry(id uint32, name string, columns []ColumnDef) error {
+	dr.infoCache[name] = TableInfo{Columns: columns, Id: id}
+
+	// Write data to db anyway
 	tdata, _ := bson.Marshal(TableInfo{Columns: columns, Id: id})
 	nkey := NewNameKey([]byte(name))
 	return dr.db.Set(nkey, tdata, nil)
@@ -134,7 +108,16 @@ func (dr *BSONDriver) New(name string, columns []ColumnDef) (TableStore, error) 
 	dr.lock.Lock()
 	defer dr.lock.Unlock()
 
-	out := &BSONTable{columns: columns, handleLock: sync.Mutex{}, columnMap: map[string]int{}}
+	cache, err := ristretto.NewCache(&ristretto.Config[[]byte, map[string]any]{
+		NumCounters: 1e7,     // 10M keys
+		MaxCost:     1 << 30, // 1GB
+		BufferItems: 64,      // 64 keys per buffer
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	out := &BSONTable{columns: columns, cache: cache, handleLock: sync.RWMutex{}, columnMap: map[string]int{}}
 	tPath := filepath.Join(dr.base, "TABLES", name)
 	f, err := os.Create(tPath)
 	if err != nil {
@@ -148,10 +131,12 @@ func (dr *BSONDriver) New(name string, columns []ColumnDef) (TableStore, error) 
 	newID := dr.getMaxTableID() + 1
 
 	if err := dr.addTableID(newID, name); err != nil {
-		log.Printf("Error: %s", err)
+		log.Infof("Error: %s", err)
+		return nil, err
 	}
 	if err := dr.addTableEntry(newID, name, columns); err != nil {
-		log.Printf("Error: %s", err)
+		log.Infof("Error: %s", err)
+		return nil, err
 	}
 	out.db = dr.db
 	out.tableId = newID
@@ -247,8 +232,13 @@ func (b *BSONTable) Add(id []byte, entry map[string]any) error {
 }
 
 func (b *BSONTable) Get(id []byte, fields ...string) (map[string]any, error) {
-	b.handleLock.Lock()
-	defer b.handleLock.Unlock()
+	b.handleLock.RLock()
+	defer b.handleLock.RUnlock()
+
+	value, found := b.cache.Get(id)
+	if found {
+		return value, nil
+	}
 
 	offset, _, err := b.getBlockPos(id)
 	if err != nil {
@@ -289,6 +279,8 @@ func (b *BSONTable) Get(id []byte, fields ...string) (map[string]any, error) {
 			}
 		}
 	}
+	b.cache.Set(id, out, 0)
+
 	return out, nil
 }
 
@@ -322,7 +314,7 @@ func (b *BSONTable) Keys() (chan []byte, error) {
 		prefix := NewPosKeyPrefix(b.tableId)
 		it, err := b.db.NewIter(&pebble.IterOptions{})
 		if err != nil {
-			log.Printf("error: %s", err)
+			log.Infof("error: %s", err)
 		}
 		for it.SeekGE(prefix); it.Valid() && bytes.HasPrefix(it.Key(), prefix); it.Next() {
 			_, value := ParsePosKey(it.Key())
@@ -360,7 +352,7 @@ func (b *BSONTable) Load(inputs chan Entry) error {
 			}
 			writeSize, err := b.handle.Write(bData)
 			if err != nil {
-				log.Printf("Loading error: %s", err)
+				log.Infof("Loading error: %s", err)
 			}
 			b.addTableEntryInfo(s, entry.Key, uint64(offset), uint64(writeSize))
 			offset += int64(writeSize)
@@ -397,7 +389,7 @@ func (pbw *pebbleBulkWrite) Set(id []byte, val []byte, opts *pebble.WriteOptions
 		pbw.lowest = copyBytes(id)
 	}
 	err := pbw.batch.Set(id, val, opts)
-	if pbw.curSize > maxWriterBuffer {
+	if pbw.curSize > maxWriterBuffer || pbw.batch.Count() > 50000 {
 		pbw.batch.Commit(nil)
 		pbw.batch.Reset()
 		pbw.curSize = 0

@@ -5,9 +5,10 @@ import (
 	"bytes"
 	"compress/gzip"
 	"io"
-	"log"
 	"os"
 	"strings"
+
+	"github.com/bmeg/grip/log"
 )
 
 func LineCounter(file string) (int, error) {
@@ -69,7 +70,7 @@ func StreamLines(file string, chanSize int) (chan string, error) {
 			lineChan <- line
 		}
 		if err := scanner.Err(); err != nil {
-			log.Printf("Error: %s", err)
+			log.Infof("Error: %s", err)
 		}
 		close(lineChan)
 		fh.Close()

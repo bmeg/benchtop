@@ -2,6 +2,7 @@ package test
 
 import (
 	"fmt"
+	"os"
 	"testing"
 
 	"github.com/bmeg/benchtop"
@@ -52,6 +53,15 @@ func TestDelete(t *testing.T) {
 		t.Errorf("incorrect return count %d", count)
 	}
 
+	// Test caching get
+	for i := range r {
+		_, err := ts.Get(i)
+		if err != nil {
+			t.Errorf("Cache return %s error: %s", i, err)
+		}
+		count++
+	}
+
 	deleteCount := 0
 	keys, _ := ts.Keys()
 	i := 0
@@ -77,4 +87,5 @@ func TestDelete(t *testing.T) {
 	}
 
 	dr.Close()
+	os.RemoveAll(dbname)
 }

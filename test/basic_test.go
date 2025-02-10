@@ -2,6 +2,7 @@ package test
 
 import (
 	"fmt"
+	"os"
 	"testing"
 
 	"github.com/bmeg/benchtop"
@@ -50,10 +51,13 @@ func TestOpenClose(t *testing.T) {
 		t.Error(err)
 	}
 
+	t.Log("COLS: ", ot.GetColumns())
 	if len(ot.GetColumns()) != 2 {
 		t.Errorf("Incorrect re-open")
 	}
 	or.Close()
+	os.RemoveAll(name)
+
 }
 
 func TestInsert(t *testing.T) {
@@ -113,4 +117,6 @@ func TestInsert(t *testing.T) {
 
 	ts.Compact()
 	dr.Close()
+	os.RemoveAll(dbname)
+
 }
