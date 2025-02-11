@@ -2,6 +2,7 @@ package test
 
 import (
 	"fmt"
+	"os"
 	"testing"
 
 	"github.com/bmeg/benchtop"
@@ -77,4 +78,5 @@ func TestDelete(t *testing.T) {
 	}
 
 	dr.Close()
+	os.RemoveAll(dbname)
 }
