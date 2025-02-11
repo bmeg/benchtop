@@ -94,16 +94,24 @@ func BenchmarkScaleWriteBson(b *testing.B) {
 }
 
 func BenchmarkRandomReadBson(b *testing.B) {
-	driver, err := benchtop.NewBSONDriver(Bsonname)
-	if err != nil {
-		b.Fatal(err)
+	var err error
+	if bsonDriver == nil {
+		driver, err := benchtop.NewBSONDriver(Bsonname)
+		if err != nil {
+			b.Fatal(err)
+		}
+		var ok bool
+		bsonDriver, ok = driver.(*benchtop.BSONDriver)
+		if !ok {
+			b.Fatal("Failed to assert type *benchtop.BSONDriver")
+		}
 	}
-	defer driver.Close()
 
-	ot, err := driver.Get(Bsonname)
+	ot, err := bsonDriver.Get(Bsonname)
 	if err != nil {
 		b.Log(err)
 	}
+	defer ot.Close()
 
 	randomIndexSet, err := getRandomUniqueIntegers(200000, 1000000)
 	selectedValues := make([]map[string]any, 0, len(randomIndexSet))
@@ -121,22 +129,28 @@ func BenchmarkRandomReadBson(b *testing.B) {
 		}
 		count++
 	}
-	if len(selectedValues) != len(randomIndexSet) {
-		b.Logf("Error: %#v != %#v\n", selectedValues, randomIndexSet)
-	}
+	b.Log("READS:", len(selectedValues), "COUNT: ", count)
+
 }
 
 func BenchmarkRandomKeysBson(b *testing.B) {
-	driver, err := benchtop.NewBSONDriver(Bsonname)
-	if err != nil {
-		b.Fatal(err)
+	var err error
+	if bsonDriver == nil {
+		driver, err := benchtop.NewBSONDriver(Bsonname)
+		if err != nil {
+			b.Fatal(err)
+		}
+		var ok bool
+		bsonDriver, ok = driver.(*benchtop.BSONDriver)
+		if !ok {
+			b.Fatal("Failed to assert type *benchtop.BSONDriver")
+		}
 	}
-	defer driver.Close()
-
-	ot, err := driver.Get(Bsonname)
+	ot, err := bsonDriver.Get(Bsonname)
 	if err != nil {
 		b.Log(err)
 	}
+	defer ot.Close()
 
 	randomIndexSet, err := getRandomUniqueIntegers(200000, 1000000)
 	selectedValues := make([][]byte, 0, len(randomIndexSet))
@@ -150,9 +164,8 @@ func BenchmarkRandomKeysBson(b *testing.B) {
 		}
 		count++
 	}
-	if len(selectedValues) != len(randomIndexSet) {
-		b.Logf("Error: %#v != %#v\n", selectedValues, randomIndexSet)
-	}
+	b.Log("READS: ", len(selectedValues), "COUNT: ", count)
+
 }
 
 var Pebblename = "test.pebble" + util.RandomString(5)
@@ -210,18 +223,28 @@ func BenchmarkScaleWritePebble(b *testing.B) {
 }
 
 func BenchmarkRandomReadPebble(b *testing.B) {
-	driver, err := benchtop.NewPebbleBSONDriver(Pebblename)
-	if err != nil {
-		b.Fatal(err)
+	var err error
+	if pebbleDriver == nil {
+		driver, err := benchtop.NewPebbleBSONDriver(Pebblename)
+		if err != nil {
+			b.Fatal(err)
+		}
+		var ok bool
+		pebbleDriver, ok = driver.(*benchtop.PebbleBSONDriver)
+		if !ok {
+			b.Fatal("Failed to assert type *benchtop.BSONDriver")
+		}
 	}
-	defer driver.Close()
+	defer pebbleDriver.Close()
 
-	ot, err := driver.Get(Pebblename)
+	ot, err := pebbleDriver.Get(Pebblename)
 	if err != nil {
 		b.Log(err)
 	}
 
 	randomIndexSet, err := getRandomUniqueIntegers(200000, 1000000)
+
+	b.ResetTimer()
 
 	OTKEYS, err := ot.Keys()
 	if err != nil {
@@ -230,26 +253,36 @@ func BenchmarkRandomReadPebble(b *testing.B) {
 	var selectedValues []map[string]any
 	count := 0
 
-	b.ResetTimer()
 	for key := range OTKEYS {
 		if _, exists := randomIndexSet[count]; exists {
-			val, _ := ot.Get(key)
+			val, err := ot.Get(key)
+			if err != nil {
+				b.Log("ERR: ", err)
+			}
 			selectedValues = append(selectedValues, val)
 		}
 		count++
 	}
-	b.Log("LEN SEL VALUES", len(selectedValues))
+	b.Log("READS: ", len(selectedValues), "COUNT: ", count)
 
 }
 
 func BenchmarkRandomKeysPebble(b *testing.B) {
-	driver, err := benchtop.NewPebbleBSONDriver(Pebblename)
-	if err != nil {
-		b.Fatal(err)
+	var err error
+	if pebbleDriver == nil {
+		driver, err := benchtop.NewPebbleBSONDriver(Pebblename)
+		if err != nil {
+			b.Fatal(err)
+		}
+		var ok bool
+		pebbleDriver, ok = driver.(*benchtop.PebbleBSONDriver)
+		if !ok {
+			b.Fatal("Failed to assert type *benchtop.BSONDriver")
+		}
 	}
-	defer driver.Close()
+	defer pebbleDriver.Close()
 
-	ot, err := driver.Get(Pebblename)
+	ot, err := pebbleDriver.Get(Pebblename)
 	if err != nil {
 		b.Log(err)
 	}
@@ -257,6 +290,7 @@ func BenchmarkRandomKeysPebble(b *testing.B) {
 	randomIndexSet, err := getRandomUniqueIntegers(200000, 1000000)
 	selectedValues := make([][]byte, 0, len(randomIndexSet))
 	count := 0
+
 	b.ResetTimer()
 
 	OTKEYS, _ := ot.Keys()
@@ -266,7 +300,6 @@ func BenchmarkRandomKeysPebble(b *testing.B) {
 		}
 		count++
 	}
-	if len(selectedValues) != len(randomIndexSet) {
-		b.Logf("Error: %#v != %#v\n", selectedValues, randomIndexSet)
-	}
+	b.Log("KEYS: ", len(selectedValues), "COUNT: ", count)
+
 }
