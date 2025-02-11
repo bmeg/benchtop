@@ -9,23 +9,7 @@ import (
 	"github.com/bmeg/benchtop/util"
 )
 
-var data = map[string]map[string]any{
-	"key1": {
-		"field1": 0.1,
-		"name":   "alice",
-		"other":  "other data",
-	},
-	"key2": {
-		"field1": 0.2,
-		"name":   "bob",
-	},
-	"key3": {
-		"field1": 0.3,
-		"name":   "chelsie",
-	},
-}
-
-func TestOpenClose(t *testing.T) {
+func TestPebbleOpenClose(t *testing.T) {
 	name := "test.data" + util.RandomString(5)
 	dr, err := benchtop.NewPebbleBSONDriver(name)
 	if err != nil {
@@ -58,7 +42,7 @@ func TestOpenClose(t *testing.T) {
 	os.RemoveAll(name)
 }
 
-func TestInsert(t *testing.T) {
+func TestPebbleInsert(t *testing.T) {
 	dbname := "test.data" + util.RandomString(5)
 
 	dr, err := benchtop.NewPebbleBSONDriver(dbname)

@@ -25,7 +25,7 @@ type PebbleBSONTable struct {
 	columns   []ColumnDef
 	columnMap map[string]int
 	db        *pebble.DB
-	tableId   uint32
+	TableId   uint32
 }
 
 func NewPebbleBSONDriver(path string) (TableDriver, error) {
@@ -65,7 +65,7 @@ func (dr *PebbleBSONDriver) Get(name string) (TableStore, error) {
 	out := &PebbleBSONTable{
 		columns: tinfo.Columns,
 		db:      dr.db,
-		tableId: tinfo.Id,
+		TableId: tinfo.Id,
 	}
 	dr.tables[name] = out
 
@@ -121,7 +121,7 @@ func (dr *PebbleBSONDriver) New(name string, columns []ColumnDef) (TableStore, e
 		log.Printf("Error: %s", err)
 	}
 	out.db = dr.db
-	out.tableId = newID
+	out.TableId = newID
 	dr.tables[name] = out
 	return out, nil
 }
@@ -178,7 +178,7 @@ func (b *PebbleBSONTable) Add(id []byte, entry map[string]any) error {
 	if err != nil {
 		return err
 	}
-	key := append(NewPosKeyPrefix(b.tableId), id...)
+	key := append(NewPosKeyPrefix(b.TableId), id...)
 
 	err = b.db.Set(key, bData, &pebble.WriteOptions{})
 	if err != nil {
@@ -190,7 +190,7 @@ func (b *PebbleBSONTable) Add(id []byte, entry map[string]any) error {
 
 func (b *PebbleBSONTable) Get(id []byte, fields ...string) (map[string]any, error) {
 
-	key := append(NewPosKeyPrefix(b.tableId), id...)
+	key := append(NewPosKeyPrefix(b.TableId), id...)
 	rowData, closer, err := b.db.Get(key)
 	if err != nil {
 		fmt.Println("ERR: ", err)
@@ -220,7 +220,6 @@ func (b *PebbleBSONTable) Get(id []byte, fields ...string) (map[string]any, erro
 			}
 		}
 	}
-	fmt.Println("OUT: ", out)
 	return out, nil
 }
 
@@ -231,6 +230,9 @@ func (b *PebbleBSONTable) colUnpack(v bson.RawElement, colType FieldType) any {
 		return v.Value().Double()
 	} else if colType == Int64 {
 		return v.Value().Int64()
+	} else if colType == Bytes {
+		_, data := v.Value().Binary()
+		return data
 	}
 	return nil
 }
@@ -240,7 +242,7 @@ func (b *PebbleBSONTable) Keys() (chan []byte, error) {
 	go func() {
 		defer close(out)
 
-		prefix := NewPosKeyPrefix(b.tableId)
+		prefix := NewPosKeyPrefix(b.TableId)
 		it, err := b.db.NewIter(&pebble.IterOptions{})
 		if err != nil {
 			log.Printf("error: %s", err)
@@ -350,7 +352,7 @@ func (b *BsonTable) OffsetToPosition(offset int64) (int64, error) {
 */
 
 func (b *PebbleBSONTable) Delete(name []byte) error {
-	posKey := NewPosKey(b.tableId, name)
+	posKey := NewPosKey(b.TableId, name)
 	b.db.Delete(posKey, nil)
 	return nil
 }

@@ -54,4 +54,5 @@ const (
 	Double FieldType = FieldType(bson.TypeDouble)
 	Int64  FieldType = FieldType(bson.TypeInt64)
 	String FieldType = FieldType(bson.TypeString)
+	Bytes  FieldType = FieldType(bson.TypeBinary)
 )

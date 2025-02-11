@@ -299,6 +299,9 @@ func (b *BSONTable) colUnpack(v bson.RawElement, colType FieldType) any {
 		return v.Value().Double()
 	} else if colType == Int64 {
 		return v.Value().Int64()
+	} else if colType == Bytes {
+		_, data := v.Value().Binary()
+		return data
 	}
 	return nil
 }
