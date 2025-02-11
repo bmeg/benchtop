@@ -60,7 +60,7 @@ func (dr *PebbleBSONDriver) Get(name string) (TableStore, error) {
 	}
 	tinfo := TableInfo{}
 	bson.Unmarshal(value, &tinfo)
-	closer.Close()
+	defer closer.Close()
 
 	out := &PebbleBSONTable{
 		columns: tinfo.Columns,
@@ -195,9 +195,10 @@ func (b *PebbleBSONTable) Get(id []byte, fields ...string) (map[string]any, erro
 	if err != nil {
 		fmt.Println("ERR: ", err)
 	}
-	closer.Close()
 
 	bd := bson.Raw(rowData)
+	defer closer.Close()
+
 	columns := bd.Index(0).Value().Array()
 	out := map[string]any{}
 	if len(fields) == 0 {
