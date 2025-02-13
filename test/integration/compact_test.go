@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	"github.com/bmeg/benchtop"
-	"github.com/bmeg/benchtop/test/integration/testdata"
+	"github.com/bmeg/benchtop/test/fixtures"
 	"github.com/bmeg/benchtop/util"
 )
 
@@ -25,7 +25,7 @@ func TestCompact(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for k, r := range testdata.ScanData {
+	for k, r := range fixtures.ScanData {
 		err := ts.Add([]byte(k), r)
 		if err != nil {
 			t.Fatal(err)
@@ -77,11 +77,6 @@ func TestCompact(t *testing.T) {
 	}
 	if val["keyName"] != "key8" {
 		t.Errorf("fetched key8 but got %s instead", val["keyName"])
-	}
-
-	val, err = ts.Get([]byte("key4"))
-	if err != nil {
-		t.Log(err)
 	}
 
 	dr.Close()

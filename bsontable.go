@@ -433,6 +433,7 @@ func (b *BSONTable) Load(inputs chan Entry) error {
 
 	b.bulkWrite(func(s dbSet) error {
 		for entry := range inputs {
+			entry.Value["keyName"] = string(entry.Key)
 			dData, err := b.packData(entry.Value)
 			if err != nil {
 				//log
@@ -441,12 +442,18 @@ func (b *BSONTable) Load(inputs chan Entry) error {
 			if err != nil {
 				//log
 			}
+
+			bsonHandlerNextoffset := make([]byte, 8)
+			// make Next offset equal to existing offset + length of data
+			binary.LittleEndian.PutUint64(bsonHandlerNextoffset, uint64(offset)+uint64(len(bData))+8)
+			b.handle.Write(bsonHandlerNextoffset)
+
 			writeSize, err := b.handle.Write(bData)
 			if err != nil {
 				log.Printf("Loading error: %s", err)
 			}
 			b.addTableEntryInfo(s, entry.Key, uint64(offset), uint64(writeSize))
-			offset += int64(writeSize)
+			offset += int64(writeSize) + 8
 		}
 		return nil
 	})
@@ -525,6 +532,10 @@ func (b *BSONTable) Compact() error {
 	defer b.handleLock.Unlock()
 
 	tempFileName, err := filepath.Abs(b.handle.Name() + ".compact")
+	if err != nil {
+		return err
+	}
+
 	tempHandle, err := os.Create(tempFileName)
 	if err != nil {
 		return err
@@ -536,10 +547,15 @@ func (b *BSONTable) Compact() error {
 	if err != nil {
 		return err
 	}
+	defer oldHandle.Close()
+
 	newOffsets := make(map[string]uint64)
 	var newOffset uint64 = 0
+
+	offsetSizeData := make([]byte, 8)
+	sizeBytes := make([]byte, 4)
+
 	for {
-		offsetSizeData := make([]byte, 8)
 		_, err := oldHandle.Read(offsetSizeData)
 		if err == io.EOF {
 			break
@@ -549,22 +565,17 @@ func (b *BSONTable) Compact() error {
 		}
 
 		NextOffset := binary.LittleEndian.Uint64(offsetSizeData)
-
-		sizeBytes := make([]byte, 4)
 		_, err = oldHandle.Read(sizeBytes)
 		if err != nil {
 			return err
 		}
 
 		bSize := int32(binary.LittleEndian.Uint32(sizeBytes))
-		fmt.Println("B SIZE: ", bSize)
-
 		if bSize == 0 {
 			_, err = oldHandle.Seek(int64(NextOffset), io.SeekStart)
 			if err == io.EOF {
 				break
 			}
-			fmt.Println("SKIPPING")
 			continue
 		}
 
@@ -577,14 +588,10 @@ func (b *BSONTable) Compact() error {
 		}
 
 		raw := bson.Raw(rowData)
-		columnsValue := raw.Lookup("columns")
-		arr, _ := columnsValue.Array().Values()
-		if len(arr) > 0 && arr[0].Type == bson.TypeString {
-			keyName := arr[0].StringValue()
-			newOffsets[keyName] = newOffset
-		} else {
-			return fmt.Errorf("keyName not found or invalid")
-		}
+
+		arr, _ := raw.Lookup("columns").Array().Values()
+		keyName := arr[0].StringValue()
+		newOffsets[keyName] = newOffset
 
 		newOffsetBytes := make([]byte, 8)
 		binary.LittleEndian.PutUint64(newOffsetBytes, newOffset+uint64(len(rowData))+8)

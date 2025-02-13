@@ -1,42 +1,13 @@
 package test
 
 import (
-	"crypto/rand"
 	"fmt"
-	"math/big"
 	"testing"
 
 	"github.com/bmeg/benchtop"
+	"github.com/bmeg/benchtop/test/fixtures"
 	"github.com/bmeg/benchtop/util"
 )
-
-const (
-	NumKeys   = 1000000
-	ValueSize = 5024
-)
-
-func GenerateRandomBytes(size int) []byte {
-	b := make([]byte, size)
-	rand.Read(b)
-	return b
-}
-
-func getRandomUniqueIntegers(count, max int) (map[int]struct{}, error) {
-	uniqueNumbers := make(map[int]struct{})
-	for len(uniqueNumbers) < count {
-		nBig, err := rand.Int(rand.Reader, big.NewInt(int64(max)))
-		if err != nil {
-			return nil, err
-		}
-		num := int(nBig.Int64())
-
-		if _, exists := uniqueNumbers[num]; !exists {
-			uniqueNumbers[num] = struct{}{}
-		}
-	}
-
-	return uniqueNumbers, nil
-}
 
 var Bsonname = "test.bson" + util.RandomString(5)
 var bsonTable *benchtop.BSONTable
@@ -58,7 +29,7 @@ func BenchmarkScaleWriteBson(b *testing.B) {
 		}
 	}
 
-	columns := []benchtop.ColumnDef{{Path: "data", Type: benchtop.Bytes}}
+	columns := []benchtop.ColumnDef{{Name: "data", Type: benchtop.Bytes}}
 
 	if bsonTable == nil {
 		table, err := bsonDriver.New(Bsonname, columns)
@@ -80,7 +51,7 @@ func BenchmarkScaleWriteBson(b *testing.B) {
 		go func() {
 			for j := 0; j < NumKeys; j++ {
 				key := []byte(fmt.Sprintf("key_%d", j))
-				value := GenerateRandomBytes(ValueSize)
+				value := fixtures.GenerateRandomBytes(ValueSize)
 				inputChan <- benchtop.Entry{Key: key, Value: map[string]any{"data": value}}
 			}
 			close(inputChan)
@@ -113,7 +84,7 @@ func BenchmarkRandomReadBson(b *testing.B) {
 	}
 	defer ot.Close()
 
-	randomIndexSet, err := getRandomUniqueIntegers(200000, 1000000)
+	randomIndexSet, err := fixtures.GetRandomUniqueIntegers(200000, 1000000)
 	selectedValues := make([]map[string]any, 0, len(randomIndexSet))
 	count := 0
 	b.ResetTimer()
@@ -152,7 +123,7 @@ func BenchmarkRandomKeysBson(b *testing.B) {
 	}
 	defer ot.Close()
 
-	randomIndexSet, err := getRandomUniqueIntegers(200000, 1000000)
+	randomIndexSet, err := fixtures.GetRandomUniqueIntegers(200000, 1000000)
 	selectedValues := make([][]byte, 0, len(randomIndexSet))
 	count := 0
 	b.ResetTimer()
@@ -186,7 +157,7 @@ func BenchmarkScaleWritePebble(b *testing.B) {
 		}
 	}
 
-	columns := []benchtop.ColumnDef{{Path: "data", Type: benchtop.Bytes}}
+	columns := []benchtop.ColumnDef{{Name: "data", Type: benchtop.Bytes}}
 
 	if pebbleTable == nil {
 		table, err := pebbleDriver.New(Pebblename, columns)
@@ -208,7 +179,7 @@ func BenchmarkScaleWritePebble(b *testing.B) {
 		go func() {
 			for j := 0; j < NumKeys; j++ {
 				key := append(benchtop.NewPosKeyPrefix(pebbleTable.TableId), []byte(fmt.Sprintf("key_%d", j))...)
-				value := GenerateRandomBytes(ValueSize)
+				value := fixtures.GenerateRandomBytes(ValueSize)
 				inputChan <- benchtop.Entry{Key: key, Value: map[string]any{"data": value}}
 			}
 			close(inputChan)
@@ -242,7 +213,7 @@ func BenchmarkRandomReadPebble(b *testing.B) {
 	}
 	defer ot.Close()
 
-	randomIndexSet, err := getRandomUniqueIntegers(200000, 1000000)
+	randomIndexSet, err := fixtures.GetRandomUniqueIntegers(200000, 1000000)
 
 	b.ResetTimer()
 
@@ -287,7 +258,7 @@ func BenchmarkRandomKeysPebble(b *testing.B) {
 	}
 	defer ot.Close()
 
-	randomIndexSet, err := getRandomUniqueIntegers(200000, 1000000)
+	randomIndexSet, err := fixtures.GetRandomUniqueIntegers(200000, 1000000)
 	selectedValues := make([][]byte, 0, len(randomIndexSet))
 	count := 0
 

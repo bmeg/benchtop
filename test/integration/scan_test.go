@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	"github.com/bmeg/benchtop"
-	"github.com/bmeg/benchtop/test/integration/testdata"
+	"github.com/bmeg/benchtop/test/fixtures"
 
 	"github.com/bmeg/benchtop/util"
 )
@@ -26,7 +26,7 @@ func TestScan(t *testing.T) {
 		t.Error(err)
 	}
 
-	for k, r := range testdata.ScanData {
+	for k, r := range fixtures.ScanData {
 		err := ts.Add([]byte(k), r)
 		if err != nil {
 			t.Error(err)
