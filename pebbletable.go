@@ -109,7 +109,7 @@ func (dr *PebbleBSONDriver) New(name string, columns []ColumnDef) (TableStore, e
 	out := &PebbleBSONTable{columns: columns, columnMap: map[string]int{}}
 
 	for n, d := range columns {
-		out.columnMap[d.Path] = n
+		out.columnMap[d.Name] = n
 	}
 
 	newID := dr.getMaxTableID() + 1
@@ -149,7 +149,7 @@ func (b *PebbleBSONTable) packData(entry map[string]any) (bson.D, error) {
 	// pack named columns
 	columns := []any{}
 	for _, c := range b.columns {
-		if e, ok := entry[c.Path]; ok {
+		if e, ok := entry[c.Name]; ok {
 			v, err := checkType(e, c.Type)
 			if err != nil {
 				return nil, err
@@ -210,14 +210,14 @@ func (b *PebbleBSONTable) Get(id []byte, fields ...string) (map[string]any, erro
 			return nil, err
 		}
 		for i, n := range b.columns {
-			out[n.Path] = b.colUnpack(elem[i], n.Type)
+			out[n.Name] = b.colUnpack(elem[i], n.Type)
 		}
 	} else {
 		for _, colName := range fields {
 			if i, ok := b.columnMap[colName]; ok {
 				n := b.columns[i]
 				elem := columns.Index(uint(i))
-				out[n.Path] = b.colUnpack(elem, n.Type)
+				out[n.Name] = b.colUnpack(elem, n.Type)
 			}
 		}
 	}
@@ -257,8 +257,8 @@ func (b *PebbleBSONTable) Keys() (chan []byte, error) {
 	return out, nil
 }
 
-func (b *PebbleBSONTable) Scan(filter []FieldFilter, fields ...string) chan map[string]any {
-	return nil
+func (b *PebbleBSONTable) Scan(filter []FieldFilter, fields ...string) (chan map[string]any, error) {
+	return nil, nil
 }
 
 func (b *PebbleBSONTable) Load(inputs chan Entry) error {

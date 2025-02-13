@@ -6,8 +6,9 @@ import (
 )
 
 type FieldFilter struct {
-	Field string
-	Value string
+	Field    string
+	Operator string // supported operators "==", "!=", ">", "<", ">=", "<=", "contains", "startswith", "endswith"
+	Value    any
 }
 
 type TableInfo struct {
@@ -16,7 +17,7 @@ type TableInfo struct {
 }
 
 type ColumnDef struct {
-	Path string    `json:"path"`
+	Name string    `json:"name"`
 	Type FieldType `json:"type"`
 }
 
@@ -38,7 +39,7 @@ type TableStore interface {
 	Get(key []byte, fields ...string) (map[string]any, error)
 	Delete(key []byte) error
 
-	Scan(filter []FieldFilter, fields ...string) chan map[string]any
+	Scan(filter []FieldFilter, fields ...string) (chan map[string]any, error)
 
 	Keys() (chan []byte, error)
 

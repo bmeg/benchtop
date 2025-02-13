@@ -235,12 +235,12 @@ func BenchmarkRandomReadPebble(b *testing.B) {
 			b.Fatal("Failed to assert type *benchtop.BSONDriver")
 		}
 	}
-	defer pebbleDriver.Close()
 
 	ot, err := pebbleDriver.Get(Pebblename)
 	if err != nil {
 		b.Log(err)
 	}
+	defer ot.Close()
 
 	randomIndexSet, err := getRandomUniqueIntegers(200000, 1000000)
 
@@ -280,12 +280,12 @@ func BenchmarkRandomKeysPebble(b *testing.B) {
 			b.Fatal("Failed to assert type *benchtop.BSONDriver")
 		}
 	}
-	defer pebbleDriver.Close()
 
 	ot, err := pebbleDriver.Get(Pebblename)
 	if err != nil {
 		b.Log(err)
 	}
+	defer ot.Close()
 
 	randomIndexSet, err := getRandomUniqueIntegers(200000, 1000000)
 	selectedValues := make([][]byte, 0, len(randomIndexSet))

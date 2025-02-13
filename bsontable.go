@@ -134,7 +134,10 @@ func (dr *BSONDriver) New(name string, columns []ColumnDef) (TableStore, error) 
 	dr.lock.Lock()
 	defer dr.lock.Unlock()
 
-	out := &BSONTable{columns: columns, handleLock: sync.Mutex{}, columnMap: map[string]int{}}
+	// Prepend Key column to columns provided by user
+	columns = append([]ColumnDef{{Name: "keyName", Type: String}}, columns...)
+	out := &BSONTable{columns: columns,
+		handleLock: sync.Mutex{}, columnMap: map[string]int{}}
 	tPath := filepath.Join(dr.base, "TABLES", name)
 	f, err := os.Create(tPath)
 	if err != nil {
@@ -142,7 +145,7 @@ func (dr *BSONDriver) New(name string, columns []ColumnDef) (TableStore, error) 
 	}
 	out.handle = f
 	for n, d := range columns {
-		out.columnMap[d.Path] = n
+		out.columnMap[d.Name] = n
 	}
 
 	newID := dr.getMaxTableID() + 1
@@ -198,7 +201,7 @@ func (b *BSONTable) packData(entry map[string]any) (bson.D, error) {
 	// pack named columns
 	columns := []any{}
 	for _, c := range b.columns {
-		if e, ok := entry[c.Path]; ok {
+		if e, ok := entry[c.Name]; ok {
 			v, err := checkType(e, c.Type)
 			if err != nil {
 				return nil, err
@@ -225,10 +228,12 @@ func (b *BSONTable) addTableEntryInfo(db dbSet, name []byte, offset, size uint64
 }
 
 func (b *BSONTable) Add(id []byte, entry map[string]any) error {
+	entry["keyName"] = string(id)
 	dData, err := b.packData(entry)
 	if err != nil {
 		return err
 	}
+
 	bData, err := bson.Marshal(dData)
 	if err != nil {
 		return err
@@ -240,6 +245,12 @@ func (b *BSONTable) Add(id []byte, entry map[string]any) error {
 	if err != nil {
 		return err
 	}
+
+	bsonHandlerNextoffset := make([]byte, 8)
+	// make Next offset equal to existing offset + length of data
+	binary.LittleEndian.PutUint64(bsonHandlerNextoffset, uint64(offset)+uint64(len(bData))+8)
+	b.handle.Write(bsonHandlerNextoffset)
+
 	b.handle.Write(bData)
 	b.addTableEntryInfo(b.db, id, uint64(offset), uint64(len(bData)))
 
@@ -255,8 +266,9 @@ func (b *BSONTable) Get(id []byte, fields ...string) (map[string]any, error) {
 		return nil, err
 	}
 
-	//The first 4 bytes of the BSON block is the size
-	b.handle.Seek(int64(offset), io.SeekStart)
+	// Offset skip the first 8 bytes since they are for getting the offset for a scan operation
+	b.handle.Seek(int64(offset+8), io.SeekStart)
+	//The next 4 bytes of the BSON block is the size
 	sizeBytes := []byte{0x00, 0x00, 0x00, 0x00}
 	_, err = b.handle.Read(sizeBytes)
 	if err != nil {
@@ -278,14 +290,14 @@ func (b *BSONTable) Get(id []byte, fields ...string) (map[string]any, error) {
 			return nil, err
 		}
 		for i, n := range b.columns {
-			out[n.Path] = b.colUnpack(elem[i], n.Type)
+			out[n.Name] = b.colUnpack(elem[i], n.Type)
 		}
 	} else {
 		for _, colName := range fields {
 			if i, ok := b.columnMap[colName]; ok {
 				n := b.columns[i]
 				elem := columns.Index(uint(i))
-				out[n.Path] = b.colUnpack(elem, n.Type)
+				out[n.Name] = b.colUnpack(elem, n.Type)
 			}
 		}
 	}
@@ -336,10 +348,69 @@ func (b *BSONTable) Keys() (chan []byte, error) {
 	return out, nil
 }
 
-func (b *BSONTable) Scan(filter []FieldFilter, fields ...string) chan map[string]any {
-	//TODO
+func (b *BSONTable) Scan(filter []FieldFilter, fields ...string) (chan map[string]any, error) {
+	b.handleLock.Lock()
+	defer b.handleLock.Unlock()
 
-	return nil
+	out := make(chan map[string]any, 10)
+	_, err := b.handle.Seek(0, io.SeekStart)
+	if err != nil {
+		return nil, err
+	}
+
+	go func() {
+		defer close(out)
+		for {
+			offsetSizeData := make([]byte, 8)
+			_, err := b.handle.Read(offsetSizeData)
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				return
+			}
+
+			NextOffset := binary.LittleEndian.Uint64(offsetSizeData)
+
+			sizeBytes := make([]byte, 4)
+			_, err = b.handle.Read(sizeBytes)
+			if err != nil {
+				return
+			}
+
+			bSize := int32(binary.LittleEndian.Uint32(sizeBytes))
+			rowData := make([]byte, bSize)
+			copy(rowData, sizeBytes)
+
+			_, err = b.handle.Read(rowData[4:])
+			if err != nil {
+				return
+			}
+
+			bd := bson.Raw(rowData)
+			columns := bd.Index(0).Value().Array()
+
+			vOut := map[string]any{}
+			for _, colName := range fields {
+				if i, ok := b.columnMap[colName]; ok {
+					n := b.columns[i]
+					unpack := b.colUnpack(columns.Index(uint(i)), n.Type)
+					if PassesFilters(unpack, filter) {
+						vOut[n.Name] = unpack
+					}
+				}
+			}
+			if len(vOut) > 0 {
+				out <- vOut
+			}
+
+			_, err = b.handle.Seek(int64(NextOffset), io.SeekStart)
+			if err == io.EOF {
+				break
+			}
+		}
+	}()
+	return out, nil
 }
 
 func (b *BSONTable) Load(inputs chan Entry) error {

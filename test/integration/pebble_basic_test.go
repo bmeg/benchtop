@@ -17,8 +17,8 @@ func TestPebbleOpenClose(t *testing.T) {
 	}
 
 	_, err = dr.New("table_1", []benchtop.ColumnDef{
-		{Path: "field1", Type: benchtop.Double},
-		{Path: "name", Type: benchtop.String},
+		{Name: "field1", Type: benchtop.Double},
+		{Name: "name", Type: benchtop.String},
 	})
 
 	if err != nil {
@@ -51,8 +51,8 @@ func TestPebbleInsert(t *testing.T) {
 	}
 
 	ts, err := dr.New("table_1", []benchtop.ColumnDef{
-		{Path: "field1", Type: benchtop.Double},
-		{Path: "name", Type: benchtop.String},
+		{Name: "field1", Type: benchtop.Double},
+		{Name: "name", Type: benchtop.String},
 	})
 
 	if err != nil {
