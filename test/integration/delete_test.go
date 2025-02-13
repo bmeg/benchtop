@@ -16,7 +16,7 @@ func TestDelete(t *testing.T) {
 		t.Error(err)
 	}
 
-	ts, err := dr.New("table_2", []benchtop.ColumnDef{
+	ts, err := dr.New("table_1", []benchtop.ColumnDef{
 		{Name: "data", Type: benchtop.Int64},
 		{Name: "id", Type: benchtop.String},
 	})

@@ -379,6 +379,15 @@ func (b *BSONTable) Scan(filter []FieldFilter, fields ...string) (chan map[strin
 			}
 
 			bSize := int32(binary.LittleEndian.Uint32(sizeBytes))
+
+			// Elem has been deleted. skip it.
+			if bSize == 0 {
+				_, err = b.handle.Seek(int64(NextOffset), io.SeekStart)
+				if err == io.EOF {
+					break
+				}
+				continue
+			}
 			rowData := make([]byte, bSize)
 			copy(rowData, sizeBytes)
 
@@ -491,104 +500,125 @@ func (b *BSONTable) bulkWrite(u func(s dbSet) error) error {
 	return err
 }
 
-/*
-func getUint64(f *os.File, pos int64) (uint64, error) {
-	f.Seek(pos, io.SeekStart)
-	buf := make([]byte, 8)
-	_, err := f.Read(buf)
-	if err != nil {
-		return uint64(0), err
-	}
-	val := binary.LittleEndian.Uint64(buf)
-	return val, nil
-
-}
-
-func (b *BsonTable) OffsetToPosition(offset int64) (int64, error) {
-	b.indexLock.Lock()
-	defer b.indexLock.Unlock()
-
-	info, err := b.indexHandle.Stat()
-	if err != nil {
-		return -1, err
-	}
-	size := info.Size()
-	count := size / 8
-
-	spanLow := int64(0)
-	spanHigh := count
-	for {
-		cur := (spanLow + spanHigh) >> 1
-		val, err := getUint64(b.indexHandle, cur<<3)
-		if err != nil {
-			return -1, err
-		}
-		uVal := int64(val & markMask)
-		//fmt.Printf("State: %d - %d %d=%d : %d\n", spanLow, spanHigh, cur, uVal, offset)
-		if uVal == offset {
-			if val&markBit == markBit {
-				return cur, fmt.Errorf("deleting deteted record")
-			}
-			return cur, nil
-		}
-		if spanLow == spanHigh {
-			break
-		}
-		if spanLow+1 == spanHigh {
-			//fmt.Printf("increment\n")
-			spanLow = spanHigh
-		} else {
-			if uVal > offset {
-				spanHigh = cur
-			} else if uVal < offset {
-				spanLow = cur
-			}
-		}
-	}
-	return 0, fmt.Errorf("not found")
-}
-*/
-
 func (b *BSONTable) Delete(name []byte) error {
+	b.handleLock.Lock()
+	defer b.handleLock.Unlock()
+
+	offset, _, err := b.getBlockPos(name)
+	if err != nil {
+		return err
+	}
+	b.handle.Seek(int64(offset+8), io.SeekStart)
+	_, err = b.handle.Write([]byte{0x00, 0x00, 0x00, 0x00})
+	if err != nil {
+		return err
+	}
+
 	posKey := NewPosKey(b.tableId, name)
 	b.db.Delete(posKey, nil)
-	//TODO: mark the space so it can be reclaimed
+
 	return nil
 }
 
 func (b *BSONTable) Compact() error {
-	/*
-		b.indexLock.Lock()
-		defer b.indexLock.Unlock()
+	b.handleLock.Lock()
+	defer b.handleLock.Unlock()
 
-		info, err := b.indexHandle.Stat()
+	tempFileName, err := filepath.Abs(b.handle.Name() + ".compact")
+	tempHandle, err := os.Create(tempFileName)
+	if err != nil {
+		return err
+	}
+	defer tempHandle.Close()
+
+	oldHandle := b.handle
+	_, err = oldHandle.Seek(0, io.SeekStart)
+	if err != nil {
+		return err
+	}
+	newOffsets := make(map[string]uint64)
+	var newOffset uint64 = 0
+	for {
+		offsetSizeData := make([]byte, 8)
+		_, err := oldHandle.Read(offsetSizeData)
+		if err == io.EOF {
+			break
+		}
 		if err != nil {
 			return err
 		}
-		size := info.Size()
-		count := size / 8
 
-		sampleSize := int64(10)
+		NextOffset := binary.LittleEndian.Uint64(offsetSizeData)
 
-		sampleStart := count - sampleSize
-		if sampleStart < 0 {
-			sampleStart = 0
+		sizeBytes := make([]byte, 4)
+		_, err = oldHandle.Read(sizeBytes)
+		if err != nil {
+			return err
 		}
-		moveSet := []int64{}
 
-		b.indexHandle.Seek(sampleStart<<3, io.SeekStart)
-		for curSample := sampleStart; curSample < count; curSample++ {
-			buf := make([]byte, 8)
-			b.indexHandle.Read(buf)
-			val := binary.LittleEndian.Uint64(buf)
-			if val&markBit == markBit {
+		bSize := int32(binary.LittleEndian.Uint32(sizeBytes))
+		fmt.Println("B SIZE: ", bSize)
 
-			} else {
-				moveSet = append(moveSet, int64(val))
+		if bSize == 0 {
+			_, err = oldHandle.Seek(int64(NextOffset), io.SeekStart)
+			if err == io.EOF {
+				break
 			}
+			fmt.Println("SKIPPING")
+			continue
 		}
 
-		fmt.Printf("readytomove: %#v\n", moveSet)
-	*/
+		rowData := make([]byte, bSize)
+		copy(rowData, sizeBytes)
+
+		_, err = oldHandle.Read(rowData[4:])
+		if err != nil {
+			return err
+		}
+
+		raw := bson.Raw(rowData)
+		columnsValue := raw.Lookup("columns")
+		arr, _ := columnsValue.Array().Values()
+		if len(arr) > 0 && arr[0].Type == bson.TypeString {
+			keyName := arr[0].StringValue()
+			newOffsets[keyName] = newOffset
+		} else {
+			return fmt.Errorf("keyName not found or invalid")
+		}
+
+		newOffsetBytes := make([]byte, 8)
+		binary.LittleEndian.PutUint64(newOffsetBytes, newOffset+uint64(len(rowData))+8)
+		_, err = tempHandle.Write(newOffsetBytes)
+		if err != nil {
+			return err
+		}
+
+		_, err = tempHandle.Write(rowData)
+		if err != nil {
+			return err
+		}
+
+		newOffset += uint64(len(rowData)) + 8
+	}
+
+	oldHandle.Close()
+	fileName, err := filepath.Abs(b.handle.Name())
+	if err != nil {
+		return err
+	}
+	err = os.Rename(tempFileName, fileName)
+	if err != nil {
+		return err
+	}
+
+	b.handle, err = os.OpenFile(fileName, os.O_RDWR, 0644)
+	if err != nil {
+		return err
+	}
+
+	for key, newPos := range newOffsets {
+		b.addTableEntryInfo(b.db, []byte(key), newPos, 0) // 0 size assumes the same size as before
+	}
+
 	return nil
 }

@@ -51,7 +51,7 @@ func TestOpenClose(t *testing.T) {
 		t.Error(err)
 	}
 
-	if len(ot.GetColumns()) != 2 {
+	if len(ot.GetColumns()) != 3 {
 		t.Errorf("Incorrect re-open")
 	}
 	or.Close()
