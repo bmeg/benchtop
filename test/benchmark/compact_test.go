@@ -11,8 +11,9 @@ import (
 )
 
 const (
-	NumKeys   = 10000
-	ValueSize = 5024
+	NumKeys       = 100000
+	ValueSize     = 5024
+	NumDeleteKeys = 20000
 )
 
 func BenchmarkCompactBson(b *testing.B) {
@@ -57,7 +58,7 @@ func BenchmarkCompactBson(b *testing.B) {
 		b.Fatal(err)
 	}
 
-	randomIndexSet, err := fixtures.GetRandomUniqueIntegers(2000, 10000)
+	randomIndexSet, err := fixtures.GetRandomUniqueIntegers(NumDeleteKeys, NumKeys)
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -91,7 +92,10 @@ func BenchmarkCompactBson(b *testing.B) {
 	for _ = range keysAfterCompact {
 		keyCount++
 	}
-	b.Logf("Keys after compaction: %d", keyCount)
+	if keyCount != (NumKeys - NumDeleteKeys) {
+		b.Fatalf("Keycount %d not equal expected %d", keyCount, (NumKeys - NumDeleteKeys))
+	}
 
+	b.Logf("Keys after compaction: %d", keyCount)
 	os.RemoveAll(compactbsoname)
 }

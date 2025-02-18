@@ -114,6 +114,6 @@ func TestInsert(t *testing.T) {
 	}
 
 	ts.Compact()
-	dr.Close()
+	defer dr.Close()
 	os.RemoveAll(dbname)
 }

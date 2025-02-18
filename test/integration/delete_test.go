@@ -77,6 +77,6 @@ func TestDelete(t *testing.T) {
 		t.Errorf("incorrect return count after delete %d != %d", count, totalCount-deleteCount)
 	}
 
-	dr.Close()
+	defer dr.Close()
 	os.RemoveAll(dbname)
 }

@@ -61,7 +61,7 @@ func TestCompact(t *testing.T) {
 		t.Logf("size before=%d, after=%d", beforeSize, afterSize)
 	}
 
-	testChan, err := ts.Scan(nil, "field1", "name")
+	testChan, err := ts.Scan(nil, "field1", "name", "keyName")
 	if err != nil {
 		t.Error(err)
 	}
@@ -75,10 +75,11 @@ func TestCompact(t *testing.T) {
 	if err != nil {
 		t.Error(err)
 	}
+
 	if val["keyName"] != "key8" {
 		t.Errorf("fetched key8 but got %s instead", val["keyName"])
 	}
 
-	dr.Close()
+	defer dr.Close()
 	os.RemoveAll(dbname)
 }

@@ -1,14 +1,17 @@
 package benchtop
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/binary"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
+
+	"github.com/bmeg/grip/log"
 
 	"github.com/cockroachdb/pebble"
 
@@ -58,7 +61,7 @@ func NewBSONDriver(path string) (TableDriver, error) {
 }
 
 func (dr *BSONDriver) Close() {
-	log.Println("Closing driver")
+	log.Infoln("Closing driver")
 	for _, i := range dr.tables {
 		i.handle.Close()
 	}
@@ -151,10 +154,10 @@ func (dr *BSONDriver) New(name string, columns []ColumnDef) (TableStore, error) 
 	newID := dr.getMaxTableID() + 1
 
 	if err := dr.addTableID(newID, name); err != nil {
-		log.Printf("Error: %s", err)
+		log.Errorf("Error: %s", err)
 	}
 	if err := dr.addTableEntry(newID, name, columns); err != nil {
-		log.Printf("Error: %s", err)
+		log.Errorf("Error: %s", err)
 	}
 	out.db = dr.db
 	out.tableId = newID
@@ -337,7 +340,7 @@ func (b *BSONTable) Keys() (chan []byte, error) {
 		prefix := NewPosKeyPrefix(b.tableId)
 		it, err := b.db.NewIter(&pebble.IterOptions{})
 		if err != nil {
-			log.Printf("error: %s", err)
+			log.Errorf("error: %s", err)
 		}
 		for it.SeekGE(prefix); it.Valid() && bytes.HasPrefix(it.Key(), prefix); it.Next() {
 			_, value := ParsePosKey(it.Key())
@@ -436,11 +439,11 @@ func (b *BSONTable) Load(inputs chan Entry) error {
 			entry.Value["keyName"] = string(entry.Key)
 			dData, err := b.packData(entry.Value)
 			if err != nil {
-				//log
+				log.Errorf("pack data err in Load: bulkWrite: %s", err)
 			}
 			bData, err := bson.Marshal(dData)
 			if err != nil {
-				//log
+				log.Errorf("bson Marshall err in Load: bulkWrite: %s", err)
 			}
 
 			bsonHandlerNextoffset := make([]byte, 8)
@@ -450,7 +453,7 @@ func (b *BSONTable) Load(inputs chan Entry) error {
 
 			writeSize, err := b.handle.Write(bData)
 			if err != nil {
-				log.Printf("Loading error: %s", err)
+				log.Errorf("write handler err in Load: bulkWrite: %s", err)
 			}
 			b.addTableEntryInfo(s, entry.Key, uint64(offset), uint64(writeSize))
 			offset += int64(writeSize) + 8
@@ -528,6 +531,8 @@ func (b *BSONTable) Delete(name []byte) error {
 }
 
 func (b *BSONTable) Compact() error {
+	const flushThreshold = 1000
+	flushCounter := 0
 	b.handleLock.Lock()
 	defer b.handleLock.Unlock()
 
@@ -549,83 +554,151 @@ func (b *BSONTable) Compact() error {
 	}
 	defer oldHandle.Close()
 
-	newOffsets := make(map[string]uint64)
+	reader := bufio.NewReaderSize(oldHandle, 16*1024*1024)
+	writer := bufio.NewWriterSize(tempHandle, 16*1024*1024)
+	defer writer.Flush()
+
+	//newOffsets := make(map[string]uint64)
 	var newOffset uint64 = 0
 
 	offsetSizeData := make([]byte, 8)
 	sizeBytes := make([]byte, 4)
 
+	rowBuff := make([]byte, 0, 1<<20)
+
+	fileOffset := int64(0)
+	inputChan := make(chan Index, 100)
+	go func() {
+		b.SetIndices(inputChan)
+	}()
+
 	for {
-		_, err := oldHandle.Read(offsetSizeData)
+		startLoop := time.Now()
+
+		// --- Read next offset ---
+		startReadOffset := time.Now()
+		_, err := io.ReadFull(reader, offsetSizeData)
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
-			return err
+			return fmt.Errorf("failed reading next offset: %w", err)
 		}
+		nextOffset := binary.LittleEndian.Uint64(offsetSizeData)
+		log.Debugf("Time to read offset: %v\n", time.Since(startReadOffset))
 
-		NextOffset := binary.LittleEndian.Uint64(offsetSizeData)
-		_, err = oldHandle.Read(sizeBytes)
+		// --- Read BSON object size (4 bytes) ---
+		startReadSize := time.Now()
+		_, err = io.ReadFull(reader, sizeBytes)
 		if err != nil {
-			return err
+			return fmt.Errorf("failed reading size: %w", err)
 		}
-
 		bSize := int32(binary.LittleEndian.Uint32(sizeBytes))
+		log.Debugf("Time to read BSON size: %v\n", time.Since(startReadSize))
+
+		// --- Handle empty records ---
+		fileOffset += 8 + 4
 		if bSize == 0 {
-			_, err = oldHandle.Seek(int64(NextOffset), io.SeekStart)
-			if err == io.EOF {
-				break
+			// Check if there's a gap
+			if int64(nextOffset) > fileOffset {
+				startSeek := time.Now()
+				_, err = oldHandle.Seek(int64(nextOffset), io.SeekStart)
+				if err != nil {
+					if err == io.EOF {
+						break
+					}
+					return fmt.Errorf("failed to seek to nextOffset: %w", err)
+				}
+				fileOffset = int64(nextOffset) // Update fileOffset
+				reader.Reset(oldHandle)
+				log.Debugf("Time to seek & reset reader: %v\n", time.Since(startSeek))
 			}
 			continue
 		}
 
-		rowData := make([]byte, bSize)
-		copy(rowData, sizeBytes)
-
-		_, err = oldHandle.Read(rowData[4:])
-		if err != nil {
-			return err
+		startReadBSON := time.Now()
+		if int(bSize) > cap(rowBuff) {
+			rowBuff = make([]byte, bSize)
+		} else {
+			rowBuff = rowBuff[:bSize]
 		}
+		copy(rowBuff, sizeBytes)
+		_, err = io.ReadFull(reader, rowBuff[4:])
+		if err != nil {
+			return fmt.Errorf("failed reading BSON data: %w", err)
+		}
+		log.Debugf("Time to read BSON record: %v\n", time.Since(startReadBSON))
 
-		raw := bson.Raw(rowData)
+		// --- Extract 'columns' field from BSON ---
+		startParseBSON := time.Now()
+		raw := bson.Raw(rowBuff)
+		val, exists := raw.LookupErr("columns")
+		if exists != nil {
+			return fmt.Errorf("'columns' field not found in BSON document")
+		}
+		if val.Type != bson.TypeArray {
+			return fmt.Errorf("unexpected BSON type for 'columns': %v", val.Type)
+		}
+		arr, ok := val.ArrayOK()
+		if !ok || len(arr) == 0 {
+			return fmt.Errorf("'columns' array is missing or empty")
+		}
+		keyName, err := arr.IndexErr(0)
 
-		arr, _ := raw.Lookup("columns").Array().Values()
-		keyName := arr[0].StringValue()
-		newOffsets[keyName] = newOffset
+		//newOffsets[keyName.Value().StringValue()] = newOffset
+		inputChan <- Index{Key: keyName.Value().StringValue(), Position: newOffset}
+		log.Debugf("Time to parse BSON 'columns': %v\n", time.Since(startParseBSON))
 
+		// --- Write new offset ---
+		startWrite := time.Now()
 		newOffsetBytes := make([]byte, 8)
-		binary.LittleEndian.PutUint64(newOffsetBytes, newOffset+uint64(len(rowData))+8)
-		_, err = tempHandle.Write(newOffsetBytes)
+		binary.LittleEndian.PutUint64(newOffsetBytes, newOffset+uint64(len(rowBuff))+8)
+
+		_, err = writer.Write(newOffsetBytes)
 		if err != nil {
-			return err
+			return fmt.Errorf("failed writing new offset: %w", err)
+		}
+		_, err = writer.Write(rowBuff)
+		if err != nil {
+			return fmt.Errorf("failed writing BSON row: %w", err)
 		}
 
-		_, err = tempHandle.Write(rowData)
-		if err != nil {
-			return err
+		flushCounter++
+		if flushCounter%flushThreshold == 0 {
+			writer.Flush()
 		}
 
-		newOffset += uint64(len(rowData)) + 8
+		log.Debugf("Time to write new offset and BSON: %v\n", time.Since(startWrite))
+
+		newOffset += uint64(len(rowBuff)) + 8
+
+		log.Debugf("Total loop iteration time: %v\n", time.Since(startLoop))
 	}
+	close(inputChan)
 
-	oldHandle.Close()
+	// Replace the old file with the compacted one
 	fileName, err := filepath.Abs(b.handle.Name())
 	if err != nil {
 		return err
 	}
 	err = os.Rename(tempFileName, fileName)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed renaming compacted file: %w", err)
 	}
 
 	b.handle, err = os.OpenFile(fileName, os.O_RDWR, 0644)
 	if err != nil {
-		return err
-	}
-
-	for key, newPos := range newOffsets {
-		b.addTableEntryInfo(b.db, []byte(key), newPos, 0) // 0 size assumes the same size as before
+		return fmt.Errorf("failed reopening compacted file: %w", err)
 	}
 
 	return nil
+}
+
+func (b *BSONTable) SetIndices(inputs chan Index) {
+	b.bulkWrite(func(s dbSet) error {
+		for index := range inputs {
+			b.addTableEntryInfo(b.db, []byte(index.Key), index.Position, 0)
+		}
+		return nil
+	})
 }

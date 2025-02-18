@@ -33,6 +33,11 @@ type Entry struct {
 	Value map[string]any
 }
 
+type Index struct {
+	Key      string
+	Position uint64
+}
+
 type TableStore interface {
 	GetColumns() []ColumnDef
 	Add(key []byte, row map[string]any) error
