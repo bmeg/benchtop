@@ -43,9 +43,9 @@ func TestPebbleDelete(t *testing.T) {
 		t.Error(err)
 	}
 	for i := range r {
-		_, err := ts.Get(i)
+		_, err := ts.Get(i.Key)
 		if err != nil {
-			t.Errorf("Get %s error: %s", i, err)
+			t.Errorf("Get %s error: %s", string(i.Key), err)
 		}
 		count++
 	}
@@ -58,9 +58,9 @@ func TestPebbleDelete(t *testing.T) {
 	i := 0
 	for k := range keys {
 		if i%3 == 0 {
-			err := ts.Delete(k)
+			err := ts.Delete(k.Key)
 			if err != nil {
-				t.Errorf("delete %s error: %s", k, err)
+				t.Errorf("delete %s error: %s", string(k.Key), err)
 			}
 			deleteCount++
 			i++

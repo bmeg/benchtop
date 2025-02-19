@@ -34,7 +34,7 @@ type Entry struct {
 }
 
 type Index struct {
-	Key      string
+	Key      []byte
 	Position uint64
 }
 
@@ -43,10 +43,15 @@ type TableStore interface {
 	Add(key []byte, row map[string]any) error
 	Get(key []byte, fields ...string) (map[string]any, error)
 	Delete(key []byte) error
+	Fetch(inputs chan Index, workers int) <-chan struct {
+		key  string
+		data map[string]any
+		err  string
+	}
 
 	Scan(filter []FieldFilter, fields ...string) (chan map[string]any, error)
 
-	Keys() (chan []byte, error)
+	Keys() (chan Index, error)
 
 	Load(chan Entry) error
 

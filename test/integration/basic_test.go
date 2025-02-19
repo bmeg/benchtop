@@ -54,7 +54,7 @@ func TestOpenClose(t *testing.T) {
 	if len(ot.GetColumns()) != 3 {
 		t.Errorf("Incorrect re-open")
 	}
-	or.Close()
+	defer or.Close()
 	os.RemoveAll(name)
 }
 
@@ -104,10 +104,10 @@ func TestInsert(t *testing.T) {
 	oCount := 0
 	for i := range keyList {
 		oCount++
-		if _, ok := data[string(i)]; !ok {
-			t.Errorf("Unknown key returned: %s", i)
+		if _, ok := data[string(i.Key)]; !ok {
+			t.Errorf("Unknown key returned: %s", string(i.Key))
 		}
-		fmt.Printf("%s\n", i)
+		fmt.Printf("%s\n", string(i.Key))
 	}
 	if oCount != len(data) {
 		t.Errorf("Incorrect key count %d != %d", oCount, len(data))

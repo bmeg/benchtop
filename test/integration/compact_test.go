@@ -75,11 +75,24 @@ func TestCompact(t *testing.T) {
 	if err != nil {
 		t.Error(err)
 	}
+	t.Log("VAL: ", val)
 
 	if val["keyName"] != "key8" {
 		t.Errorf("fetched key8 but got %s instead", val["keyName"])
 	}
 
+	// Get another key to double check that it works
+	val, err = ts.Get([]byte("key7"))
+	if err != nil {
+		t.Error(err)
+	}
+	t.Log("VAL: ", val)
+
+	if val["keyName"] != "key7" {
+		t.Errorf("fetched key7 but got %s instead", val["keyName"])
+	}
+
+	ts.Compact()
 	defer dr.Close()
 	os.RemoveAll(dbname)
 }

@@ -13,6 +13,11 @@ var Bsonname = "test.bson" + util.RandomString(5)
 var bsonTable *benchtop.BSONTable
 var bsonDriver *benchtop.BSONDriver
 
+const (
+	scalenumKeys   = 100000
+	scalevalueSize = 5024
+)
+
 func BenchmarkScaleWriteBson(b *testing.B) {
 	b.Log("BenchmarkScaleWriteBson start")
 
@@ -49,9 +54,9 @@ func BenchmarkScaleWriteBson(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		inputChan := make(chan benchtop.Entry, 100)
 		go func() {
-			for j := 0; j < NumKeys; j++ {
+			for j := 0; j < scalenumKeys; j++ {
 				key := []byte(fmt.Sprintf("key_%d", j))
-				value := fixtures.GenerateRandomBytes(ValueSize)
+				value := fixtures.GenerateRandomBytes(scalevalueSize)
 				inputChan <- benchtop.Entry{Key: key, Value: map[string]any{"data": value}}
 			}
 			close(inputChan)
@@ -92,7 +97,7 @@ func BenchmarkRandomReadBson(b *testing.B) {
 	OTKEYS, _ := ot.Keys()
 	for key := range OTKEYS {
 		if _, exists := randomIndexSet[count]; exists {
-			val, err := ot.Get(key)
+			val, err := ot.Get(key.Key)
 			if err != nil {
 				b.Fatal(err)
 			}
@@ -131,7 +136,7 @@ func BenchmarkRandomKeysBson(b *testing.B) {
 	OTKEYS, _ := ot.Keys()
 	for key := range OTKEYS {
 		if _, exists := randomIndexSet[count]; exists {
-			selectedValues = append(selectedValues, key)
+			selectedValues = append(selectedValues, key.Key)
 		}
 		count++
 	}
@@ -177,9 +182,9 @@ func BenchmarkScaleWritePebble(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		inputChan := make(chan benchtop.Entry, 100)
 		go func() {
-			for j := 0; j < NumKeys; j++ {
+			for j := 0; j < scalenumKeys; j++ {
 				key := append(benchtop.NewPosKeyPrefix(pebbleTable.TableId), []byte(fmt.Sprintf("key_%d", j))...)
-				value := fixtures.GenerateRandomBytes(ValueSize)
+				value := fixtures.GenerateRandomBytes(scalevalueSize)
 				inputChan <- benchtop.Entry{Key: key, Value: map[string]any{"data": value}}
 			}
 			close(inputChan)
@@ -226,7 +231,7 @@ func BenchmarkRandomReadPebble(b *testing.B) {
 
 	for key := range OTKEYS {
 		if _, exists := randomIndexSet[count]; exists {
-			val, err := ot.Get(key)
+			val, err := ot.Get(key.Key)
 			if err != nil {
 				b.Log("ERR: ", err)
 			}
@@ -267,7 +272,7 @@ func BenchmarkRandomKeysPebble(b *testing.B) {
 	OTKEYS, _ := ot.Keys()
 	for key := range OTKEYS {
 		if _, exists := randomIndexSet[count]; exists {
-			selectedValues = append(selectedValues, key)
+			selectedValues = append(selectedValues, key.Key)
 		}
 		count++
 	}

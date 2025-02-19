@@ -23,7 +23,7 @@ type BSONDriver struct {
 	base string
 	db   *pebble.DB
 
-	lock   sync.Mutex
+	lock   sync.RWMutex
 	tables map[string]*BSONTable
 }
 
@@ -33,11 +33,16 @@ type BSONTable struct {
 	handle     *os.File
 	db         *pebble.DB
 	tableId    uint32
-	handleLock sync.Mutex
+	handleLock sync.RWMutex
+	path       string
 }
 
 type dbSet interface {
 	Set(id []byte, val []byte, opts *pebble.WriteOptions) error
+}
+
+type dbGet interface {
+	Get(key []byte) ([]byte, io.Closer, error)
 }
 
 func fileExists(path string) bool {
@@ -97,6 +102,7 @@ func (dr *BSONDriver) Get(name string) (TableStore, error) {
 		db:      dr.db,
 		tableId: tinfo.Id,
 		handle:  f,
+		path:    tPath,
 	}
 	dr.tables[name] = out
 
@@ -139,9 +145,11 @@ func (dr *BSONDriver) New(name string, columns []ColumnDef) (TableStore, error) 
 
 	// Prepend Key column to columns provided by user
 	columns = append([]ColumnDef{{Name: "keyName", Type: String}}, columns...)
-	out := &BSONTable{columns: columns,
-		handleLock: sync.Mutex{}, columnMap: map[string]int{}}
+
 	tPath := filepath.Join(dr.base, "TABLES", name)
+	out := &BSONTable{columns: columns,
+		handleLock: sync.RWMutex{}, columnMap: map[string]int{},
+		path: tPath}
 	f, err := os.Create(tPath)
 	if err != nil {
 		return nil, err
@@ -250,7 +258,7 @@ func (b *BSONTable) Add(id []byte, entry map[string]any) error {
 	}
 
 	bsonHandlerNextoffset := make([]byte, 8)
-	// make Next offset equal to existing offset + length of data
+	// make next offset equal to existing offset + length of data
 	binary.LittleEndian.PutUint64(bsonHandlerNextoffset, uint64(offset)+uint64(len(bData))+8)
 	b.handle.Write(bsonHandlerNextoffset)
 
@@ -280,7 +288,7 @@ func (b *BSONTable) Get(id []byte, fields ...string) (map[string]any, error) {
 	bSize := int32(binary.LittleEndian.Uint32(sizeBytes))
 	b.handle.Seek(-4, io.SeekCurrent)
 	rowData := make([]byte, bSize)
-	b.handle.Read(rowData) //read the full block
+	b.handle.Read(rowData)
 	bd := bson.Raw(rowData)
 	columns := bd.Index(0).Value().Array()
 	out := map[string]any{}
@@ -332,8 +340,8 @@ func (b *BSONTable) getBlockPos(id []byte) (uint64, uint64, error) {
 	return offset, size, nil
 }
 
-func (b *BSONTable) Keys() (chan []byte, error) {
-	out := make(chan []byte, 10)
+func (b *BSONTable) Keys() (chan Index, error) {
+	out := make(chan Index, 10)
 	go func() {
 		defer close(out)
 
@@ -344,7 +352,7 @@ func (b *BSONTable) Keys() (chan []byte, error) {
 		}
 		for it.SeekGE(prefix); it.Valid() && bytes.HasPrefix(it.Key(), prefix); it.Next() {
 			_, value := ParsePosKey(it.Key())
-			out <- value
+			out <- Index{Key: value}
 		}
 		it.Close()
 	}()
@@ -425,6 +433,122 @@ func (b *BSONTable) Scan(filter []FieldFilter, fields ...string) (chan map[strin
 	return out, nil
 }
 
+func (b *BSONTable) Fetch(inputs chan Index, workers int) <-chan struct {
+	key  string
+	data map[string]any
+	err  string
+} {
+	log.Infoln("INPUtS", inputs)
+
+	results := make(chan struct {
+		key  string
+		data map[string]any
+		err  string
+	}, workers)
+
+	var wg sync.WaitGroup
+	offsetChan := make(chan struct {
+		key    string
+		offset uint64
+	}, workers)
+
+	// Step 1: Fetch offsets from Pebble DB
+	go func() {
+		b.bulkGet(func(s dbGet) error {
+			for entry := range inputs {
+
+				wg.Add(1)
+				go func(index Index) {
+					defer wg.Done()
+
+					// Get offset from Pebble batch
+					val, closer, err := s.Get(NewPosKey(b.tableId, index.Key))
+
+					if err != nil {
+						if err == pebble.ErrNotFound {
+							results <- struct {
+								key  string
+								data map[string]any
+								err  string
+							}{string(index.Key), nil, func() string {
+								if err != nil {
+									return err.Error()
+								}
+								return ""
+							}()}
+							return
+						}
+						results <- struct {
+							key  string
+							data map[string]any
+							err  string
+						}{string(index.Key), nil, func() string {
+							if err != nil {
+								return err.Error()
+							}
+							return ""
+						}()}
+						return
+					}
+					defer closer.Close()
+
+					// Convert stored value to offset
+					offset, _ := ParsePosValue(val)
+
+					offsetChan <- struct {
+						key    string
+						offset uint64
+					}{string(index.Key), offset}
+				}(entry)
+			}
+			return nil
+		})
+
+		// Close offset channel when all goroutines finish
+		wg.Wait()
+		close(offsetChan)
+	}()
+
+	// Step 2: Use worker pool for parallel file reads with RWLock
+	go func() {
+		var fileWg sync.WaitGroup
+		sem := make(chan struct{}, workers)
+		for entry := range offsetChan {
+			fileWg.Add(1)
+			sem <- struct{}{}
+
+			go func(e struct {
+				key    string
+				offset uint64
+			}) {
+				defer fileWg.Done()
+				defer func() { <-sem }()
+
+				data, err := b.readFromFileWithLock(e.offset)
+				if err != nil {
+					data = nil
+				}
+				results <- struct {
+					key  string
+					data map[string]any
+					err  string
+				}{e.key, data, func() string {
+					if err != nil {
+						return err.Error()
+					}
+					return ""
+				}()}
+			}(entry)
+		}
+
+		// Close results channel after all file reads complete
+		fileWg.Wait()
+		close(results)
+	}()
+
+	return results
+}
+
 func (b *BSONTable) Load(inputs chan Entry) error {
 
 	b.handleLock.Lock()
@@ -471,6 +595,10 @@ type pebbleBulkWrite struct {
 	curSize         int
 }
 
+type pebbleBulkRead struct {
+	db *pebble.DB
+}
+
 const (
 	maxWriterBuffer = 3 << 30
 )
@@ -496,6 +624,14 @@ func (pbw *pebbleBulkWrite) Set(id []byte, val []byte, opts *pebble.WriteOptions
 		pbw.curSize = 0
 	}
 	return err
+}
+
+func (pbr *pebbleBulkRead) Get(key []byte) ([]byte, io.Closer, error) {
+	return pbr.db.Get(key)
+}
+
+func (b *BSONTable) bulkGet(u func(s dbGet) error) error {
+	return u(&pebbleBulkRead{b.db})
 }
 
 func (b *BSONTable) bulkWrite(u func(s dbSet) error) error {
@@ -545,14 +681,12 @@ func (b *BSONTable) Compact() error {
 	if err != nil {
 		return err
 	}
-	defer tempHandle.Close()
 
 	oldHandle := b.handle
 	_, err = oldHandle.Seek(0, io.SeekStart)
 	if err != nil {
 		return err
 	}
-	defer oldHandle.Close()
 
 	reader := bufio.NewReaderSize(oldHandle, 16*1024*1024)
 	writer := bufio.NewWriterSize(tempHandle, 16*1024*1024)
@@ -568,7 +702,11 @@ func (b *BSONTable) Compact() error {
 
 	fileOffset := int64(0)
 	inputChan := make(chan Index, 100)
+
+	var wg sync.WaitGroup
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		b.SetIndices(inputChan)
 	}()
 
@@ -645,8 +783,7 @@ func (b *BSONTable) Compact() error {
 		}
 		keyName, err := arr.IndexErr(0)
 
-		//newOffsets[keyName.Value().StringValue()] = newOffset
-		inputChan <- Index{Key: keyName.Value().StringValue(), Position: newOffset}
+		inputChan <- Index{Key: []byte(keyName.Value().StringValue()), Position: newOffset}
 		log.Debugf("Time to parse BSON 'columns': %v\n", time.Since(startParseBSON))
 
 		// --- Write new offset ---
@@ -675,12 +812,16 @@ func (b *BSONTable) Compact() error {
 		log.Debugf("Total loop iteration time: %v\n", time.Since(startLoop))
 	}
 	close(inputChan)
+	wg.Wait()
 
 	// Replace the old file with the compacted one
 	fileName, err := filepath.Abs(b.handle.Name())
 	if err != nil {
 		return err
 	}
+
+	tempHandle.Sync()
+
 	err = os.Rename(tempFileName, fileName)
 	if err != nil {
 		return fmt.Errorf("failed renaming compacted file: %w", err)
@@ -697,8 +838,57 @@ func (b *BSONTable) Compact() error {
 func (b *BSONTable) SetIndices(inputs chan Index) {
 	b.bulkWrite(func(s dbSet) error {
 		for index := range inputs {
-			b.addTableEntryInfo(b.db, []byte(index.Key), index.Position, 0)
+			b.addTableEntryInfo(b.db, index.Key, index.Position, 0)
 		}
 		return nil
 	})
+}
+
+func (b *BSONTable) readFromFileWithLock(offset uint64) (map[string]any, error) {
+	file, err := os.Open(b.path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	_, err = file.Seek(int64(offset+8), io.SeekStart)
+	if err != nil {
+		return nil, err
+	}
+
+	// Read BSON block size
+	sizeBytes := []byte{0x00, 0x00, 0x00, 0x00}
+	_, err = file.Read(sizeBytes)
+	if err != nil {
+		return nil, err
+	}
+
+	file.Seek(-4, io.SeekCurrent) // Move back to start of block
+
+	// Read BSON block
+	rowData := make([]byte, int32(binary.LittleEndian.Uint32(sizeBytes)))
+	_, err = file.Read(rowData)
+	if err != nil {
+		return nil, err
+	}
+
+	// Deserialize BSON
+	bd := bson.Raw(rowData)
+	columns := bd.Index(0).Value().Array()
+	out := map[string]any{}
+
+	if err := bd.Index(1).Value().Unmarshal(&out); err != nil {
+		return nil, err
+	}
+
+	// Extract column values
+	elem, err := columns.Elements()
+	if err != nil {
+		return nil, err
+	}
+	for i, n := range b.columns {
+		out[n.Name] = b.colUnpack(elem[i], n.Type)
+	}
+
+	return out, nil
 }

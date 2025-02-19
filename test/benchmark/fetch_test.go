@@ -11,12 +11,11 @@ import (
 )
 
 const (
-	numKeys       = 1000
-	valueSize     = 5024
-	NumDeleteKeys = 200
+	NumKeys   = 100000
+	ValueSize = 5024
 )
 
-func BenchmarkCompactBson(b *testing.B) {
+func BenchmarkFetch(b *testing.B) {
 	var compactbsoname = "test.bson" + util.RandomString(5)
 	defer os.Remove(compactbsoname) // Clean up
 
@@ -37,9 +36,9 @@ func BenchmarkCompactBson(b *testing.B) {
 	inputChan := make(chan benchtop.Entry, 100)
 	go func() {
 		count := 0
-		for j := 0; j < numKeys; j++ {
+		for j := 0; j < NumKeys; j++ {
 			key := []byte(fmt.Sprintf("key_%d", j))
-			value := fixtures.GenerateRandomBytes(valueSize)
+			value := fixtures.GenerateRandomBytes(ValueSize)
 			inputChan <- benchtop.Entry{Key: key, Value: map[string]any{"data": value}}
 			count++
 		}
@@ -58,45 +57,12 @@ func BenchmarkCompactBson(b *testing.B) {
 		b.Fatal(err)
 	}
 
-	randomIndexSet, err := fixtures.GetRandomUniqueIntegers(NumDeleteKeys, numKeys)
-	if err != nil {
-		b.Fatal(err)
-	}
+	b.Log("KEYS", keys)
 
-	count := 0
-	deleted := 0
-	for key := range keys {
-		if _, exists := randomIndexSet[count]; exists {
-			if err := compactbsonTable.Delete(key.Key); err != nil {
-				b.Fatal(err)
-			}
-			deleted++
-		}
-		count++
-	}
-	b.Logf("Deleted %d keys", deleted)
-
-	b.Log("start compact")
-	b.ResetTimer()
-
-	if err := compactbsonTable.Compact(); err != nil {
-		b.Fatal(err)
-	}
-
-	keysAfterCompact, err := compactbsonTable.Keys()
-	if err != nil {
-		b.Fatal(err)
-	}
-
+	outStruct := compactbsonTable.Fetch(keys, 5)
 	keyCount := 0
-	for key := range keysAfterCompact {
-		fmt.Println("KEY: ", string(key.Key))
+	for _ = range outStruct {
 		keyCount++
 	}
-	if keyCount != (numKeys - NumDeleteKeys) {
-		b.Fatalf("Keycount %d not equal expected %d", keyCount, (numKeys - NumDeleteKeys))
-	}
-
-	b.Logf("Keys after compaction: %d", keyCount)
-	os.RemoveAll(compactbsoname)
+	b.Log("KEY COUNT: ", keyCount)
 }

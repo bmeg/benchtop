@@ -238,8 +238,15 @@ func (b *PebbleBSONTable) colUnpack(v bson.RawElement, colType FieldType) any {
 	return nil
 }
 
-func (b *PebbleBSONTable) Keys() (chan []byte, error) {
-	out := make(chan []byte, 10)
+func (b *PebbleBSONTable) Fetch(inputs chan Index, workers int) <-chan struct {
+	key  string
+	data map[string]any
+	err  string
+} {
+	return nil
+}
+func (b *PebbleBSONTable) Keys() (chan Index, error) {
+	out := make(chan Index, 10)
 	go func() {
 		defer close(out)
 
@@ -250,7 +257,7 @@ func (b *PebbleBSONTable) Keys() (chan []byte, error) {
 		}
 		for it.SeekGE(prefix); it.Valid() && bytes.HasPrefix(it.Key(), prefix); it.Next() {
 			_, value := ParsePosKey(it.Key())
-			out <- value
+			out <- Index{Key: value}
 		}
 		it.Close()
 	}()
