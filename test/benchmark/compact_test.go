@@ -89,8 +89,7 @@ func BenchmarkCompactBson(b *testing.B) {
 	}
 
 	keyCount := 0
-	for key := range keysAfterCompact {
-		fmt.Println("KEY: ", string(key.Key))
+	for _ = range keysAfterCompact {
 		keyCount++
 	}
 	if keyCount != (numKeys - NumDeleteKeys) {

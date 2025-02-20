@@ -11,24 +11,24 @@ import (
 )
 
 const (
-	NumKeys   = 100000
-	ValueSize = 5024
+	fetchNumKeys   = 100000
+	fetchValueSize = 5024
 )
 
 func BenchmarkFetch(b *testing.B) {
-	var compactbsoname = "test.bson" + util.RandomString(5)
-	defer os.Remove(compactbsoname) // Clean up
+	var fetchname = "test.bson" + util.RandomString(5)
+	defer os.Remove(fetchname) // Clean up
 
 	b.Log("BenchmarkScaleWriteBson start")
 
-	compactbsonDriver, err := benchtop.NewBSONDriver(compactbsoname)
+	compactbsonDriver, err := benchtop.NewBSONDriver(fetchname)
 	if err != nil {
 		b.Fatal(err)
 	}
 
 	columns := []benchtop.ColumnDef{{Name: "data", Type: benchtop.Bytes}}
 
-	compactbsonTable, err := compactbsonDriver.New(compactbsoname, columns)
+	compactbsonTable, err := compactbsonDriver.New(fetchname, columns)
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -36,9 +36,9 @@ func BenchmarkFetch(b *testing.B) {
 	inputChan := make(chan benchtop.Entry, 100)
 	go func() {
 		count := 0
-		for j := 0; j < NumKeys; j++ {
+		for j := 0; j < fetchNumKeys; j++ {
 			key := []byte(fmt.Sprintf("key_%d", j))
-			value := fixtures.GenerateRandomBytes(ValueSize)
+			value := fixtures.GenerateRandomBytes(fetchValueSize)
 			inputChan <- benchtop.Entry{Key: key, Value: map[string]any{"data": value}}
 			count++
 		}
@@ -61,8 +61,10 @@ func BenchmarkFetch(b *testing.B) {
 
 	outStruct := compactbsonTable.Fetch(keys, 5)
 	keyCount := 0
-	for _ = range outStruct {
+	for keys := range outStruct {
+		b.Log("KEY: ", keys)
 		keyCount++
 	}
 	b.Log("KEY COUNT: ", keyCount)
+	os.RemoveAll(fetchname)
 }

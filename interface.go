@@ -38,21 +38,22 @@ type Index struct {
 	Position uint64
 }
 
+type BulkResponse struct {
+	key  string
+	data map[string]any
+	err  string
+}
+
 type TableStore interface {
 	GetColumns() []ColumnDef
 	Add(key []byte, row map[string]any) error
 	Get(key []byte, fields ...string) (map[string]any, error)
 	Delete(key []byte) error
-	Fetch(inputs chan Index, workers int) <-chan struct {
-		key  string
-		data map[string]any
-		err  string
-	}
 
+	Fetch(inputs chan Index, workers int) <-chan BulkResponse
+	Remove(inputs chan Index, workers int) <-chan BulkResponse
 	Scan(filter []FieldFilter, fields ...string) (chan map[string]any, error)
-
 	Keys() (chan Index, error)
-
 	Load(chan Entry) error
 
 	Compact() error

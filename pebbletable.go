@@ -8,10 +8,10 @@ import (
 	"path/filepath"
 	"sync"
 
+	"github.com/bmeg/benchtop/util"
 	"github.com/cockroachdb/pebble"
 
 	"go.mongodb.org/mongo-driver/bson"
-	//NOTE: try github.com/dgraph-io/ristretto for cache
 )
 
 type PebbleBSONDriver struct {
@@ -34,7 +34,7 @@ func NewPebbleBSONDriver(path string) (TableDriver, error) {
 		return nil, err
 	}
 	tableDir := filepath.Join(path, "TABLES")
-	if fileExists(tableDir) {
+	if util.FileExists(tableDir) {
 		os.Mkdir(tableDir, 0700)
 	}
 	return &PebbleBSONDriver{base: path, db: db, tables: map[string]*PebbleBSONTable{}}, nil
@@ -238,13 +238,14 @@ func (b *PebbleBSONTable) colUnpack(v bson.RawElement, colType FieldType) any {
 	return nil
 }
 
-func (b *PebbleBSONTable) Fetch(inputs chan Index, workers int) <-chan struct {
-	key  string
-	data map[string]any
-	err  string
-} {
-	return nil
+func (b *PebbleBSONTable) Fetch(inputs chan Index, workers int) <-chan BulkResponse {
+	panic("not implemented")
 }
+
+func (b *PebbleBSONTable) Remove(inputs chan Index, workers int) <-chan BulkResponse {
+	panic("not implemented")
+}
+
 func (b *PebbleBSONTable) Keys() (chan Index, error) {
 	out := make(chan Index, 10)
 	go func() {
@@ -301,64 +302,6 @@ func (b *PebbleBSONTable) bulkWrite(u func(s dbSet) error) error {
 	return err
 }
 
-/*
-func getUint64(f *os.File, pos int64) (uint64, error) {
-	f.Seek(pos, io.SeekStart)
-	buf := make([]byte, 8)
-	_, err := f.Read(buf)
-	if err != nil {
-		return uint64(0), err
-	}
-	val := binary.LittleEndian.Uint64(buf)
-	return val, nil
-
-}
-
-func (b *BsonTable) OffsetToPosition(offset int64) (int64, error) {
-	b.indexLock.Lock()
-	defer b.indexLock.Unlock()
-
-	info, err := b.indexHandle.Stat()
-	if err != nil {
-		return -1, err
-	}
-	size := info.Size()
-	count := size / 8
-
-	spanLow := int64(0)
-	spanHigh := count
-	for {
-		cur := (spanLow + spanHigh) >> 1
-		val, err := getUint64(b.indexHandle, cur<<3)
-		if err != nil {
-			return -1, err
-		}
-		uVal := int64(val & markMask)
-		//fmt.Printf("State: %d - %d %d=%d : %d\n", spanLow, spanHigh, cur, uVal, offset)
-		if uVal == offset {
-			if val&markBit == markBit {
-				return cur, fmt.Errorf("deleting deteted record")
-			}
-			return cur, nil
-		}
-		if spanLow == spanHigh {
-			break
-		}
-		if spanLow+1 == spanHigh {
-			//fmt.Printf("increment\n")
-			spanLow = spanHigh
-		} else {
-			if uVal > offset {
-				spanHigh = cur
-			} else if uVal < offset {
-				spanLow = cur
-			}
-		}
-	}
-	return 0, fmt.Errorf("not found")
-}
-*/
-
 func (b *PebbleBSONTable) Delete(name []byte) error {
 	posKey := NewPosKey(b.TableId, name)
 	b.db.Delete(posKey, nil)
@@ -366,38 +309,5 @@ func (b *PebbleBSONTable) Delete(name []byte) error {
 }
 
 func (b *PebbleBSONTable) Compact() error {
-	/*
-		b.indexLock.Lock()
-		defer b.indexLock.Unlock()
-
-		info, err := b.indexHandle.Stat()
-		if err != nil {
-			return err
-		}
-		size := info.Size()
-		count := size / 8
-
-		sampleSize := int64(10)
-
-		sampleStart := count - sampleSize
-		if sampleStart < 0 {
-			sampleStart = 0
-		}
-		moveSet := []int64{}
-
-		b.indexHandle.Seek(sampleStart<<3, io.SeekStart)
-		for curSample := sampleStart; curSample < count; curSample++ {
-			buf := make([]byte, 8)
-			b.indexHandle.Read(buf)
-			val := binary.LittleEndian.Uint64(buf)
-			if val&markBit == markBit {
-
-			} else {
-				moveSet = append(moveSet, int64(val))
-			}
-		}
-
-		fmt.Printf("readytomove: %#v\n", moveSet)
-	*/
 	return nil
 }
