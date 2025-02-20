@@ -61,8 +61,8 @@ func BenchmarkFetch(b *testing.B) {
 
 	outStruct := compactbsonTable.Fetch(keys, 5)
 	keyCount := 0
-	for keys := range outStruct {
-		b.Log("KEY: ", keys)
+	for _ = range outStruct {
+		//b.Log("KEY: ", keys)
 		keyCount++
 	}
 	b.Log("KEY COUNT: ", keyCount)

@@ -418,12 +418,6 @@ func (b *BSONTable) Fetch(inputs chan Index, workers int) <-chan BulkResponse {
 	results := make(chan BulkResponse, workers)
 
 	var wg sync.WaitGroup
-	offsetChan := make(chan struct {
-		key    string
-		offset uint64
-	}, workers)
-
-	// Step 1: Fetch offsets from Pebble DB
 	go func() {
 		b.bulkGet(func(s dbGet) error {
 			for entry := range inputs {
@@ -445,48 +439,23 @@ func (b *BSONTable) Fetch(inputs chan Index, workers int) <-chan BulkResponse {
 					}
 					defer closer.Close()
 
-					offsetChan <- struct {
-						key    string
-						offset uint64
-					}{string(index.Key), binary.LittleEndian.Uint64(val)}
+					data, err := b.readFromFile(binary.LittleEndian.Uint64(val))
+					if err != nil {
+						data = nil
+					}
+					results <- BulkResponse{string(index.Key), data, func() string {
+						if err != nil {
+							return err.Error()
+						}
+						return ""
+					}()}
+
 				}(entry)
 			}
 			return nil
 		})
 
 		wg.Wait()
-		close(offsetChan)
-	}()
-
-	// Step 2: Use worker pool for parallel file reads
-	go func() {
-		var fileWg sync.WaitGroup
-		sem := make(chan struct{}, workers)
-		for entry := range offsetChan {
-			fileWg.Add(1)
-			sem <- struct{}{}
-
-			go func(e struct {
-				key    string
-				offset uint64
-			}) {
-				defer fileWg.Done()
-				defer func() { <-sem }()
-
-				data, err := b.readFromFile(e.offset)
-				if err != nil {
-					data = nil
-				}
-				results <- BulkResponse{e.key, data, func() string {
-					if err != nil {
-						return err.Error()
-					}
-					return ""
-				}()}
-			}(entry)
-		}
-
-		fileWg.Wait()
 		close(results)
 	}()
 
@@ -531,29 +500,39 @@ func (b *BSONTable) Load(inputs chan Entry) error {
 func (b *BSONTable) Remove(inputs chan Index, workers int) <-chan BulkResponse {
 	results := make(chan BulkResponse, workers)
 
-	var wg sync.WaitGroup
-	offsetChan := make(chan struct {
-		key    string
-		offset uint64
-	}, workers)
-
-	passinputs := make(chan Index, workers)
+	batchDeletes := make(chan Index, workers)
 
 	go func() {
-		defer close(passinputs)
-		b.bulkGet(func(s dbGet) error {
-			for entry := range inputs {
+		b.bulkDelete(func(s dbDelete) error {
+			for index := range batchDeletes {
+				err := s.Delete(NewPosKey(b.tableId, index.Key), nil)
+				if err != nil {
+					results <- BulkResponse{string(index.Key), nil, func() string {
+						if err != nil {
+							return err.Error()
+						}
+						return ""
+					}()}
+				}
+			}
+			return nil
+		})
+		close(results)
+	}()
 
+	var wg sync.WaitGroup
+	go func() {
+		defer close(batchDeletes)
+		b.bulkGet(func(s dbGet) error {
+			for index := range inputs {
 				wg.Add(1)
 				go func(index Index) {
 					defer wg.Done()
 
-					// Get offset from Pebble batch
-					fmt.Println("INDEX KEY: ", string(index.Key))
-
+					key := string(index.Key)
 					val, closer, err := s.Get(NewPosKey(b.tableId, index.Key))
 					if err != nil {
-						results <- BulkResponse{string(index.Key), nil, func() string {
+						results <- BulkResponse{key, nil, func() string {
 							if err != nil {
 								return err.Error()
 							}
@@ -562,59 +541,10 @@ func (b *BSONTable) Remove(inputs chan Index, workers int) <-chan BulkResponse {
 						return
 					}
 					defer closer.Close()
-					passinputs <- entry
 
-					offsetChan <- struct {
-						key    string
-						offset uint64
-					}{string(index.Key), binary.LittleEndian.Uint64(val)}
-				}(entry)
-			}
-			return nil
-		})
-
-		wg.Wait()
-		close(offsetChan)
-	}()
-
-	go func() {
-		var fileWg sync.WaitGroup
-		sem := make(chan struct{}, workers)
-		for entry := range offsetChan {
-			fileWg.Add(1)
-			sem <- struct{}{}
-
-			go func(e struct {
-				key    string
-				offset uint64
-			}) {
-				defer fileWg.Done()
-				defer func() { <-sem }()
-
-				err := b.markDelete(e.offset)
-				results <- BulkResponse{e.key, nil, func() string {
-					if err != nil {
-						return err.Error()
-					}
-					return ""
-				}()}
-			}(entry)
-		}
-
-		fileWg.Wait()
-		close(results)
-	}()
-
-	var pbDelwg sync.WaitGroup
-	go func() {
-		b.bulkDelete(func(s dbDelete) error {
-			for entry := range passinputs {
-				pbDelwg.Add(1)
-				go func(index Index) {
-					defer pbDelwg.Done()
-					err := s.Delete(NewPosKey(b.tableId, index.Key), nil)
-					if err != nil {
-						results <- BulkResponse{string(index.Key), nil, func() string {
+					offset := binary.LittleEndian.Uint64(val)
+					if err := b.markDelete(offset); err != nil {
+						results <- BulkResponse{key, nil, func() string {
 							if err != nil {
 								return err.Error()
 							}
@@ -622,12 +552,14 @@ func (b *BSONTable) Remove(inputs chan Index, workers int) <-chan BulkResponse {
 						}()}
 						return
 					}
-				}(entry)
+
+					batchDeletes <- index
+					results <- BulkResponse{key, nil, ""}
+				}(index)
 			}
 			return nil
 		})
-
-		pbDelwg.Wait()
+		wg.Wait()
 	}()
 
 	return results
