@@ -181,8 +181,9 @@ func (b *BSONTable) readFromFile(offset uint64) (map[string]any, error) {
 	return out, nil
 }
 
-func (b *BSONTable) WriteOffset(buffer []byte, offset int64, bData []byte) (int, error) {
+func (b *BSONTable) writeOffset(offset int64, bData []byte) (int, error) {
 	// make next offset equal to existing offset + length of data
+	buffer := make([]byte, 8)
 	binary.LittleEndian.PutUint64(buffer, uint64(offset)+uint64(len(bData))+8)
 	b.handle.Write(buffer)
 	return b.handle.Write(bData)

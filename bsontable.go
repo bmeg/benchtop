@@ -73,8 +73,7 @@ func (b *BSONTable) Add(id []byte, entry map[string]any) error {
 		return err
 	}
 
-	offsetBuffer := make([]byte, 8)
-	writesize, err := b.WriteOffset(offsetBuffer, offset, bData)
+	writesize, err := b.writeOffset(offset, bData)
 	if err != nil {
 		log.Errorf("write handler err in Load: bulkSet: %s", err)
 	}
@@ -470,7 +469,6 @@ func (b *BSONTable) Load(inputs chan Entry) error {
 		return err
 	}
 
-	bsonHandleNextoffset := make([]byte, 8)
 	b.bulkSet(func(s dbSet) error {
 		for entry := range inputs {
 			dData, err := b.packData(entry.Value, string(entry.Key))
@@ -483,7 +481,7 @@ func (b *BSONTable) Load(inputs chan Entry) error {
 			}
 
 			// make Next offset equal to existing offset + length of data
-			writeSize, err := b.WriteOffset(bsonHandleNextoffset, offset, bData)
+			writeSize, err := b.writeOffset(offset, bData)
 			if err != nil {
 				log.Errorf("write handler err in Load: bulkSet: %s", err)
 			}
