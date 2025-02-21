@@ -265,7 +265,7 @@ func (b *PebbleBSONTable) Keys() (chan Index, error) {
 	return out, nil
 }
 
-func (b *PebbleBSONTable) Scan(filter []FieldFilter, fields ...string) (chan map[string]any, error) {
+func (b *PebbleBSONTable) Scan(key bool, filter []FieldFilter, fields ...string) (chan map[string]any, error) {
 	return nil, nil
 }
 

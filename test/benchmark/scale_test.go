@@ -2,6 +2,7 @@ package test
 
 import (
 	"fmt"
+	"os"
 	"testing"
 
 	"github.com/bmeg/benchtop"
@@ -141,6 +142,7 @@ func BenchmarkRandomKeysBson(b *testing.B) {
 		count++
 	}
 	b.Log("READS: ", len(selectedValues), "COUNT: ", count)
+	os.RemoveAll(Bsonname)
 
 }
 
@@ -277,5 +279,6 @@ func BenchmarkRandomKeysPebble(b *testing.B) {
 		count++
 	}
 	b.Log("KEYS: ", len(selectedValues), "COUNT: ", count)
+	os.RemoveAll(Pebblename)
 
 }

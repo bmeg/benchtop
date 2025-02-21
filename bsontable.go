@@ -56,8 +56,7 @@ func (b *BSONTable) GetColumns() []ColumnDef {
 Unary single effect operations
 */
 func (b *BSONTable) Add(id []byte, entry map[string]any) error {
-	entry["keyName"] = string(id)
-	dData, err := b.packData(entry)
+	dData, err := b.packData(entry, string(id))
 	if err != nil {
 		return err
 	}
@@ -106,7 +105,12 @@ func (b *BSONTable) Get(id []byte, fields ...string) (map[string]any, error) {
 	rowData := make([]byte, bSize)
 	b.handle.Read(rowData)
 	bd := bson.Raw(rowData)
-	columns := bd.Index(0).Value().Array()
+
+	columns, ok := bd.Index(0).Value().ArrayOK()
+	if !ok || len(columns) == 0 {
+		return nil, fmt.Errorf("'columns' array is missing or empty")
+	}
+
 	out := map[string]any{}
 	if len(fields) == 0 {
 		if err := bd.Index(1).Value().Unmarshal(&out); err != nil {
@@ -252,20 +256,12 @@ func (b *BSONTable) Compact() error {
 		// --- Extract 'columns' field from BSON ---
 		startParseBSON := time.Now()
 		raw := bson.Raw(rowBuff)
-		val, exists := raw.LookupErr("columns")
+		val, exists := raw.LookupErr("key")
 		if exists != nil {
 			return fmt.Errorf("'columns' field not found in BSON document")
 		}
-		if val.Type != bson.TypeArray {
-			return fmt.Errorf("unexpected BSON type for 'columns': %v", val.Type)
-		}
-		arr, ok := val.ArrayOK()
-		if !ok || len(arr) == 0 {
-			return fmt.Errorf("'columns' array is missing or empty")
-		}
-		keyName, err := arr.IndexErr(0)
 
-		inputChan <- Index{Key: []byte(keyName.Value().StringValue()), Position: newOffset}
+		inputChan <- Index{Key: []byte(val.StringValue()), Position: newOffset}
 		log.Debugf("Time to parse BSON 'columns': %v\n", time.Since(startParseBSON))
 
 		// --- Write new offset ---
@@ -340,7 +336,7 @@ func (b *BSONTable) Keys() (chan Index, error) {
 	return out, nil
 }
 
-func (b *BSONTable) Scan(filter []FieldFilter, fields ...string) (chan map[string]any, error) {
+func (b *BSONTable) Scan(keys bool, filter []FieldFilter, fields ...string) (chan map[string]any, error) {
 	b.handleLock.RLock()
 	defer b.handleLock.RUnlock()
 
@@ -392,12 +388,16 @@ func (b *BSONTable) Scan(filter []FieldFilter, fields ...string) (chan map[strin
 			columns := bd.Index(0).Value().Array()
 
 			vOut := map[string]any{}
+
 			for _, colName := range fields {
 				if i, ok := b.columnMap[colName]; ok {
 					n := b.columns[i]
 					unpack := b.colUnpack(columns.Index(uint(i)), n.Type)
 					if PassesFilters(unpack, filter) {
 						vOut[n.Name] = unpack
+						if keys {
+							vOut["_key"] = bd.Index(2).Value().StringValue()
+						}
 					}
 				}
 			}
@@ -473,8 +473,7 @@ func (b *BSONTable) Load(inputs chan Entry) error {
 	bsonHandleNextoffset := make([]byte, 8)
 	b.bulkSet(func(s dbSet) error {
 		for entry := range inputs {
-			entry.Value["keyName"] = string(entry.Key)
-			dData, err := b.packData(entry.Value)
+			dData, err := b.packData(entry.Value, string(entry.Key))
 			if err != nil {
 				log.Errorf("pack data err in Load: bulkSet: %s", err)
 			}

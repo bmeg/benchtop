@@ -19,6 +19,7 @@ type TableInfo struct {
 type ColumnDef struct {
 	Name string    `json:"name"`
 	Type FieldType `json:"type"`
+	Key  string    `json:"key"`
 }
 
 type TableDriver interface {
@@ -52,7 +53,7 @@ type TableStore interface {
 
 	Fetch(inputs chan Index, workers int) <-chan BulkResponse
 	Remove(inputs chan Index, workers int) <-chan BulkResponse
-	Scan(filter []FieldFilter, fields ...string) (chan map[string]any, error)
+	Scan(key bool, filter []FieldFilter, fields ...string) (chan map[string]any, error)
 	Keys() (chan Index, error)
 	Load(chan Entry) error
 

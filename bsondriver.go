@@ -44,7 +44,6 @@ func (dr *BSONDriver) New(name string, columns []ColumnDef) (TableStore, error) 
 	defer dr.lock.Unlock()
 
 	// Prepend Key column to columns provided by user
-	columns = append([]ColumnDef{{Name: "keyName", Type: String}}, columns...)
 
 	tPath := filepath.Join(dr.base, "TABLES", name)
 	out := &BSONTable{columns: columns,
@@ -84,7 +83,6 @@ func (dr *BSONDriver) List() []string {
 	it.Close()
 	return out
 }
-
 
 func (dr *BSONDriver) Close() {
 	log.Infoln("Closing driver")

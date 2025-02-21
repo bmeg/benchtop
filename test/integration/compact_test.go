@@ -61,7 +61,7 @@ func TestCompact(t *testing.T) {
 		t.Logf("size before=%d, after=%d", beforeSize, afterSize)
 	}
 
-	testChan, err := ts.Scan(nil, "field1", "name", "keyName")
+	testChan, err := ts.Scan(true, nil, "field1", "name")
 	if err != nil {
 		t.Error(err)
 	}
@@ -77,8 +77,8 @@ func TestCompact(t *testing.T) {
 	}
 	t.Log("VAL: ", val)
 
-	if val["keyName"] != "key8" {
-		t.Errorf("fetched key8 but got %s instead", val["keyName"])
+	if val["name"] != "mnbv" {
+		t.Errorf("fetched key8 but got name val %s instead", val["name"])
 	}
 
 	// Get another key to double check that it works
@@ -88,8 +88,8 @@ func TestCompact(t *testing.T) {
 	}
 	t.Log("VAL: ", val)
 
-	if val["keyName"] != "key7" {
-		t.Errorf("fetched key7 but got %s instead", val["keyName"])
+	if val["name"] != "zxcv" {
+		t.Errorf("fetched key7 but got name val %s instead", val["name"])
 	}
 
 	ts.Compact()

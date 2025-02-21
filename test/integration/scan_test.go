@@ -34,7 +34,7 @@ func TestScan(t *testing.T) {
 	}
 
 	lenscanChan := 0
-	scanChan, err := ts.Scan([]benchtop.FieldFilter{benchtop.FieldFilter{Field: "name", Operator: "==", Value: "alice"}}, "name", "field1", "keyName")
+	scanChan, err := ts.Scan(false, []benchtop.FieldFilter{benchtop.FieldFilter{Field: "name", Operator: "==", Value: "alice"}}, "name", "field1")
 	if err != nil {
 		t.Error(err)
 	}
@@ -44,9 +44,12 @@ func TestScan(t *testing.T) {
 		if elem["name"] != "alice" {
 			t.Errorf("expecting chan of len 1 with value name:alice got %s", elem)
 		}
+		if _, ok := elem["_key"]; ok {
+			t.Errorf("specified no key to be returned but returned key anyway")
+		}
 	}
 
-	scanChantwo, err := ts.Scan([]benchtop.FieldFilter{benchtop.FieldFilter{Field: "field1", Operator: "==", Value: 0.2}}, "name", "field1", "keyName")
+	scanChantwo, err := ts.Scan(true, []benchtop.FieldFilter{benchtop.FieldFilter{Field: "field1", Operator: "==", Value: 0.2}}, "name", "field1")
 	if err != nil {
 		t.Error(err)
 	}
@@ -55,9 +58,14 @@ func TestScan(t *testing.T) {
 		if elem["field1"] != 0.2 {
 			t.Errorf("expecting chan of len 1 with value field:0.2 got %s", elem)
 		}
+		if Key, ok := elem["_key"]; ok {
+			if Key == "" {
+				t.Errorf("specified key to be returned but got '%s'", Key)
+			}
+		}
 	}
 
-	scanChanthree, err := ts.Scan([]benchtop.FieldFilter{benchtop.FieldFilter{Field: "field1", Operator: ">", Value: 0.2}}, "name", "field1", "keyName")
+	scanChanthree, err := ts.Scan(true, []benchtop.FieldFilter{benchtop.FieldFilter{Field: "field1", Operator: ">", Value: 0.2}}, "name", "field1")
 	if err != nil {
 		t.Error(err)
 	}
@@ -65,6 +73,11 @@ func TestScan(t *testing.T) {
 	for elem := range scanChanthree {
 		t.Log("scanChanthree: ", elem)
 		scanChanLen++
+		if Key, ok := elem["_key"]; ok {
+			if Key == "" {
+				t.Errorf("specified key to be returned but got '%s'", Key)
+			}
+		}
 	}
 	if scanChanLen != 6 {
 		t.Error("Expecting 7 items returned but got ", scanChanLen)
@@ -75,7 +88,7 @@ func TestScan(t *testing.T) {
 		t.Error(err)
 	}
 
-	scanChanfour, err := ts.Scan([]benchtop.FieldFilter{benchtop.FieldFilter{Field: "name", Operator: "startswith", Value: "a"}}, "name", "field1", "keyName")
+	scanChanfour, err := ts.Scan(false, []benchtop.FieldFilter{benchtop.FieldFilter{Field: "name", Operator: "startswith", Value: "a"}}, "name", "field1")
 	if err != nil {
 		t.Error(err)
 	}
@@ -83,6 +96,9 @@ func TestScan(t *testing.T) {
 	for elem := range scanChanfour {
 		t.Log("scanChanfour: ", elem)
 		scanChanLen++
+		if _, ok := elem["_key"]; ok {
+			t.Errorf("specified no key to be returned but returned key anyway")
+		}
 	}
 	if scanChanLen != 1 {
 		t.Error("Expecting only one elem after delete key4")

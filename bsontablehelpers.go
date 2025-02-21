@@ -22,7 +22,7 @@ func checkType(val any, t FieldType) (any, error) {
 	return val, nil
 }
 
-func (b *BSONTable) packData(entry map[string]any) (bson.D, error) {
+func (b *BSONTable) packData(entry map[string]any, key string) (bson.D, error) {
 	// pack named columns
 	columns := []any{}
 	for _, c := range b.columns {
@@ -43,7 +43,7 @@ func (b *BSONTable) packData(entry map[string]any) (bson.D, error) {
 			other[k] = v
 		}
 	}
-	return bson.D{{Key: "columns", Value: columns}, {Key: "data", Value: other}}, nil
+	return bson.D{{Key: "columns", Value: columns}, {Key: "data", Value: other}, {Key: "key", Value: key}}, nil
 }
 
 func (b *BSONTable) addTableEntryInfo(db dbSet, name []byte, offset, size uint64) {
