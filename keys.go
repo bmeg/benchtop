@@ -8,6 +8,7 @@ var idPrefix = byte('T')
 var namePrefix = byte('t')
 var posPrefix = byte('p')
 
+/* Name keys used for storing the key names of rows in a table*/
 func NewNameKey(id []byte) []byte {
 	out := make([]byte, len(id)+1)
 	out[0] = namePrefix
@@ -26,6 +27,7 @@ func ParseNameKey(key []byte) []byte {
 	return out
 }
 
+/* Id Keys used for storing table id */
 func NewIDKey(id uint32) []byte {
 	out := make([]byte, 5)
 	out[0] = idPrefix

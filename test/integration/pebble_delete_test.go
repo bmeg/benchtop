@@ -2,22 +2,23 @@ package test
 
 import (
 	"fmt"
+	"os"
 	"testing"
 
 	"github.com/bmeg/benchtop"
 	"github.com/bmeg/benchtop/util"
 )
 
-func TestDelete(t *testing.T) {
+func TestPebbleDelete(t *testing.T) {
 	dbname := "test.data" + util.RandomString(5)
-	dr, err := benchtop.NewBSONDriver(dbname)
+	dr, err := benchtop.NewPebbleBSONDriver(dbname)
 	if err != nil {
 		t.Error(err)
 	}
 
 	ts, err := dr.New("table_2", []benchtop.ColumnDef{
-		{Path: "data", Type: benchtop.Int64},
-		{Path: "id", Type: benchtop.String},
+		{Name: "data", Type: benchtop.Int64},
+		{Name: "id", Type: benchtop.String},
 	})
 
 	if err != nil {
@@ -42,9 +43,9 @@ func TestDelete(t *testing.T) {
 		t.Error(err)
 	}
 	for i := range r {
-		_, err := ts.Get(i)
+		_, err := ts.Get(i.Key)
 		if err != nil {
-			t.Errorf("Get %s error: %s", i, err)
+			t.Errorf("Get %s error: %s", string(i.Key), err)
 		}
 		count++
 	}
@@ -57,9 +58,9 @@ func TestDelete(t *testing.T) {
 	i := 0
 	for k := range keys {
 		if i%3 == 0 {
-			err := ts.Delete(k)
+			err := ts.Delete(k.Key)
 			if err != nil {
-				t.Errorf("delete %s error: %s", k, err)
+				t.Errorf("delete %s error: %s", string(k.Key), err)
 			}
 			deleteCount++
 			i++
@@ -76,5 +77,6 @@ func TestDelete(t *testing.T) {
 		t.Errorf("incorrect return count after delete %d != %d", count, totalCount-deleteCount)
 	}
 
-	dr.Close()
+	defer dr.Close()
+	os.RemoveAll(dbname)
 }

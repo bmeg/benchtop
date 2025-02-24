@@ -11,7 +11,7 @@ func TestMarshal(t *testing.T) {
 
 	tinfo := benchtop.TableInfo{
 		Columns: []benchtop.ColumnDef{
-			{Path: "columnA", Type: benchtop.String},
+			{Name: "columnA", Type: benchtop.String},
 		},
 		Id: 42,
 	}
@@ -33,7 +33,7 @@ func TestMarshal(t *testing.T) {
 	}
 
 	for i := range tinfo.Columns {
-		if tinfo.Columns[i].Path != out.Columns[i].Path {
+		if tinfo.Columns[i].Name != out.Columns[i].Name {
 			t.Errorf("invalid unmarshal")
 		}
 		if tinfo.Columns[i].Type != out.Columns[i].Type {
