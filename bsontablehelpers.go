@@ -126,7 +126,7 @@ func (b *BSONTable) markDelete(offset uint64) error {
 	if err != nil {
 		return err
 	}
-	err = file.Sync() // Add this line!
+	err = file.Sync()
 	if err != nil {
 		return err
 	}

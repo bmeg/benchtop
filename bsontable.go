@@ -166,23 +166,21 @@ func (b *BSONTable) Compact() error {
 	if err != nil {
 		return err
 	}
+	defer tempHandle.Close() // Ensure tempHandle is closed on function exit
 
 	oldHandle := b.handle
 	_, err = oldHandle.Seek(0, io.SeekStart)
 	if err != nil {
 		return err
 	}
+	defer oldHandle.Close() // Ensure oldHandle is closed on function exit
 
 	reader := bufio.NewReaderSize(oldHandle, 16*1024*1024)
 	writer := bufio.NewWriterSize(tempHandle, 16*1024*1024)
-	defer writer.Flush()
 
-	//newOffsets := make(map[string]uint64)
 	var newOffset uint64 = 0
-
 	offsetSizeData := make([]byte, 8)
 	sizeBytes := make([]byte, 4)
-
 	rowBuff := make([]byte, 0, 1<<20)
 
 	fileOffset := int64(0)
@@ -222,7 +220,6 @@ func (b *BSONTable) Compact() error {
 		// --- Handle empty records ---
 		fileOffset += 8 + 4
 		if bSize == 0 {
-			// Check if there's a gap
 			if int64(nextOffset) > fileOffset {
 				startSeek := time.Now()
 				_, err = oldHandle.Seek(int64(nextOffset), io.SeekStart)
@@ -232,7 +229,7 @@ func (b *BSONTable) Compact() error {
 					}
 					return fmt.Errorf("failed to seek to nextOffset: %w", err)
 				}
-				fileOffset = int64(nextOffset) // Update fileOffset
+				fileOffset = int64(nextOffset)
 				reader.Reset(oldHandle)
 				log.Debugf("Time to seek & reset reader: %v\n", time.Since(startSeek))
 			}
@@ -279,7 +276,9 @@ func (b *BSONTable) Compact() error {
 
 		flushCounter++
 		if flushCounter%flushThreshold == 0 {
-			writer.Flush()
+			if err := writer.Flush(); err != nil {
+				return fmt.Errorf("failed flushing writer: %w", err)
+			}
 		}
 
 		log.Debugf("Time to write new offset and BSON: %v\n", time.Since(startWrite))
@@ -291,23 +290,35 @@ func (b *BSONTable) Compact() error {
 	close(inputChan)
 	wg.Wait()
 
-	// Replace the old file with the compacted one
+	if err := writer.Flush(); err != nil {
+		return fmt.Errorf("failed final flush of writer: %w", err)
+	}
+
+	if err := tempHandle.Sync(); err != nil {
+		return fmt.Errorf("failed syncing temp file: %w", err)
+	}
+	if err := tempHandle.Close(); err != nil {
+		return fmt.Errorf("failed closing temp file: %w", err)
+	}
+
+	if err := oldHandle.Close(); err != nil {
+		return fmt.Errorf("failed closing old handle: %w", err)
+	}
+
 	fileName, err := filepath.Abs(b.handle.Name())
 	if err != nil {
 		return err
 	}
 
-	tempHandle.Sync()
-
-	err = os.Rename(tempFileName, fileName)
-	if err != nil {
+	if err := os.Rename(tempFileName, fileName); err != nil {
 		return fmt.Errorf("failed renaming compacted file: %w", err)
 	}
 
-	b.handle, err = os.OpenFile(fileName, os.O_RDWR, 0644)
+	newHandle, err := os.OpenFile(fileName, os.O_RDWR, 0644)
 	if err != nil {
 		return fmt.Errorf("failed reopening compacted file: %w", err)
 	}
+	b.handle = newHandle
 
 	return nil
 }
