@@ -4,21 +4,39 @@ import (
 	"encoding/binary"
 )
 
-var IdPrefix = byte('T')
-var NamePrefix = byte('t')
+// TableId
+// key: T | TableId | TableIdPrefix'
+// The starting point for table Ids in th Pebble index
+var TablePrefix = byte('T')
+
+// Entries
+// key: i | TableId | TermType | Entry
+// The index of the table row in the pebble db
+var EntryPrefix = byte('i')
+
+// Reverse Entry
+// key: r
+// The reverse index of the table row
+var ReverseEntryPrefix = byte('r')
+
+// Position
+// key: p | TableId | TermType | Entry | Position
+// The position offset of the document that is attache to the entry in the data file
 var posPrefix = byte('p')
 
 /* Name keys used for storing the key names of rows in a table*/
-func NewNameKey(id []byte) []byte {
+
+func NewTableEntryKey(id []byte) []byte {
 	out := make([]byte, len(id)+1)
-	out[0] = NamePrefix
+	out[0] = EntryPrefix
 	for i := 0; i < len(id); i++ {
 		out[i+1] = id[i]
 	}
+
 	return out
 }
 
-func ParseNameKey(key []byte) []byte {
+func ParseTableEntryKey(key []byte) []byte {
 	//duplicate the key, because pebble reuses memory
 	out := make([]byte, len(key)-1)
 	for i := 0; i < len(key)-1; i++ {
@@ -28,17 +46,18 @@ func ParseNameKey(key []byte) []byte {
 }
 
 /* Id Keys used for storing table id */
-func NewIDKey(id uint32) []byte {
+func NewTableIdKey(id uint32) []byte {
 	out := make([]byte, 5)
-	out[0] = IdPrefix
+	out[0] = TablePrefix
 	binary.LittleEndian.PutUint32(out[1:], id)
 	return out
 }
 
-func ParseIDKey(key []byte) uint32 {
+func ParseTableIDKey(key []byte) uint32 {
 	return binary.LittleEndian.Uint32(key[1:])
 }
 
+/* New pos key used for creating a pos key from a table entry*/
 func NewPosKey(table uint32, name []byte) []byte {
 	out := make([]byte, 5+len(name))
 	out[0] = posPrefix

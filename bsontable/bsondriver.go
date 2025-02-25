@@ -75,10 +75,10 @@ func (dr *BSONDriver) New(name string, columns []benchtop.ColumnDef) (benchtop.T
 
 func (dr *BSONDriver) List() []string {
 	out := []string{}
-	prefix := []byte{benchtop.NamePrefix}
+	prefix := []byte{benchtop.EntryPrefix}
 	it, _ := dr.db.NewIter(&pebble.IterOptions{LowerBound: prefix})
 	for it.SeekGE(prefix); it.Valid() && bytes.HasPrefix(it.Key(), prefix); it.Next() {
-		value := benchtop.ParseNameKey(it.Key())
+		value := benchtop.ParseTableEntryKey(it.Key())
 		out = append(out, string(value))
 	}
 	it.Close()
@@ -101,7 +101,7 @@ func (dr *BSONDriver) Get(name string) (benchtop.TableStore, error) {
 		return x, nil
 	}
 
-	nkey := benchtop.NewNameKey([]byte(name))
+	nkey := benchtop.NewTableEntryKey([]byte(name))
 	value, closer, err := dr.db.Get(nkey)
 	if err != nil {
 		return nil, err

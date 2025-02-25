@@ -76,11 +76,25 @@ type DbDelete interface {
 	Delete(key []byte, _ *pebble.WriteOptions) error
 }
 
+/*type TermType byte
+
+const (
+	//TermUnknown is an undefined term type
+	TermUnknown TermType = 0x00
+	//TermString means the term is a string
+	TermString TermType = 0x01
+	//TermNumber means the term is a number
+	TermNumber TermType = 0x02
+	//TermVector means the term type is a number array
+	TermVector TermType = 0x03
+	)*/
+
 type FieldType bsontype.Type
 
 const (
-	Double FieldType = FieldType(bson.TypeDouble)
-	Int64  FieldType = FieldType(bson.TypeInt64)
-	String FieldType = FieldType(bson.TypeString)
-	Bytes  FieldType = FieldType(bson.TypeBinary)
+	Double      FieldType = FieldType(bson.TypeDouble)
+	Int64       FieldType = FieldType(bson.TypeInt64)
+	String      FieldType = FieldType(bson.TypeString)
+	Bytes       FieldType = FieldType(bson.TypeBinary)
+	VectorArray FieldType = FieldType(bson.TypeArray)
 )
