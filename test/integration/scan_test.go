@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/bmeg/benchtop"
+	"github.com/bmeg/benchtop/bsontable"
 	"github.com/bmeg/benchtop/test/fixtures"
 
 	"github.com/bmeg/benchtop/util"
@@ -13,7 +14,7 @@ import (
 func TestScan(t *testing.T) {
 	dbname := "test.data" + util.RandomString(5)
 
-	dr, err := benchtop.NewBSONDriver(dbname)
+	dr, err := bsontable.NewBSONDriver(dbname)
 	if err != nil {
 		t.Error(err)
 	}

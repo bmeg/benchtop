@@ -6,12 +6,13 @@ import (
 	"testing"
 
 	"github.com/bmeg/benchtop"
+	"github.com/bmeg/benchtop/pebblebsontable"
 	"github.com/bmeg/benchtop/util"
 )
 
 func TestPebbleOpenClose(t *testing.T) {
 	name := "test.data" + util.RandomString(5)
-	dr, err := benchtop.NewPebbleBSONDriver(name)
+	dr, err := pebblebsontable.NewPebbleBSONDriver(name)
 	if err != nil {
 		t.Error(err)
 	}
@@ -26,7 +27,7 @@ func TestPebbleOpenClose(t *testing.T) {
 	}
 	dr.Close()
 
-	or, err := benchtop.NewPebbleBSONDriver(name)
+	or, err := pebblebsontable.NewPebbleBSONDriver(name)
 	if err != nil {
 		t.Error(err)
 	}
@@ -45,7 +46,7 @@ func TestPebbleOpenClose(t *testing.T) {
 func TestPebbleInsert(t *testing.T) {
 	dbname := "test.data" + util.RandomString(5)
 
-	dr, err := benchtop.NewPebbleBSONDriver(dbname)
+	dr, err := pebblebsontable.NewPebbleBSONDriver(dbname)
 	if err != nil {
 		t.Error(err)
 	}

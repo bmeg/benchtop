@@ -3,7 +3,7 @@ package tables
 import (
 	"fmt"
 
-	"github.com/bmeg/benchtop"
+	"github.com/bmeg/benchtop/bsontable"
 	"github.com/spf13/cobra"
 )
 
@@ -16,7 +16,7 @@ var Cmd = &cobra.Command{
 
 		dbPath := args[0]
 
-		driver, err := benchtop.NewBSONDriver(dbPath)
+		driver, err := bsontable.NewBSONDriver(dbPath)
 		if err != nil {
 			return err
 		}

@@ -1,6 +1,9 @@
 package benchtop
 
 import (
+	"io"
+
+	"github.com/cockroachdb/pebble"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/bsontype"
 )
@@ -40,9 +43,9 @@ type Index struct {
 }
 
 type BulkResponse struct {
-	key  string
-	data map[string]any
-	err  string
+	Key  string
+	Data map[string]any
+	Err  string
 }
 
 type TableStore interface {
@@ -59,6 +62,18 @@ type TableStore interface {
 
 	Compact() error
 	Close()
+}
+
+type DbSet interface {
+	Set(id []byte, val []byte, opts *pebble.WriteOptions) error
+}
+
+type DbGet interface {
+	Get(key []byte) ([]byte, io.Closer, error)
+}
+
+type DbDelete interface {
+	Delete(key []byte, _ *pebble.WriteOptions) error
 }
 
 type FieldType bsontype.Type

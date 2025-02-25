@@ -6,12 +6,13 @@ import (
 	"testing"
 
 	"github.com/bmeg/benchtop"
+	"github.com/bmeg/benchtop/pebblebsontable"
 	"github.com/bmeg/benchtop/util"
 )
 
 func TestPebbleDelete(t *testing.T) {
 	dbname := "test.data" + util.RandomString(5)
-	dr, err := benchtop.NewPebbleBSONDriver(dbname)
+	dr, err := pebblebsontable.NewPebbleBSONDriver(dbname)
 	if err != nil {
 		t.Error(err)
 	}

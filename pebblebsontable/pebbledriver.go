@@ -1,4 +1,4 @@
-package benchtop
+package pebblebsontable
 
 import (
 	"bytes"
@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"sync"
 
+	"github.com/bmeg/benchtop"
+	"github.com/bmeg/benchtop/pebblebulk"
 	"github.com/bmeg/benchtop/util"
 	"github.com/cockroachdb/pebble"
 
@@ -22,13 +24,13 @@ type PebbleBSONDriver struct {
 }
 
 type PebbleBSONTable struct {
-	columns   []ColumnDef
+	columns   []benchtop.ColumnDef
 	columnMap map[string]int
 	db        *pebble.DB
 	TableId   uint32
 }
 
-func NewPebbleBSONDriver(path string) (TableDriver, error) {
+func NewPebbleBSONDriver(path string) (benchtop.TableDriver, error) {
 	db, err := pebble.Open(path, &pebble.Options{})
 	if err != nil {
 		return nil, err
@@ -45,7 +47,7 @@ func (dr *PebbleBSONDriver) Close() {
 	dr.db.Close()
 }
 
-func (dr *PebbleBSONDriver) Get(name string) (TableStore, error) {
+func (dr *PebbleBSONDriver) Get(name string) (benchtop.TableStore, error) {
 	dr.lock.Lock()
 	defer dr.lock.Unlock()
 
@@ -53,12 +55,12 @@ func (dr *PebbleBSONDriver) Get(name string) (TableStore, error) {
 		return x, nil
 	}
 
-	nkey := NewNameKey([]byte(name))
+	nkey := benchtop.NewNameKey([]byte(name))
 	value, closer, err := dr.db.Get(nkey)
 	if err != nil {
 		return nil, err
 	}
-	tinfo := TableInfo{}
+	tinfo := benchtop.TableInfo{}
 	bson.Unmarshal(value, &tinfo)
 	defer closer.Close()
 
@@ -74,29 +76,29 @@ func (dr *PebbleBSONDriver) Get(name string) (TableStore, error) {
 
 func (dr *PebbleBSONDriver) getMaxTableID() uint32 {
 	// get unique id
-	prefix := []byte{idPrefix}
+	prefix := []byte{benchtop.IdPrefix}
 	it, _ := dr.db.NewIter(&pebble.IterOptions{LowerBound: prefix})
 	maxID := uint32(0)
 	for it.SeekGE(prefix); it.Valid() && bytes.HasPrefix(it.Key(), prefix); it.Next() {
-		value := ParseIDKey(it.Key())
+		value := benchtop.ParseIDKey(it.Key())
 		maxID = value
 	}
 	it.Close()
 	return maxID
 }
 
-func (dr *PebbleBSONDriver) addTableEntry(id uint32, name string, columns []ColumnDef) error {
-	tdata, _ := bson.Marshal(TableInfo{Columns: columns, Id: id})
-	nkey := NewNameKey([]byte(name))
+func (dr *PebbleBSONDriver) addTableEntry(id uint32, name string, columns []benchtop.ColumnDef) error {
+	tdata, _ := bson.Marshal(benchtop.TableInfo{Columns: columns, Id: id})
+	nkey := benchtop.NewNameKey([]byte(name))
 	return dr.db.Set(nkey, tdata, nil)
 }
 
 func (dr *PebbleBSONDriver) addTableID(newID uint32, name string) error {
-	idKey := NewIDKey(newID)
+	idKey := benchtop.NewIDKey(newID)
 	return dr.db.Set(idKey, []byte(name), nil)
 }
 
-func (dr *PebbleBSONDriver) New(name string, columns []ColumnDef) (TableStore, error) {
+func (dr *PebbleBSONDriver) New(name string, columns []benchtop.ColumnDef) (benchtop.TableStore, error) {
 
 	p, _ := dr.Get(name)
 	if p != nil {
@@ -128,10 +130,10 @@ func (dr *PebbleBSONDriver) New(name string, columns []ColumnDef) (TableStore, e
 
 func (dr *PebbleBSONDriver) List() []string {
 	out := []string{}
-	prefix := []byte{namePrefix}
+	prefix := []byte{benchtop.NamePrefix}
 	it, _ := dr.db.NewIter(&pebble.IterOptions{LowerBound: prefix})
 	for it.SeekGE(prefix); it.Valid() && bytes.HasPrefix(it.Key(), prefix); it.Next() {
-		value := ParseNameKey(it.Key())
+		value := benchtop.ParseNameKey(it.Key())
 		out = append(out, string(value))
 	}
 	it.Close()
@@ -141,7 +143,7 @@ func (dr *PebbleBSONDriver) List() []string {
 func (b *PebbleBSONTable) Close() {
 }
 
-func (b *PebbleBSONTable) GetColumns() []ColumnDef {
+func (b *PebbleBSONTable) GetColumns() []benchtop.ColumnDef {
 	return b.columns
 }
 
@@ -150,7 +152,7 @@ func (b *PebbleBSONTable) packData(entry map[string]any) (bson.D, error) {
 	columns := []any{}
 	for _, c := range b.columns {
 		if e, ok := entry[c.Name]; ok {
-			v, err := checkType(e, c.Type)
+			v, err := benchtop.CheckType(e, c.Type)
 			if err != nil {
 				return nil, err
 			}
@@ -178,7 +180,7 @@ func (b *PebbleBSONTable) Add(id []byte, entry map[string]any) error {
 	if err != nil {
 		return err
 	}
-	key := append(NewPosKeyPrefix(b.TableId), id...)
+	key := append(benchtop.NewPosKeyPrefix(b.TableId), id...)
 
 	err = b.db.Set(key, bData, &pebble.WriteOptions{})
 	if err != nil {
@@ -190,7 +192,7 @@ func (b *PebbleBSONTable) Add(id []byte, entry map[string]any) error {
 
 func (b *PebbleBSONTable) Get(id []byte, fields ...string) (map[string]any, error) {
 
-	key := append(NewPosKeyPrefix(b.TableId), id...)
+	key := append(benchtop.NewPosKeyPrefix(b.TableId), id...)
 	rowData, closer, err := b.db.Get(key)
 	if err != nil {
 		fmt.Println("ERR: ", err)
@@ -224,54 +226,54 @@ func (b *PebbleBSONTable) Get(id []byte, fields ...string) (map[string]any, erro
 	return out, nil
 }
 
-func (b *PebbleBSONTable) colUnpack(v bson.RawElement, colType FieldType) any {
-	if colType == String {
+func (b *PebbleBSONTable) colUnpack(v bson.RawElement, colType benchtop.FieldType) any {
+	if colType == benchtop.String {
 		return v.Value().StringValue()
-	} else if colType == Double {
+	} else if colType == benchtop.Double {
 		return v.Value().Double()
-	} else if colType == Int64 {
+	} else if colType == benchtop.Int64 {
 		return v.Value().Int64()
-	} else if colType == Bytes {
+	} else if colType == benchtop.Bytes {
 		_, data := v.Value().Binary()
 		return data
 	}
 	return nil
 }
 
-func (b *PebbleBSONTable) Fetch(inputs chan Index, workers int) <-chan BulkResponse {
+func (b *PebbleBSONTable) Fetch(inputs chan benchtop.Index, workers int) <-chan benchtop.BulkResponse {
 	panic("not implemented")
 }
 
-func (b *PebbleBSONTable) Remove(inputs chan Index, workers int) <-chan BulkResponse {
+func (b *PebbleBSONTable) Remove(inputs chan benchtop.Index, workers int) <-chan benchtop.BulkResponse {
 	panic("not implemented")
 }
 
-func (b *PebbleBSONTable) Keys() (chan Index, error) {
-	out := make(chan Index, 10)
+func (b *PebbleBSONTable) Keys() (chan benchtop.Index, error) {
+	out := make(chan benchtop.Index, 10)
 	go func() {
 		defer close(out)
 
-		prefix := NewPosKeyPrefix(b.TableId)
+		prefix := benchtop.NewPosKeyPrefix(b.TableId)
 		it, err := b.db.NewIter(&pebble.IterOptions{})
 		if err != nil {
 			log.Printf("error: %s", err)
 		}
 		for it.SeekGE(prefix); it.Valid() && bytes.HasPrefix(it.Key(), prefix); it.Next() {
-			_, value := ParsePosKey(it.Key())
-			out <- Index{Key: value}
+			_, value := benchtop.ParsePosKey(it.Key())
+			out <- benchtop.Index{Key: value}
 		}
 		it.Close()
 	}()
 	return out, nil
 }
 
-func (b *PebbleBSONTable) Scan(key bool, filter []FieldFilter, fields ...string) (chan map[string]any, error) {
+func (b *PebbleBSONTable) Scan(key bool, filter []benchtop.FieldFilter, fields ...string) (chan map[string]any, error) {
 	return nil, nil
 }
 
-func (b *PebbleBSONTable) Load(inputs chan Entry) error {
+func (b *PebbleBSONTable) Load(inputs chan benchtop.Entry) error {
 
-	b.bulkWrite(func(s dbSet) error {
+	b.bulkWrite(func(s benchtop.DbSet) error {
 		for entry := range inputs {
 			dData, err := b.packData(entry.Value)
 			if err != nil {
@@ -290,20 +292,20 @@ func (b *PebbleBSONTable) Load(inputs chan Entry) error {
 	return nil
 }
 
-func (b *PebbleBSONTable) bulkWrite(u func(s dbSet) error) error {
+func (b *PebbleBSONTable) bulkWrite(u func(s benchtop.DbSet) error) error {
 	batch := b.db.NewBatch()
-	ptx := &pebbleBulkWrite{b.db, batch, nil, nil, 0}
+	ptx := &pebblebulk.PebbleBulkWrite{Db: b.db, Batch: batch, Lowest: nil, Highest: nil, CurSize: 0}
 	err := u(ptx)
 	batch.Commit(nil)
 	batch.Close()
-	if ptx.lowest != nil && ptx.highest != nil {
-		b.db.Compact(ptx.lowest, ptx.highest, true)
+	if ptx.Lowest != nil && ptx.Highest != nil {
+		b.db.Compact(ptx.Lowest, ptx.Highest, true)
 	}
 	return err
 }
 
 func (b *PebbleBSONTable) Delete(name []byte) error {
-	posKey := NewPosKey(b.TableId, name)
+	posKey := benchtop.NewPosKey(b.TableId, name)
 	b.db.Delete(posKey, nil)
 	return nil
 }

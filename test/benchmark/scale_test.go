@@ -6,13 +6,15 @@ import (
 	"testing"
 
 	"github.com/bmeg/benchtop"
+	"github.com/bmeg/benchtop/bsontable"
+	"github.com/bmeg/benchtop/pebblebsontable"
 	"github.com/bmeg/benchtop/test/fixtures"
 	"github.com/bmeg/benchtop/util"
 )
 
 var Bsonname = "test.bson" + util.RandomString(5)
-var bsonTable *benchtop.BSONTable
-var bsonDriver *benchtop.BSONDriver
+var bsonTable *bsontable.BSONTable
+var bsonDriver *bsontable.BSONDriver
 
 const (
 	scalenumKeys   = 100000
@@ -24,12 +26,12 @@ func BenchmarkScaleWriteBson(b *testing.B) {
 
 	var err error
 	if bsonDriver == nil {
-		driver, err := benchtop.NewBSONDriver(Bsonname)
+		driver, err := bsontable.NewBSONDriver(Bsonname)
 		if err != nil {
 			b.Fatal(err)
 		}
 		var ok bool
-		bsonDriver, ok = driver.(*benchtop.BSONDriver)
+		bsonDriver, ok = driver.(*bsontable.BSONDriver)
 		if !ok {
 			b.Fatal("Failed to assert type *benchtop.BSONDriver")
 		}
@@ -44,7 +46,7 @@ func BenchmarkScaleWriteBson(b *testing.B) {
 		}
 
 		var ok bool
-		bsonTable, ok = table.(*benchtop.BSONTable)
+		bsonTable, ok = table.(*bsontable.BSONTable)
 		if !ok {
 			b.Fatal("Failed to assert type *benchtop.BSONDriver")
 		}
@@ -73,12 +75,12 @@ func BenchmarkScaleWriteBson(b *testing.B) {
 func BenchmarkRandomReadBson(b *testing.B) {
 	var err error
 	if bsonDriver == nil {
-		driver, err := benchtop.NewBSONDriver(Bsonname)
+		driver, err := bsontable.NewBSONDriver(Bsonname)
 		if err != nil {
 			b.Fatal(err)
 		}
 		var ok bool
-		bsonDriver, ok = driver.(*benchtop.BSONDriver)
+		bsonDriver, ok = driver.(*bsontable.BSONDriver)
 		if !ok {
 			b.Fatal("Failed to assert type *benchtop.BSONDriver")
 		}
@@ -113,12 +115,12 @@ func BenchmarkRandomReadBson(b *testing.B) {
 func BenchmarkRandomKeysBson(b *testing.B) {
 	var err error
 	if bsonDriver == nil {
-		driver, err := benchtop.NewBSONDriver(Bsonname)
+		driver, err := bsontable.NewBSONDriver(Bsonname)
 		if err != nil {
 			b.Fatal(err)
 		}
 		var ok bool
-		bsonDriver, ok = driver.(*benchtop.BSONDriver)
+		bsonDriver, ok = driver.(*bsontable.BSONDriver)
 		if !ok {
 			b.Fatal("Failed to assert type *benchtop.BSONDriver")
 		}
@@ -147,18 +149,18 @@ func BenchmarkRandomKeysBson(b *testing.B) {
 }
 
 var Pebblename = "test.pebble" + util.RandomString(5)
-var pebbleTable *benchtop.PebbleBSONTable
-var pebbleDriver *benchtop.PebbleBSONDriver
+var pebbleTable *pebblebsontable.PebbleBSONTable
+var pebbleDriver *pebblebsontable.PebbleBSONDriver
 
 func BenchmarkScaleWritePebble(b *testing.B) {
 	var err error
 	if pebbleDriver == nil {
-		driver, err := benchtop.NewPebbleBSONDriver(Pebblename)
+		driver, err := pebblebsontable.NewPebbleBSONDriver(Pebblename)
 		if err != nil {
 			b.Fatal(err)
 		}
 		var ok bool
-		pebbleDriver, ok = driver.(*benchtop.PebbleBSONDriver)
+		pebbleDriver, ok = driver.(*pebblebsontable.PebbleBSONDriver)
 		if !ok {
 			b.Fatal("Failed to assert type *benchtop.BSONDriver")
 		}
@@ -173,7 +175,7 @@ func BenchmarkScaleWritePebble(b *testing.B) {
 		}
 
 		var ok bool
-		pebbleTable, ok = table.(*benchtop.PebbleBSONTable)
+		pebbleTable, ok = table.(*pebblebsontable.PebbleBSONTable)
 		if !ok {
 			b.Fatal("Failed to assert type *benchtop.BSONDriver")
 		}
@@ -203,12 +205,12 @@ func BenchmarkScaleWritePebble(b *testing.B) {
 func BenchmarkRandomReadPebble(b *testing.B) {
 	var err error
 	if pebbleDriver == nil {
-		driver, err := benchtop.NewPebbleBSONDriver(Pebblename)
+		driver, err := pebblebsontable.NewPebbleBSONDriver(Pebblename)
 		if err != nil {
 			b.Fatal(err)
 		}
 		var ok bool
-		pebbleDriver, ok = driver.(*benchtop.PebbleBSONDriver)
+		pebbleDriver, ok = driver.(*pebblebsontable.PebbleBSONDriver)
 		if !ok {
 			b.Fatal("Failed to assert type *benchtop.BSONDriver")
 		}
@@ -248,12 +250,12 @@ func BenchmarkRandomReadPebble(b *testing.B) {
 func BenchmarkRandomKeysPebble(b *testing.B) {
 	var err error
 	if pebbleDriver == nil {
-		driver, err := benchtop.NewPebbleBSONDriver(Pebblename)
+		driver, err := pebblebsontable.NewPebbleBSONDriver(Pebblename)
 		if err != nil {
 			b.Fatal(err)
 		}
 		var ok bool
-		pebbleDriver, ok = driver.(*benchtop.PebbleBSONDriver)
+		pebbleDriver, ok = driver.(*pebblebsontable.PebbleBSONDriver)
 		if !ok {
 			b.Fatal("Failed to assert type *benchtop.BSONDriver")
 		}

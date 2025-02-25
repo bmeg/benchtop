@@ -1,4 +1,4 @@
-package benchtop
+package bsontable
 
 import (
 	"bufio"
@@ -11,6 +11,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bmeg/benchtop"
+	"github.com/bmeg/benchtop/bsontable/filters"
 	"github.com/bmeg/grip/log"
 
 	"github.com/cockroachdb/pebble"
@@ -20,7 +22,7 @@ import (
 )
 
 type BSONTable struct {
-	columns    []ColumnDef
+	columns    []benchtop.ColumnDef
 	columnMap  map[string]int
 	handle     *os.File
 	db         *pebble.DB
@@ -29,25 +31,13 @@ type BSONTable struct {
 	path       string
 }
 
-type dbSet interface {
-	Set(id []byte, val []byte, opts *pebble.WriteOptions) error
-}
-
-type dbGet interface {
-	Get(key []byte) ([]byte, io.Closer, error)
-}
-
-type dbDelete interface {
-	Delete(key []byte, _ *pebble.WriteOptions) error
-}
-
 func (b *BSONTable) Close() {
 	//because the table could be opened by other threads, don't actually close
 	//b.handle.Close()
 	//b.db.Close()
 }
 
-func (b *BSONTable) GetColumns() []ColumnDef {
+func (b *BSONTable) GetColumns() []benchtop.ColumnDef {
 	return b.columns
 }
 
@@ -145,7 +135,7 @@ func (b *BSONTable) Delete(name []byte) error {
 		return err
 	}
 
-	posKey := NewPosKey(b.tableId, name)
+	posKey := benchtop.NewPosKey(b.tableId, name)
 	b.db.Delete(posKey, nil)
 
 	return nil
@@ -184,7 +174,7 @@ func (b *BSONTable) Compact() error {
 	rowBuff := make([]byte, 0, 1<<20)
 
 	fileOffset := int64(0)
-	inputChan := make(chan Index, 100)
+	inputChan := make(chan benchtop.Index, 100)
 
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -257,7 +247,7 @@ func (b *BSONTable) Compact() error {
 			return fmt.Errorf("'columns' field not found in BSON document")
 		}
 
-		inputChan <- Index{Key: []byte(val.StringValue()), Position: newOffset}
+		inputChan <- benchtop.Index{Key: []byte(val.StringValue()), Position: newOffset}
 		log.Debugf("Time to parse BSON 'columns': %v\n", time.Since(startParseBSON))
 
 		// --- Write new offset ---
@@ -327,26 +317,26 @@ func (b *BSONTable) Compact() error {
 ////////////////////////////////////////////////////////////////
 Start of bulk, chan based functions
 */
-func (b *BSONTable) Keys() (chan Index, error) {
-	out := make(chan Index, 10)
+func (b *BSONTable) Keys() (chan benchtop.Index, error) {
+	out := make(chan benchtop.Index, 10)
 	go func() {
 		defer close(out)
 
-		prefix := NewPosKeyPrefix(b.tableId)
+		prefix := benchtop.NewPosKeyPrefix(b.tableId)
 		it, err := b.db.NewIter(&pebble.IterOptions{})
 		if err != nil {
 			log.Errorf("error: %s", err)
 		}
 		for it.SeekGE(prefix); it.Valid() && bytes.HasPrefix(it.Key(), prefix); it.Next() {
-			_, value := ParsePosKey(it.Key())
-			out <- Index{Key: value}
+			_, value := benchtop.ParsePosKey(it.Key())
+			out <- benchtop.Index{Key: value}
 		}
 		it.Close()
 	}()
 	return out, nil
 }
 
-func (b *BSONTable) Scan(keys bool, filter []FieldFilter, fields ...string) (chan map[string]any, error) {
+func (b *BSONTable) Scan(keys bool, filter []benchtop.FieldFilter, fields ...string) (chan map[string]any, error) {
 	b.handleLock.RLock()
 	defer b.handleLock.RUnlock()
 
@@ -403,7 +393,7 @@ func (b *BSONTable) Scan(keys bool, filter []FieldFilter, fields ...string) (cha
 				if i, ok := b.columnMap[colName]; ok {
 					n := b.columns[i]
 					unpack := b.colUnpack(columns.Index(uint(i)), n.Type)
-					if PassesFilters(unpack, filter) {
+					if filters.PassesFilters(unpack, filter) {
 						vOut[n.Name] = unpack
 						if keys {
 							vOut["_key"] = bd.Index(2).Value().StringValue()
@@ -424,22 +414,22 @@ func (b *BSONTable) Scan(keys bool, filter []FieldFilter, fields ...string) (cha
 	return out, nil
 }
 
-func (b *BSONTable) Fetch(inputs chan Index, workers int) <-chan BulkResponse {
-	results := make(chan BulkResponse, workers)
+func (b *BSONTable) Fetch(inputs chan benchtop.Index, workers int) <-chan benchtop.BulkResponse {
+	results := make(chan benchtop.BulkResponse, workers)
 
 	var wg sync.WaitGroup
 	go func() {
-		b.bulkGet(func(s dbGet) error {
+		b.bulkGet(func(s benchtop.DbGet) error {
 			for entry := range inputs {
 
 				wg.Add(1)
-				go func(index Index) {
+				go func(index benchtop.Index) {
 					defer wg.Done()
 
 					// Get offset from Pebble batch
-					val, closer, err := s.Get(NewPosKey(b.tableId, index.Key))
+					val, closer, err := s.Get(benchtop.NewPosKey(b.tableId, index.Key))
 					if err != nil {
-						results <- BulkResponse{string(index.Key), nil, func() string {
+						results <- benchtop.BulkResponse{Key: string(index.Key), Data: nil, Err: func() string {
 							if err != nil {
 								return err.Error()
 							}
@@ -453,7 +443,7 @@ func (b *BSONTable) Fetch(inputs chan Index, workers int) <-chan BulkResponse {
 					if err != nil {
 						data = nil
 					}
-					results <- BulkResponse{string(index.Key), data, func() string {
+					results <- benchtop.BulkResponse{Key: string(index.Key), Data: data, Err: func() string {
 						if err != nil {
 							return err.Error()
 						}
@@ -472,7 +462,7 @@ func (b *BSONTable) Fetch(inputs chan Index, workers int) <-chan BulkResponse {
 	return results
 }
 
-func (b *BSONTable) Load(inputs chan Entry) error {
+func (b *BSONTable) Load(inputs chan benchtop.Entry) error {
 	b.handleLock.Lock()
 	defer b.handleLock.Unlock()
 	offset, err := b.handle.Seek(0, io.SeekEnd)
@@ -480,7 +470,7 @@ func (b *BSONTable) Load(inputs chan Entry) error {
 		return err
 	}
 
-	b.bulkSet(func(s dbSet) error {
+	b.bulkSet(func(s benchtop.DbSet) error {
 		for entry := range inputs {
 			dData, err := b.packData(entry.Value, string(entry.Key))
 			if err != nil {
@@ -505,17 +495,17 @@ func (b *BSONTable) Load(inputs chan Entry) error {
 	return nil
 }
 
-func (b *BSONTable) Remove(inputs chan Index, workers int) <-chan BulkResponse {
-	results := make(chan BulkResponse, workers)
+func (b *BSONTable) Remove(inputs chan benchtop.Index, workers int) <-chan benchtop.BulkResponse {
+	results := make(chan benchtop.BulkResponse, workers)
 
-	batchDeletes := make(chan Index, workers)
+	batchDeletes := make(chan benchtop.Index, workers)
 
 	go func() {
-		b.bulkDelete(func(s dbDelete) error {
+		b.bulkDelete(func(s benchtop.DbDelete) error {
 			for index := range batchDeletes {
-				err := s.Delete(NewPosKey(b.tableId, index.Key), nil)
+				err := s.Delete(benchtop.NewPosKey(b.tableId, index.Key), nil)
 				if err != nil {
-					results <- BulkResponse{string(index.Key), nil, func() string {
+					results <- benchtop.BulkResponse{Key: string(index.Key), Data: nil, Err: func() string {
 						if err != nil {
 							return err.Error()
 						}
@@ -531,16 +521,16 @@ func (b *BSONTable) Remove(inputs chan Index, workers int) <-chan BulkResponse {
 	var wg sync.WaitGroup
 	go func() {
 		defer close(batchDeletes)
-		b.bulkGet(func(s dbGet) error {
+		b.bulkGet(func(s benchtop.DbGet) error {
 			for index := range inputs {
 				wg.Add(1)
-				go func(index Index) {
+				go func(index benchtop.Index) {
 					defer wg.Done()
 
 					key := string(index.Key)
-					val, closer, err := s.Get(NewPosKey(b.tableId, index.Key))
+					val, closer, err := s.Get(benchtop.NewPosKey(b.tableId, index.Key))
 					if err != nil {
-						results <- BulkResponse{key, nil, func() string {
+						results <- benchtop.BulkResponse{Key: key, Data: nil, Err: func() string {
 							if err != nil {
 								return err.Error()
 							}
@@ -552,7 +542,7 @@ func (b *BSONTable) Remove(inputs chan Index, workers int) <-chan BulkResponse {
 
 					offset := binary.LittleEndian.Uint64(val)
 					if err := b.markDelete(offset); err != nil {
-						results <- BulkResponse{key, nil, func() string {
+						results <- benchtop.BulkResponse{Key: key, Data: nil, Err: func() string {
 							if err != nil {
 								return err.Error()
 							}
@@ -562,7 +552,7 @@ func (b *BSONTable) Remove(inputs chan Index, workers int) <-chan BulkResponse {
 					}
 
 					batchDeletes <- index
-					results <- BulkResponse{key, nil, ""}
+					results <- benchtop.BulkResponse{Key: key, Data: nil, Err: ""}
 				}(index)
 			}
 			return nil

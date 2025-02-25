@@ -1,10 +1,12 @@
-package benchtop
+package filters
 
 import (
 	"strings"
+
+	"github.com/bmeg/benchtop"
 )
 
-func PassesFilters(fieldValue any, filters []FieldFilter) bool {
+func PassesFilters(fieldValue any, filters []benchtop.FieldFilter) bool {
 	for _, filter := range filters {
 		if !applyFilterCondition(fieldValue, filter) {
 			return false
@@ -13,7 +15,7 @@ func PassesFilters(fieldValue any, filters []FieldFilter) bool {
 	return true
 }
 
-func applyFilterCondition(fieldValue any, filter FieldFilter) bool {
+func applyFilterCondition(fieldValue any, filter benchtop.FieldFilter) bool {
 	switch v := fieldValue.(type) {
 	case string:
 		filterStr, ok := filter.Value.(string)

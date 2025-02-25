@@ -1,4 +1,4 @@
-package benchtop
+package bsontable
 
 import (
 	"encoding/binary"
@@ -6,28 +6,16 @@ import (
 	"io"
 	"os"
 
+	"github.com/bmeg/benchtop"
 	"go.mongodb.org/mongo-driver/bson"
 )
-
-func checkType(val any, t FieldType) (any, error) {
-	switch t {
-	case Int64:
-		if x, ok := val.(int32); !ok {
-			return int64(x), nil
-		}
-		if _, ok := val.(int64); !ok {
-			return val, fmt.Errorf("not int64")
-		}
-	}
-	return val, nil
-}
 
 func (b *BSONTable) packData(entry map[string]any, key string) (bson.D, error) {
 	// pack named columns
 	columns := []any{}
 	for _, c := range b.columns {
 		if e, ok := entry[c.Name]; ok {
-			v, err := checkType(e, c.Type)
+			v, err := benchtop.CheckType(e, c.Type)
 			if err != nil {
 				return nil, err
 			}
@@ -46,20 +34,20 @@ func (b *BSONTable) packData(entry map[string]any, key string) (bson.D, error) {
 	return bson.D{{Key: "columns", Value: columns}, {Key: "data", Value: other}, {Key: "key", Value: key}}, nil
 }
 
-func (b *BSONTable) addTableEntryInfo(db dbSet, name []byte, offset, size uint64) {
-	value := NewPosValue(offset, size)
-	posKey := NewPosKey(b.tableId, name)
+func (b *BSONTable) addTableEntryInfo(db benchtop.DbSet, name []byte, offset, size uint64) {
+	value := benchtop.NewPosValue(offset, size)
+	posKey := benchtop.NewPosKey(b.tableId, name)
 	db.Set(posKey, value, nil)
 }
 
-func (b *BSONTable) colUnpack(v bson.RawElement, colType FieldType) any {
-	if colType == String {
+func (b *BSONTable) colUnpack(v bson.RawElement, colType benchtop.FieldType) any {
+	if colType == benchtop.String {
 		return v.Value().StringValue()
-	} else if colType == Double {
+	} else if colType == benchtop.Double {
 		return v.Value().Double()
-	} else if colType == Int64 {
+	} else if colType == benchtop.Int64 {
 		return v.Value().Int64()
-	} else if colType == Bytes {
+	} else if colType == benchtop.Bytes {
 		_, data := v.Value().Binary()
 		return data
 	}
@@ -67,18 +55,18 @@ func (b *BSONTable) colUnpack(v bson.RawElement, colType FieldType) any {
 }
 
 func (b *BSONTable) getBlockPos(id []byte) (uint64, uint64, error) {
-	idKey := NewPosKey(b.tableId, id)
+	idKey := benchtop.NewPosKey(b.tableId, id)
 	val, closer, err := b.db.Get(idKey)
 	if err != nil {
 		return 0, 0, err
 	}
-	offset, size := ParsePosValue(val)
+	offset, size := benchtop.ParsePosValue(val)
 	closer.Close()
 	return offset, size, nil
 }
 
-func (b *BSONTable) setIndices(inputs chan Index) {
-	b.bulkSet(func(s dbSet) error {
+func (b *BSONTable) setIndices(inputs chan benchtop.Index) {
+	b.bulkSet(func(s benchtop.DbSet) error {
 		for index := range inputs {
 			b.addTableEntryInfo(b.db, index.Key, index.Position, 0)
 		}
@@ -131,7 +119,6 @@ func (b *BSONTable) markDelete(offset uint64) error {
 		return err
 	}
 
-	fmt.Printf("Marked delete at offset %d\n", int64(offset+8))
 	return nil
 }
 

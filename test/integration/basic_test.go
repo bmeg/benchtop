@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/bmeg/benchtop"
+	"github.com/bmeg/benchtop/bsontable"
 	"github.com/bmeg/benchtop/util"
 )
 
@@ -27,7 +28,7 @@ var data = map[string]map[string]any{
 
 func TestOpenClose(t *testing.T) {
 	name := "test.data" + util.RandomString(5)
-	dr, err := benchtop.NewBSONDriver(name)
+	dr, err := bsontable.NewBSONDriver(name)
 	if err != nil {
 		t.Error(err)
 	}
@@ -42,7 +43,7 @@ func TestOpenClose(t *testing.T) {
 	}
 	dr.Close()
 
-	or, err := benchtop.NewBSONDriver(name)
+	or, err := bsontable.NewBSONDriver(name)
 	if err != nil {
 		t.Error(err)
 	}
@@ -61,7 +62,7 @@ func TestOpenClose(t *testing.T) {
 func TestInsert(t *testing.T) {
 	dbname := "test.data" + util.RandomString(5)
 
-	dr, err := benchtop.NewBSONDriver(dbname)
+	dr, err := bsontable.NewBSONDriver(dbname)
 	if err != nil {
 		t.Error(err)
 	}

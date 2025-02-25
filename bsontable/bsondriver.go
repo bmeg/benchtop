@@ -1,4 +1,4 @@
-package benchtop
+package bsontable
 
 import (
 	"bytes"
@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sync"
 
+	"github.com/bmeg/benchtop"
 	"github.com/bmeg/benchtop/util"
 	"github.com/bmeg/grip/log"
 	"github.com/cockroachdb/pebble"
@@ -21,7 +22,7 @@ type BSONDriver struct {
 	tables map[string]*BSONTable
 }
 
-func NewBSONDriver(path string) (TableDriver, error) {
+func NewBSONDriver(path string) (benchtop.TableDriver, error) {
 	db, err := pebble.Open(path, &pebble.Options{})
 	if err != nil {
 		return nil, err
@@ -33,7 +34,7 @@ func NewBSONDriver(path string) (TableDriver, error) {
 	return &BSONDriver{base: path, db: db, tables: map[string]*BSONTable{}}, nil
 }
 
-func (dr *BSONDriver) New(name string, columns []ColumnDef) (TableStore, error) {
+func (dr *BSONDriver) New(name string, columns []benchtop.ColumnDef) (benchtop.TableStore, error) {
 
 	p, _ := dr.Get(name)
 	if p != nil {
@@ -74,10 +75,10 @@ func (dr *BSONDriver) New(name string, columns []ColumnDef) (TableStore, error) 
 
 func (dr *BSONDriver) List() []string {
 	out := []string{}
-	prefix := []byte{namePrefix}
+	prefix := []byte{benchtop.NamePrefix}
 	it, _ := dr.db.NewIter(&pebble.IterOptions{LowerBound: prefix})
 	for it.SeekGE(prefix); it.Valid() && bytes.HasPrefix(it.Key(), prefix); it.Next() {
-		value := ParseNameKey(it.Key())
+		value := benchtop.ParseNameKey(it.Key())
 		out = append(out, string(value))
 	}
 	it.Close()
@@ -92,7 +93,7 @@ func (dr *BSONDriver) Close() {
 	dr.db.Close()
 }
 
-func (dr *BSONDriver) Get(name string) (TableStore, error) {
+func (dr *BSONDriver) Get(name string) (benchtop.TableStore, error) {
 	dr.lock.Lock()
 	defer dr.lock.Unlock()
 
@@ -100,12 +101,12 @@ func (dr *BSONDriver) Get(name string) (TableStore, error) {
 		return x, nil
 	}
 
-	nkey := NewNameKey([]byte(name))
+	nkey := benchtop.NewNameKey([]byte(name))
 	value, closer, err := dr.db.Get(nkey)
 	if err != nil {
 		return nil, err
 	}
-	tinfo := TableInfo{}
+	tinfo := benchtop.TableInfo{}
 	bson.Unmarshal(value, &tinfo)
 	closer.Close()
 

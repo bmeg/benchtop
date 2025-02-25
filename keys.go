@@ -4,14 +4,14 @@ import (
 	"encoding/binary"
 )
 
-var idPrefix = byte('T')
-var namePrefix = byte('t')
+var IdPrefix = byte('T')
+var NamePrefix = byte('t')
 var posPrefix = byte('p')
 
 /* Name keys used for storing the key names of rows in a table*/
 func NewNameKey(id []byte) []byte {
 	out := make([]byte, len(id)+1)
-	out[0] = namePrefix
+	out[0] = NamePrefix
 	for i := 0; i < len(id); i++ {
 		out[i+1] = id[i]
 	}
@@ -30,7 +30,7 @@ func ParseNameKey(key []byte) []byte {
 /* Id Keys used for storing table id */
 func NewIDKey(id uint32) []byte {
 	out := make([]byte, 5)
-	out[0] = idPrefix
+	out[0] = IdPrefix
 	binary.LittleEndian.PutUint32(out[1:], id)
 	return out
 }

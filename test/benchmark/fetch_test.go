@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/bmeg/benchtop"
+	"github.com/bmeg/benchtop/bsontable"
 	"github.com/bmeg/benchtop/test/fixtures"
 	"github.com/bmeg/benchtop/util"
 )
@@ -21,7 +22,7 @@ func BenchmarkFetch(b *testing.B) {
 
 	b.Log("BenchmarkScaleWriteBson start")
 
-	compactbsonDriver, err := benchtop.NewBSONDriver(fetchname)
+	compactbsonDriver, err := bsontable.NewBSONDriver(fetchname)
 	if err != nil {
 		b.Fatal(err)
 	}
