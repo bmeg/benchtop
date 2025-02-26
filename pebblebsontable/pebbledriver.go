@@ -55,14 +55,13 @@ func (dr *PebbleBSONDriver) Get(name string) (benchtop.TableStore, error) {
 		return x, nil
 	}
 
-	nkey := benchtop.NewReverseEntryKey([]byte(name))
+	nkey := benchtop.NewTableEntryKey([]byte(name))
 	value, closer, err := dr.db.Get(nkey)
 	if err != nil {
 		return nil, err
 	}
 	tinfo := benchtop.TableInfo{}
 	bson.Unmarshal(value, &tinfo)
-	fmt.Println("TINFO: ", tinfo)
 	defer closer.Close()
 
 	out := &PebbleBSONTable{
@@ -90,9 +89,8 @@ func (dr *PebbleBSONDriver) getMaxTableID() uint32 {
 
 func (dr *PebbleBSONDriver) addTableEntry(id uint32, name string, columns []benchtop.ColumnDef) error {
 	tdata, _ := bson.Marshal(benchtop.TableInfo{Columns: columns, Id: id})
-
-	rKey := benchtop.NewReverseEntryKey([]byte(name))
-	return dr.db.Set(rKey, tdata, nil)
+	nkey := benchtop.NewTableEntryKey([]byte(name))
+	return dr.db.Set(nkey, tdata, nil)
 }
 
 func (dr *PebbleBSONDriver) addTableID(newID uint32, name string) error {
@@ -132,10 +130,10 @@ func (dr *PebbleBSONDriver) New(name string, columns []benchtop.ColumnDef) (benc
 
 func (dr *PebbleBSONDriver) List() []string {
 	out := []string{}
-	prefix := []byte{benchtop.ReverseEntryPrefix}
+	prefix := []byte{benchtop.EntryPrefix}
 	it, _ := dr.db.NewIter(&pebble.IterOptions{LowerBound: prefix})
 	for it.SeekGE(prefix); it.Valid() && bytes.HasPrefix(it.Key(), prefix); it.Next() {
-		value := benchtop.ParseReverseEntryKey(it.Key())
+		value := benchtop.ParseTableEntryKey(it.Key())
 		out = append(out, string(value))
 	}
 	it.Close()

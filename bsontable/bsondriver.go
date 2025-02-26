@@ -47,17 +47,13 @@ func (dr *BSONDriver) New(name string, columns []benchtop.ColumnDef) (benchtop.T
 	// Prepend Key column to columns provided by user
 
 	tPath := filepath.Join(dr.base, "TABLES", name)
-	out := &BSONTable{
-		columns:    columns,
-		handleLock: sync.RWMutex{},
-		columnMap:  map[string]int{},
-		path:       tPath,
-	}
+	out := &BSONTable{columns: columns,
+		handleLock: sync.RWMutex{}, columnMap: map[string]int{},
+		path: tPath}
 	f, err := os.Create(tPath)
 	if err != nil {
 		return nil, err
 	}
-
 	out.handle = f
 	for n, d := range columns {
 		out.columnMap[d.Name] = n
@@ -74,16 +70,15 @@ func (dr *BSONDriver) New(name string, columns []benchtop.ColumnDef) (benchtop.T
 	out.db = dr.db
 	out.tableId = newID
 	dr.tables[name] = out
-
 	return out, nil
 }
 
 func (dr *BSONDriver) List() []string {
 	out := []string{}
-	prefix := []byte{benchtop.ReverseEntryPrefix}
+	prefix := []byte{benchtop.EntryPrefix}
 	it, _ := dr.db.NewIter(&pebble.IterOptions{LowerBound: prefix})
 	for it.SeekGE(prefix); it.Valid() && bytes.HasPrefix(it.Key(), prefix); it.Next() {
-		value := benchtop.ParseReverseEntryKey(it.Key())
+		value := benchtop.ParseTableEntryKey(it.Key())
 		out = append(out, string(value))
 	}
 	it.Close()
@@ -106,18 +101,14 @@ func (dr *BSONDriver) Get(name string) (benchtop.TableStore, error) {
 		return x, nil
 	}
 
-	nkey := benchtop.NewReverseEntryKey([]byte(name))
-	lookup, closer, err := dr.db.Get(nkey)
-	value, closerval, err := dr.db.Get(lookup)
-
+	nkey := benchtop.NewTableEntryKey([]byte(name))
+	value, closer, err := dr.db.Get(nkey)
 	if err != nil {
 		return nil, err
 	}
 	tinfo := benchtop.TableInfo{}
 	bson.Unmarshal(value, &tinfo)
-	fmt.Println("TINFO: ", tinfo)
 	closer.Close()
-	closerval.Close()
 
 	tPath := filepath.Join(dr.base, "TABLES", name)
 
