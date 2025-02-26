@@ -118,3 +118,39 @@ func TestInsert(t *testing.T) {
 	defer dr.Close()
 	os.RemoveAll(dbname)
 }
+
+func TestDeleteTable(t *testing.T) {
+	name := "test.data" + util.RandomString(5)
+	dr, err := bsontable.NewBSONDriver(name)
+	if err != nil {
+		t.Error(err)
+	}
+
+	_, err = dr.New("table_1", []benchtop.ColumnDef{
+		{Name: "field1", Type: benchtop.Double},
+		{Name: "name", Type: benchtop.String},
+	})
+	if err != nil {
+		t.Error(err)
+	}
+
+	err = dr.Delete("table_1")
+	if err != nil {
+		t.Error(err)
+	}
+
+	dr.Close()
+
+	or, err := bsontable.NewBSONDriver(name)
+	if err != nil {
+		t.Error(err)
+	}
+
+	_, err = or.Get("table_1")
+	if err == nil {
+		t.Log("expected table to be gone. table still exists")
+	}
+
+	defer or.Close()
+	os.RemoveAll(name)
+}

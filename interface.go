@@ -29,7 +29,9 @@ type TableDriver interface {
 	New(name string, columns []ColumnDef) (TableStore, error)
 	Get(name string) (TableStore, error)
 	List() []string
+	Delete(name string) error
 	Close()
+	GetAllColNames() chan string
 }
 
 type Entry struct {

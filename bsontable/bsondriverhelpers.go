@@ -40,3 +40,14 @@ func (dr *BSONDriver) addTable(id uint32, name string, columns []benchtop.Column
 	nkey := benchtop.NewTableKey([]byte(name))
 	return dr.db.Set(nkey, tdata, nil)
 }
+
+func (dr *BSONDriver) getTableInfo(name string) (benchtop.TableInfo, error) {
+	value, closer, err := dr.db.Get([]byte(name))
+	if err != nil {
+		return benchtop.TableInfo{}, err
+	}
+	tinfo := benchtop.TableInfo{}
+	bson.Unmarshal(value, &tinfo)
+	closer.Close()
+	return tinfo, nil
+}

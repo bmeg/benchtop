@@ -122,3 +122,30 @@ func (dr *BSONDriver) Get(name string) (benchtop.TableStore, error) {
 
 	return out, nil
 }
+
+func (dr *BSONDriver) Delete(name string) error {
+	dr.lock.Lock()
+	defer dr.lock.Unlock()
+
+	table, exists := dr.tables[name]
+	if !exists {
+		return fmt.Errorf("table %s does not exist", name)
+	}
+
+	table.handleLock.Lock()
+	defer table.handleLock.Unlock()
+
+	if table.handle != nil {
+		if err := table.handle.Close(); err != nil {
+			log.Errorf("Error closing table %s handle: %v", name, err)
+		}
+	}
+
+	tPath := filepath.Join(dr.base, "TABLES", name)
+	if err := os.Remove(tPath); err != nil {
+		return fmt.Errorf("failed to delete table file %s: %v", tPath, err)
+	}
+	delete(dr.tables, name)
+
+	return nil
+}
