@@ -63,7 +63,7 @@ func (b *BSONTable) Add(id []byte, entry map[string]any) error {
 		return err
 	}
 
-	writesize, err := b.writeOffset(offset, bData)
+	writesize, err := b.writeBsonEntry(offset, bData)
 	if err != nil {
 		log.Errorf("write handler err in Load: bulkSet: %s", err)
 	}
@@ -209,7 +209,7 @@ func (b *BSONTable) Compact() error {
 
 		// --- Handle empty records ---
 		fileOffset += 8 + 4
-		if bSize == 0 {
+		if bSize == 0 || fileOffset == int64(12) {
 			if int64(nextOffset) > fileOffset {
 				startSeek := time.Now()
 				_, err = oldHandle.Seek(int64(nextOffset), io.SeekStart)
@@ -368,8 +368,8 @@ func (b *BSONTable) Scan(keys bool, filter []benchtop.FieldFilter, fields ...str
 
 			bSize := int32(binary.LittleEndian.Uint32(sizeBytes))
 
-			// Elem has been deleted. skip it.
-			if bSize == 0 {
+			// Elem has been deleted or at the table header in the begginning of the file skip it.
+			if bSize == 0 || int64(bSize) == int64(NextOffset)-8 {
 				_, err = b.handle.Seek(int64(NextOffset), io.SeekStart)
 				if err == io.EOF {
 					break
@@ -482,7 +482,7 @@ func (b *BSONTable) Load(inputs chan benchtop.Entry) error {
 			}
 
 			// make Next offset equal to existing offset + length of data
-			writeSize, err := b.writeOffset(offset, bData)
+			writeSize, err := b.writeBsonEntry(offset, bData)
 			if err != nil {
 				log.Errorf("write handler err in Load: bulkSet: %s", err)
 			}

@@ -2,7 +2,6 @@ package bsontable
 
 import (
 	"encoding/binary"
-	"fmt"
 	"io"
 	"os"
 
@@ -74,31 +73,6 @@ func (b *BSONTable) setIndices(inputs chan benchtop.Index) {
 	})
 }
 
-func (b *BSONTable) debugCheck(offset uint64) {
-	file, err := os.Open(b.path)
-	if err != nil {
-		fmt.Println("Failed to open file:", err)
-		return
-	}
-	defer file.Close()
-
-	seekOffset := int64(offset + 8)
-	_, err = file.Seek(seekOffset, io.SeekStart)
-	if err != nil {
-		fmt.Println("Failed to seek:", err)
-		return
-	}
-
-	sizeBytes := make([]byte, 4)
-	_, err = file.Read(sizeBytes)
-	if err != nil {
-		fmt.Println("Failed to read size bytes:", err)
-		return
-	}
-
-	fmt.Printf("Size bytes at offset %d: %x\n", seekOffset, sizeBytes)
-}
-
 func (b *BSONTable) markDelete(offset uint64) error {
 	file, err := os.OpenFile(b.path, os.O_RDWR, 0644)
 	if err != nil {
@@ -168,7 +142,7 @@ func (b *BSONTable) readFromFile(offset uint64) (map[string]any, error) {
 	return out, nil
 }
 
-func (b *BSONTable) writeOffset(offset int64, bData []byte) (int, error) {
+func (b *BSONTable) writeBsonEntry(offset int64, bData []byte) (int, error) {
 	// make next offset equal to existing offset + length of data
 	buffer := make([]byte, 8)
 	binary.LittleEndian.PutUint64(buffer, uint64(offset)+uint64(len(bData))+8)
