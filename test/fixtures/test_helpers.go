@@ -33,6 +33,22 @@ func GetRandomUniqueIntegers(count, max int) (map[int]struct{}, error) {
 	return uniqueNumbers, nil
 }
 
+var Basicdata = map[string]map[string]any{
+	"key1": {
+		"field1": 0.1,
+		"name":   "alice",
+		"other":  "other data",
+	},
+	"key2": {
+		"field1": 0.2,
+		"name":   "bob",
+	},
+	"key3": {
+		"field1": 0.3,
+		"name":   "chelsie",
+	},
+}
+
 var ScanData = map[string]map[string]any{
 	"key1": {
 		"field1": 0.1,

@@ -14,10 +14,10 @@ var TablePrefix = byte('T')
 // The index of the table row in the pebble db
 var EntryPrefix = byte('i')
 
-// Reverse Entry
+// Reverse Entries
 // key: r
-// The reverse index of the table row
-var ReverseEntryPrefix = byte('r')
+// The index of the reverse entry. Used for getting records
+var ReverseEntryPrefix = byte('i')
 
 // Position
 // key: p | TableId | TermType | Entry | Position
@@ -26,23 +26,32 @@ var posPrefix = byte('p')
 
 /* Name keys used for storing the key names of rows in a table*/
 
-func NewTableEntryKey(id []byte) []byte {
+func NewReverseEntryKey(id []byte) []byte {
 	out := make([]byte, len(id)+1)
-	out[0] = EntryPrefix
+	out[0] = ReverseEntryPrefix
 	for i := 0; i < len(id); i++ {
 		out[i+1] = id[i]
 	}
-
 	return out
 }
 
-func ParseTableEntryKey(key []byte) []byte {
-	//duplicate the key, because pebble reuses memory
+func ParseReverseEntryKey(key []byte) []byte {
 	out := make([]byte, len(key)-1)
-	for i := 0; i < len(key)-1; i++ {
+	for i, _ := range key[:len(key)-1] {
 		out[i] = key[i+1]
 	}
 	return out
+}
+
+func NewEntryKey(id uint32) []byte {
+	out := make([]byte, 5)
+	out[0] = EntryPrefix
+	binary.LittleEndian.PutUint32(out[1:], id)
+	return out
+}
+
+func ParseEntryKey(key []byte) uint32 {
+	return binary.LittleEndian.Uint32(key[1:])
 }
 
 /* Id Keys used for storing table id */

@@ -7,24 +7,9 @@ import (
 
 	"github.com/bmeg/benchtop"
 	"github.com/bmeg/benchtop/bsontable"
+	"github.com/bmeg/benchtop/test/fixtures"
 	"github.com/bmeg/benchtop/util"
 )
-
-var data = map[string]map[string]any{
-	"key1": {
-		"field1": 0.1,
-		"name":   "alice",
-		"other":  "other data",
-	},
-	"key2": {
-		"field1": 0.2,
-		"name":   "bob",
-	},
-	"key3": {
-		"field1": 0.3,
-		"name":   "chelsie",
-	},
-}
 
 func TestOpenClose(t *testing.T) {
 	name := "test.data" + util.RandomString(5)
@@ -52,6 +37,7 @@ func TestOpenClose(t *testing.T) {
 		t.Error(err)
 	}
 
+	t.Log("COLS: ", ot.GetColumns())
 	if len(ot.GetColumns()) != 2 {
 		t.Errorf("Incorrect re-open")
 	}
@@ -76,20 +62,20 @@ func TestInsert(t *testing.T) {
 		t.Error(err)
 	}
 
-	for k, r := range data {
+	for k, r := range fixtures.Basicdata {
 		err := ts.Add([]byte(k), r)
 		if err != nil {
 			t.Error(err)
 		}
 	}
 
-	for k := range data {
+	for k := range fixtures.Basicdata {
 		post, err := ts.Get([]byte(k))
 		fmt.Printf("%#v\n", post)
 		if err != nil {
 			t.Error(err)
 		}
-		orig := data[k]
+		orig := fixtures.Basicdata[k]
 		for key := range orig {
 			origVal := orig[key]
 			postVal := post[key]
@@ -105,13 +91,13 @@ func TestInsert(t *testing.T) {
 	oCount := 0
 	for i := range keyList {
 		oCount++
-		if _, ok := data[string(i.Key)]; !ok {
+		if _, ok := fixtures.Basicdata[string(i.Key)]; !ok {
 			t.Errorf("Unknown key returned: %s", string(i.Key))
 		}
 		fmt.Printf("%s\n", string(i.Key))
 	}
-	if oCount != len(data) {
-		t.Errorf("Incorrect key count %d != %d", oCount, len(data))
+	if oCount != len(fixtures.Basicdata) {
+		t.Errorf("Incorrect key count %d != %d", oCount, len(fixtures.Basicdata))
 	}
 
 	ts.Compact()

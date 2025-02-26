@@ -7,6 +7,7 @@ import (
 
 	"github.com/bmeg/benchtop"
 	"github.com/bmeg/benchtop/pebblebsontable"
+	"github.com/bmeg/benchtop/test/fixtures"
 	"github.com/bmeg/benchtop/util"
 )
 
@@ -60,20 +61,20 @@ func TestPebbleInsert(t *testing.T) {
 		t.Error(err)
 	}
 
-	for k, r := range data {
+	for k, r := range fixtures.Basicdata {
 		err := ts.Add([]byte(k), r)
 		if err != nil {
 			t.Error(err)
 		}
 	}
 
-	for k := range data {
+	for k := range fixtures.Basicdata {
 		post, err := ts.Get([]byte(k))
 		fmt.Printf("%#v\n", post)
 		if err != nil {
 			t.Error(err)
 		}
-		orig := data[k]
+		orig := fixtures.Basicdata[k]
 		for key := range orig {
 			origVal := orig[key]
 			postVal := post[key]
@@ -89,13 +90,13 @@ func TestPebbleInsert(t *testing.T) {
 	oCount := 0
 	for i := range keyList {
 		oCount++
-		if _, ok := data[string(i.Key)]; !ok {
+		if _, ok := fixtures.Basicdata[string(i.Key)]; !ok {
 			t.Errorf("Unknown key returned: %s", string(i.Key))
 		}
 		fmt.Printf("%s\n", string(i.Key))
 	}
-	if oCount != len(data) {
-		t.Errorf("Incorrect key count %d != %d", oCount, len(data))
+	if oCount != len(fixtures.Basicdata) {
+		t.Errorf("Incorrect key count %d != %d", oCount, len(fixtures.Basicdata))
 	}
 
 	ts.Compact()

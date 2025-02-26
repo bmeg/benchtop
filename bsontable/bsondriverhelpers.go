@@ -21,10 +21,29 @@ func (dr *BSONDriver) getMaxTableID() uint32 {
 	return maxID
 }
 
+func (dr *BSONDriver) getMaxTableEntryID() uint32 {
+	// get unique id
+	prefix := []byte{benchtop.EntryPrefix}
+	it, _ := dr.db.NewIter(&pebble.IterOptions{LowerBound: prefix})
+	maxID := uint32(0)
+	for it.SeekGE(prefix); it.Valid() && bytes.HasPrefix(it.Key(), prefix); it.Next() {
+		value := benchtop.ParseTableIDKey(it.Key())
+		maxID = value
+	}
+	it.Close()
+	return maxID
+}
+
 func (dr *BSONDriver) addTableEntry(id uint32, name string, columns []benchtop.ColumnDef) error {
 	tdata, _ := bson.Marshal(benchtop.TableInfo{Columns: columns, Id: id})
 
-	nkey := benchtop.NewTableEntryKey([]byte(name))
+	nkey := benchtop.NewEntryKey(id)
+	rKey := benchtop.NewReverseEntryKey([]byte(name))
+
+	err := dr.db.Set(rKey, nkey, nil)
+	if err != nil {
+		return err
+	}
 
 	return dr.db.Set(nkey, tdata, nil)
 }

@@ -9,8 +9,8 @@ import (
 func TestIDParse(t *testing.T) {
 
 	id := "key-0001"
-	key := benchtop.NewTableEntryKey([]byte(id))
-	pID := benchtop.ParseTableEntryKey(key)
+	key := benchtop.NewReverseEntryKey([]byte(id))
+	pID := benchtop.ParseReverseEntryKey(key)
 
 	if id != string(pID) {
 		t.Errorf("%s != %s", string(id), string(pID))
