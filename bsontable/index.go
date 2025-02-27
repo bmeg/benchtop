@@ -36,6 +36,6 @@ func (b *BSONDriver) LoadAllTables() {
 	it, _ := b.db.NewIter(&pebble.IterOptions{LowerBound: prefix})
 	for it.SeekGE(prefix); it.Valid() && bytes.HasPrefix(it.Key(), prefix); it.Next() {
 		table, _ := b.Get(string(it.Key()))
-		b.tables[string(it.Key())] = table.(*BSONTable)
+		b.Tables[string(it.Key())] = table.(*BSONTable)
 	}
 }

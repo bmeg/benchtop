@@ -13,6 +13,7 @@ import (
 
 	"github.com/bmeg/benchtop"
 	"github.com/bmeg/benchtop/bsontable/filters"
+	"github.com/bmeg/benchtop/pebblebulk"
 	"github.com/bmeg/grip/log"
 
 	"github.com/cockroachdb/pebble"
@@ -22,10 +23,11 @@ import (
 )
 
 type BSONTable struct {
+	Pb         *pebblebulk.PebbleBulk
+	db         *pebble.DB
 	columns    []benchtop.ColumnDef
 	columnMap  map[string]int
 	handle     *os.File
-	db         *pebble.DB
 	tableId    uint32
 	handleLock sync.RWMutex
 	path       string
@@ -67,7 +69,11 @@ func (b *BSONTable) Add(id []byte, entry map[string]any) error {
 	if err != nil {
 		log.Errorf("write handler err in Load: bulkSet: %s", err)
 	}
-	b.addTableEntryInfo(b.db, id, uint64(offset), uint64(writesize))
+
+	err = b.Pb.BulkWrite(func(tx *pebblebulk.PebbleBulk) error {
+		b.addTableEntryInfo(id, uint64(offset), uint64(writesize))
+		return nil
+	})
 
 	return nil
 }
@@ -419,7 +425,7 @@ func (b *BSONTable) Fetch(inputs chan benchtop.Index, workers int) <-chan bencht
 
 	var wg sync.WaitGroup
 	go func() {
-		b.bulkGet(func(s benchtop.DbGet) error {
+		b.Pb.BulkRead(func(tx *pebblebulk.PebbleBulk) error {
 			for entry := range inputs {
 
 				wg.Add(1)
@@ -427,7 +433,7 @@ func (b *BSONTable) Fetch(inputs chan benchtop.Index, workers int) <-chan bencht
 					defer wg.Done()
 
 					// Get offset from Pebble batch
-					val, closer, err := s.Get(benchtop.NewPosKey(b.tableId, index.Key))
+					val, closer, err := tx.Get(benchtop.NewPosKey(b.tableId, index.Key))
 					if err != nil {
 						results <- benchtop.BulkResponse{Key: string(index.Key), Data: nil, Err: func() string {
 							if err != nil {
@@ -470,7 +476,7 @@ func (b *BSONTable) Load(inputs chan benchtop.Entry) error {
 		return err
 	}
 
-	b.bulkSet(func(s benchtop.DbSet) error {
+	b.Pb.BulkWrite(func(tx *pebblebulk.PebbleBulk) error {
 		for entry := range inputs {
 			dData, err := b.packData(entry.Value, string(entry.Key))
 			if err != nil {
@@ -486,7 +492,7 @@ func (b *BSONTable) Load(inputs chan benchtop.Entry) error {
 			if err != nil {
 				log.Errorf("write handler err in Load: bulkSet: %s", err)
 			}
-			b.addTableEntryInfo(s, entry.Key, uint64(offset), uint64(writeSize))
+			b.addTableEntryInfo(entry.Key, uint64(offset), uint64(writeSize))
 			offset += int64(writeSize) + 8
 		}
 		return nil
@@ -501,9 +507,9 @@ func (b *BSONTable) Remove(inputs chan benchtop.Index, workers int) <-chan bench
 	batchDeletes := make(chan benchtop.Index, workers)
 
 	go func() {
-		b.bulkDelete(func(s benchtop.DbDelete) error {
+		b.Pb.BulkWrite(func(tx *pebblebulk.PebbleBulk) error {
 			for index := range batchDeletes {
-				err := s.Delete(benchtop.NewPosKey(b.tableId, index.Key), nil)
+				err := b.Pb.Delete(benchtop.NewPosKey(b.tableId, index.Key), nil)
 				if err != nil {
 					results <- benchtop.BulkResponse{Key: string(index.Key), Data: nil, Err: func() string {
 						if err != nil {
@@ -521,14 +527,14 @@ func (b *BSONTable) Remove(inputs chan benchtop.Index, workers int) <-chan bench
 	var wg sync.WaitGroup
 	go func() {
 		defer close(batchDeletes)
-		b.bulkGet(func(s benchtop.DbGet) error {
+		b.Pb.BulkRead(func(tx *pebblebulk.PebbleBulk) error {
 			for index := range inputs {
 				wg.Add(1)
 				go func(index benchtop.Index) {
 					defer wg.Done()
 
 					key := string(index.Key)
-					val, closer, err := s.Get(benchtop.NewPosKey(b.tableId, index.Key))
+					val, closer, err := b.Pb.Get(benchtop.NewPosKey(b.tableId, index.Key))
 					if err != nil {
 						results <- benchtop.BulkResponse{Key: key, Data: nil, Err: func() string {
 							if err != nil {

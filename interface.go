@@ -1,9 +1,6 @@
 package benchtop
 
 import (
-	"io"
-
-	"github.com/cockroachdb/pebble"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/bsontype"
 )
@@ -65,31 +62,6 @@ type TableStore interface {
 	Compact() error
 	Close()
 }
-
-type DbSet interface {
-	Set(id []byte, val []byte, opts *pebble.WriteOptions) error
-}
-
-type DbGet interface {
-	Get(key []byte) ([]byte, io.Closer, error)
-}
-
-type DbDelete interface {
-	Delete(key []byte, _ *pebble.WriteOptions) error
-}
-
-/*type TermType byte
-
-const (
-	//TermUnknown is an undefined term type
-	TermUnknown TermType = 0x00
-	//TermString means the term is a string
-	TermString TermType = 0x01
-	//TermNumber means the term is a number
-	TermNumber TermType = 0x02
-	//TermVector means the term type is a number array
-	TermVector TermType = 0x03
-	)*/
 
 type FieldType bsontype.Type
 

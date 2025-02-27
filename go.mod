@@ -6,7 +6,7 @@ require (
 	github.com/bmeg/grip v0.0.0-20250206222527-96023b5f8b4f
 	github.com/schollz/progressbar/v3 v3.16.0
 	github.com/spf13/cobra v1.8.1
-	go.mongodb.org/mongo-driver v1.17.2
+	go.mongodb.org/mongo-driver v1.17.0
 	golang.org/x/exp v0.0.0-20240707233637-46b078467d37
 )
 

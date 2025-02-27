@@ -6,6 +6,7 @@ import (
 	"os"
 
 	"github.com/bmeg/benchtop"
+	"github.com/bmeg/benchtop/pebblebulk"
 	"go.mongodb.org/mongo-driver/bson"
 )
 
@@ -33,10 +34,10 @@ func (b *BSONTable) packData(entry map[string]any, key string) (bson.D, error) {
 	return bson.D{{Key: "columns", Value: columns}, {Key: "data", Value: other}, {Key: "key", Value: key}}, nil
 }
 
-func (b *BSONTable) addTableEntryInfo(db benchtop.DbSet, name []byte, offset, size uint64) {
+func (b *BSONTable) addTableEntryInfo(name []byte, offset, size uint64) {
 	value := benchtop.NewPosValue(offset, size)
 	posKey := benchtop.NewPosKey(b.tableId, name)
-	db.Set(posKey, value, nil)
+	b.Pb.Set(posKey, value, nil)
 }
 
 func (b *BSONTable) colUnpack(v bson.RawElement, colType benchtop.FieldType) any {
@@ -65,9 +66,9 @@ func (b *BSONTable) getBlockPos(id []byte) (uint64, uint64, error) {
 }
 
 func (b *BSONTable) setIndices(inputs chan benchtop.Index) {
-	b.bulkSet(func(s benchtop.DbSet) error {
+	b.Pb.BulkWrite(func(tx *pebblebulk.PebbleBulk) error {
 		for index := range inputs {
-			b.addTableEntryInfo(b.db, index.Key, index.Position, 0)
+			b.addTableEntryInfo(index.Key, index.Position, 0)
 		}
 		return nil
 	})

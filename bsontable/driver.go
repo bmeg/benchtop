@@ -9,17 +9,35 @@ import (
 	"sync"
 
 	"github.com/bmeg/benchtop"
+	"github.com/bmeg/benchtop/pebblebulk"
+	"github.com/bmeg/benchtop/util"
 	"github.com/bmeg/grip/log"
 	"github.com/cockroachdb/pebble"
 	"go.mongodb.org/mongo-driver/bson"
 )
 
 type BSONDriver struct {
-	base string
-	db   *pebble.DB
-
+	base   string
 	lock   sync.RWMutex
-	tables map[string]*BSONTable
+	db     *pebble.DB
+	Pb     *pebblebulk.PebbleBulk
+	Tables map[string]*BSONTable
+}
+
+func NewBSONDriver(path string) (benchtop.TableDriver, error) {
+	db, err := pebble.Open(path, &pebble.Options{})
+	if err != nil {
+		return nil, err
+	}
+	tableDir := filepath.Join(path, "TABLES")
+	if util.FileExists(tableDir) {
+		os.Mkdir(tableDir, 0700)
+	}
+	return &BSONDriver{
+		base:   path,
+		db:     db,
+		Tables: map[string]*BSONTable{},
+	}, nil
 }
 
 func (dr *BSONDriver) New(name string, columns []benchtop.ColumnDef) (benchtop.TableStore, error) {
@@ -62,8 +80,9 @@ func (dr *BSONDriver) New(name string, columns []benchtop.ColumnDef) (benchtop.T
 		log.Errorf("Error: %s", err)
 	}
 	out.db = dr.db
+	out.Pb = &pebblebulk.PebbleBulk{Db: dr.db}
 	out.tableId = newId
-	dr.tables[name] = out
+	dr.Tables[name] = out
 	return out, nil
 }
 
@@ -81,7 +100,7 @@ func (dr *BSONDriver) List() []string {
 
 func (dr *BSONDriver) Close() {
 	log.Infoln("Closing driver")
-	for _, i := range dr.tables {
+	for _, i := range dr.Tables {
 		i.handle.Close()
 	}
 	dr.db.Close()
@@ -91,7 +110,7 @@ func (dr *BSONDriver) Get(name string) (benchtop.TableStore, error) {
 	dr.lock.Lock()
 	defer dr.lock.Unlock()
 
-	if x, ok := dr.tables[name]; ok {
+	if x, ok := dr.Tables[name]; ok {
 		return x, nil
 	}
 
@@ -118,7 +137,7 @@ func (dr *BSONDriver) Get(name string) (benchtop.TableStore, error) {
 		handle:  f,
 		path:    tPath,
 	}
-	dr.tables[name] = out
+	dr.Tables[name] = out
 
 	return out, nil
 }
@@ -127,7 +146,7 @@ func (dr *BSONDriver) Delete(name string) error {
 	dr.lock.Lock()
 	defer dr.lock.Unlock()
 
-	table, exists := dr.tables[name]
+	table, exists := dr.Tables[name]
 	if !exists {
 		return fmt.Errorf("table %s does not exist", name)
 	}
@@ -145,7 +164,7 @@ func (dr *BSONDriver) Delete(name string) error {
 	if err := os.Remove(tPath); err != nil {
 		return fmt.Errorf("failed to delete table file %s: %v", tPath, err)
 	}
-	delete(dr.tables, name)
+	delete(dr.Tables, name)
 
 	return nil
 }
