@@ -6,8 +6,9 @@ import (
 )
 
 type FieldFilter struct {
-	Field string
-	Value string
+	Field    string
+	Operator string // supported operators "==", "!=", ">", "<", ">=", "<=", "contains", "startswith", "endswith"
+	Value    any
 }
 
 type TableInfo struct {
@@ -16,20 +17,34 @@ type TableInfo struct {
 }
 
 type ColumnDef struct {
-	Path string    `json:"path"`
+	Name string    `json:"name"`
 	Type FieldType `json:"type"`
+	Key  string    `json:"key"`
 }
 
 type TableDriver interface {
 	New(name string, columns []ColumnDef) (TableStore, error)
 	Get(name string) (TableStore, error)
 	List() []string
+	Delete(name string) error
 	Close()
+	GetAllColNames() chan string
 }
 
 type Entry struct {
 	Key   []byte
 	Value map[string]any
+}
+
+type Index struct {
+	Key      []byte
+	Position uint64
+}
+
+type BulkResponse struct {
+	Key  string
+	Data map[string]any
+	Err  string
 }
 
 type TableStore interface {
@@ -38,10 +53,10 @@ type TableStore interface {
 	Get(key []byte, fields ...string) (map[string]any, error)
 	Delete(key []byte) error
 
-	Scan(filter []FieldFilter, fields ...string) chan map[string]any
-
-	Keys() (chan []byte, error)
-
+	Fetch(inputs chan Index, workers int) <-chan BulkResponse
+	Remove(inputs chan Index, workers int) <-chan BulkResponse
+	Scan(key bool, filter []FieldFilter, fields ...string) (chan map[string]any, error)
+	Keys() (chan Index, error)
 	Load(chan Entry) error
 
 	Compact() error
@@ -51,7 +66,9 @@ type TableStore interface {
 type FieldType bsontype.Type
 
 const (
-	Double FieldType = FieldType(bson.TypeDouble)
-	Int64  FieldType = FieldType(bson.TypeInt64)
-	String FieldType = FieldType(bson.TypeString)
+	Double      FieldType = FieldType(bson.TypeDouble)
+	Int64       FieldType = FieldType(bson.TypeInt64)
+	String      FieldType = FieldType(bson.TypeString)
+	Bytes       FieldType = FieldType(bson.TypeBinary)
+	VectorArray FieldType = FieldType(bson.TypeArray)
 )

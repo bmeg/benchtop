@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/bmeg/benchtop"
+	"github.com/bmeg/benchtop/bsontable"
 	"github.com/spf13/cobra"
 )
 
@@ -19,7 +19,7 @@ var Cmd = &cobra.Command{
 		tableName := args[1]
 		keys := args[2:]
 
-		driver, err := benchtop.NewBSONDriver(dbPath)
+		driver, err := bsontable.NewBSONDriver(dbPath)
 		if err != nil {
 			return err
 		}

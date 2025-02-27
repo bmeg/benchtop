@@ -1,6 +1,7 @@
 package util
 
 import (
+	"os"
 	"time"
 
 	"golang.org/x/exp/rand"
@@ -15,4 +16,18 @@ func RandomString(n int) string {
 		b[i] = letter[rand.Intn(len(letter))]
 	}
 	return string(b)
+}
+
+func FileExists(path string) bool {
+	_, err := os.Stat(path)
+	if err == nil {
+		return true
+	}
+	return err != os.ErrNotExist
+}
+
+func CopyBytes(in []byte) []byte {
+	out := make([]byte, len(in))
+	copy(out, in)
+	return out
 }

@@ -9,11 +9,11 @@ import (
 func TestIDParse(t *testing.T) {
 
 	id := "key-0001"
-	key := benchtop.NewNameKey([]byte(id))
-	pID := benchtop.ParseNameKey(key)
+	key := benchtop.NewTableKey([]byte(id))
+	pID := benchtop.ParseTableKey(key)
 
 	if id != string(pID) {
-		t.Errorf("%s != %s", id, pID)
+		t.Errorf("%s != %s", string(id), string(pID))
 	}
 
 }
