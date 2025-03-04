@@ -34,13 +34,13 @@ func BenchmarkRemove(b *testing.B) {
 		b.Fatal(err)
 	}
 
-	inputChan := make(chan benchtop.Entry, 100)
+	inputChan := make(chan benchtop.Row, 100)
 	go func() {
 		count := 0
 		for j := 0; j < removeNumKeys; j++ {
 			key := []byte(fmt.Sprintf("key_%d", j))
 			value := fixtures.GenerateRandomBytes(removeValueSize)
-			inputChan <- benchtop.Entry{Key: key, Value: map[string]any{"data": value}}
+			inputChan <- benchtop.Row{Id: key, Data: map[string]any{"data": value}}
 			count++
 		}
 		b.Logf("Inserted %d entries into inputChan", count)
@@ -53,7 +53,7 @@ func BenchmarkRemove(b *testing.B) {
 	}
 	b.Log("Load completed successfully")
 
-	data, err := compactbsonTable.Get([]byte("key_5"))
+	data, err := compactbsonTable.GetRow([]byte("key_5"))
 	b.Log("DATA BEFORE: ", data)
 	if len(data) == 0 {
 		b.Fatal("Expected data to be in key_5 but none was found")
@@ -75,7 +75,7 @@ func BenchmarkRemove(b *testing.B) {
 		b.Fatal(err)
 	}
 
-	data, err = compactbsonTable.Get([]byte("key_5"))
+	data, err = compactbsonTable.GetRow([]byte("key_5"))
 	b.Log("DATA AFTER: ", data)
 	if len(data) != 0 {
 		b.Fatalf("Expected data to be empty for key_5 but %#v was found\n", data)

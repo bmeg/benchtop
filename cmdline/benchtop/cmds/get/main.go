@@ -30,7 +30,7 @@ var Cmd = &cobra.Command{
 		}
 
 		for _, key := range keys {
-			data, err := table.Get([]byte(key))
+			data, err := table.GetRow([]byte(key))
 			if err == nil {
 				out, err := json.Marshal(data)
 				if err != nil {

@@ -34,10 +34,15 @@ func (b *BSONTable) packData(entry map[string]any, key string) (bson.D, error) {
 	return bson.D{{Key: "columns", Value: columns}, {Key: "data", Value: other}, {Key: "key", Value: key}}, nil
 }
 
-func (b *BSONTable) addTableEntryInfo(name []byte, offset, size uint64) {
+func (b *BSONTable) addTableEntryInfo(tx *pebblebulk.PebbleBulk, name []byte, offset, size uint64) {
 	value := benchtop.NewPosValue(offset, size)
 	posKey := benchtop.NewPosKey(b.tableId, name)
-	b.Pb.Set(posKey, value, nil)
+	if tx != nil {
+		tx.Set(posKey, value, nil)
+	} else {
+		b.db.Set(posKey, value, nil)
+	}
+
 }
 
 func (b *BSONTable) colUnpack(v bson.RawElement, colType benchtop.FieldType) any {
@@ -66,16 +71,13 @@ func (b *BSONTable) getBlockPos(id []byte) (uint64, uint64, error) {
 }
 
 func (b *BSONTable) setIndices(inputs chan benchtop.Index) {
-	b.Pb.BulkWrite(func(tx *pebblebulk.PebbleBulk) error {
-		for index := range inputs {
-			b.addTableEntryInfo(index.Key, index.Position, 0)
-		}
-		return nil
-	})
+	for index := range inputs {
+		b.addTableEntryInfo(nil, index.Key, index.Position, 0)
+	}
 }
 
 func (b *BSONTable) markDelete(offset uint64) error {
-	file, err := os.OpenFile(b.path, os.O_RDWR, 0644)
+	file, err := os.OpenFile(b.Path, os.O_RDWR, 0644)
 	if err != nil {
 		return err
 	}
@@ -98,7 +100,7 @@ func (b *BSONTable) markDelete(offset uint64) error {
 }
 
 func (b *BSONTable) readFromFile(offset uint64) (map[string]any, error) {
-	file, err := os.Open(b.path)
+	file, err := os.Open(b.Path)
 	if err != nil {
 		return nil, err
 	}

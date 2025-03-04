@@ -54,12 +54,12 @@ func BenchmarkScaleWriteBson(b *testing.B) {
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
-		inputChan := make(chan benchtop.Entry, 100)
+		inputChan := make(chan benchtop.Row, 100)
 		go func() {
 			for j := 0; j < scalenumKeys; j++ {
 				key := []byte(fmt.Sprintf("key_%d", j))
 				value := fixtures.GenerateRandomBytes(scalevalueSize)
-				inputChan <- benchtop.Entry{Key: key, Value: map[string]any{"data": value}}
+				inputChan <- benchtop.Row{Id: key, Data: map[string]any{"data": value}}
 			}
 			close(inputChan)
 		}()
@@ -99,7 +99,7 @@ func BenchmarkRandomReadBson(b *testing.B) {
 	OTKEYS, _ := ot.Keys()
 	for key := range OTKEYS {
 		if _, exists := randomIndexSet[count]; exists {
-			val, err := ot.Get(key.Key)
+			val, err := ot.GetRow(key.Key)
 			if err != nil {
 				b.Fatal(err)
 			}

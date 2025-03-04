@@ -1,37 +1,46 @@
 package benchtop
 
 import (
+	"bytes"
 	"encoding/binary"
 )
 
-// TableId
-// key: T | TableId | TableIdPrefix'
-// The starting point for table Ids in th Pebble index
+// Vertex TableId
+// key: T | TableId | VtablePrefix'
+// The starting point for vertex table ids in th pebble index
 var TablePrefix = byte('T')
 
 // Position
-// key: p | TableId | TermType | Entry | Position
+// key: P | TableId | TermType | Entry | Position
 // The position and offset of the document.
-var posPrefix = byte('p')
+var posPrefix = byte('P')
 
-/* Name keys used for storing the key names of rows in a table*/
+// Field
+// key: F
+// used for indexing specific field values in kvgraph
+var FieldPrefix = []byte("F")
+
+func FieldKey(field string) []byte {
+	return bytes.Join([][]byte{FieldPrefix, []byte(field)}, []byte{0})
+}
+
+func FieldKeyParse(key []byte) string {
+	tmp := bytes.Split(key, []byte{0})
+	field := string(tmp[1])
+	return field
+}
 
 func NewTableKey(id []byte) []byte {
 	out := make([]byte, len(id)+1)
 	out[0] = TablePrefix
-	for i := 0; i < len(id); i++ {
-		out[i+1] = id[i]
-	}
-
+	copy(out[1:], id)
 	return out
 }
 
 func ParseTableKey(key []byte) []byte {
 	//duplicate the key, because pebble reuses memory
 	out := make([]byte, len(key)-1)
-	for i := 0; i < len(key)-1; i++ {
-		out[i] = key[i+1]
-	}
+	copy(out, key[1:])
 	return out
 }
 
@@ -40,19 +49,15 @@ func NewPosKey(table uint32, name []byte) []byte {
 	out := make([]byte, 5+len(name))
 	out[0] = posPrefix
 	binary.LittleEndian.PutUint32(out[1:], table)
-	for i := 0; i < len(name); i++ {
-		out[i+5] = name[i]
-	}
+	copy(out[5:], name)
 	return out
 }
 
 func ParsePosKey(key []byte) (uint32, []byte) {
 	//duplicate the key, because pebble reuses memory
 	out := make([]byte, len(key)-5)
-	for i := 0; i < len(key)-5; i++ {
-		out[i] = key[i+5]
-	}
-	return binary.LittleEndian.Uint32(key[1:]), out
+	copy(out, key[5:])
+	return binary.LittleEndian.Uint32(key[1:5]), out
 }
 
 func NewPosKeyPrefix(table uint32) []byte {

@@ -29,6 +29,7 @@ require (
 	github.com/golang/snappy v0.0.5-0.20231225225746-43d5d4cd4e0e // indirect
 	github.com/grpc-ecosystem/go-grpc-middleware v1.4.0 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.20.0 // indirect
+	github.com/hashicorp/errwrap v1.1.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/klauspost/compress v1.17.9 // indirect
 	github.com/kr/pretty v0.3.1 // indirect
@@ -56,4 +57,8 @@ require (
 	google.golang.org/protobuf v1.36.5 // indirect
 )
 
-require github.com/cockroachdb/pebble v1.1.2
+require (
+	github.com/cockroachdb/pebble v1.1.2
+	github.com/google/cel-go v0.18.1
+	github.com/hashicorp/go-multierror v1.1.1
+)

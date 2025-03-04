@@ -15,6 +15,7 @@ import (
 	"github.com/bmeg/benchtop/bsontable/filters"
 	"github.com/bmeg/benchtop/pebblebulk"
 	"github.com/bmeg/grip/log"
+	multierror "github.com/hashicorp/go-multierror"
 
 	"github.com/cockroachdb/pebble"
 
@@ -23,14 +24,19 @@ import (
 )
 
 type BSONTable struct {
-	Pb         *pebblebulk.PebbleBulk
+	Pb         *pebblebulk.PebbleKV
 	db         *pebble.DB
 	columns    []benchtop.ColumnDef
 	columnMap  map[string]int
 	handle     *os.File
 	tableId    uint32
 	handleLock sync.RWMutex
-	path       string
+	Path       string
+	tType      byte
+}
+
+func (b *BSONTable) GetColumnDefs() []benchtop.ColumnDef {
+	return b.columns
 }
 
 func (b *BSONTable) Close() {
@@ -39,16 +45,12 @@ func (b *BSONTable) Close() {
 	//b.db.Close()
 }
 
-func (b *BSONTable) GetColumns() []benchtop.ColumnDef {
-	return b.columns
-}
-
 /*
 ////////////////////////////////////////////////////////////////
 Unary single effect operations
 */
-func (b *BSONTable) Add(id []byte, entry map[string]any) error {
-	dData, err := b.packData(entry, string(id))
+func (b *BSONTable) AddRow(elem benchtop.Row) error {
+	dData, err := b.packData(elem.Data, string(elem.Id))
 	if err != nil {
 		return err
 	}
@@ -57,6 +59,7 @@ func (b *BSONTable) Add(id []byte, entry map[string]any) error {
 	if err != nil {
 		return err
 	}
+
 	//append to end of block file
 	b.handleLock.Lock()
 	defer b.handleLock.Unlock()
@@ -70,15 +73,12 @@ func (b *BSONTable) Add(id []byte, entry map[string]any) error {
 		log.Errorf("write handler err in Load: bulkSet: %s", err)
 	}
 
-	err = b.Pb.BulkWrite(func(tx *pebblebulk.PebbleBulk) error {
-		b.addTableEntryInfo(id, uint64(offset), uint64(writesize))
-		return nil
-	})
-
+	b.addTableEntryInfo(nil, elem.Id, uint64(offset), uint64(writesize))
 	return nil
+
 }
 
-func (b *BSONTable) Get(id []byte, fields ...string) (map[string]any, error) {
+func (b *BSONTable) GetRow(id []byte, fields ...string) (map[string]any, error) {
 	b.handleLock.RLock()
 	defer b.handleLock.RUnlock()
 
@@ -130,7 +130,7 @@ func (b *BSONTable) Get(id []byte, fields ...string) (map[string]any, error) {
 	return out, nil
 }
 
-func (b *BSONTable) Delete(name []byte) error {
+func (b *BSONTable) DeleteRow(name []byte) error {
 	offset, _, err := b.getBlockPos(name)
 	if err != nil {
 		return err
@@ -422,94 +422,13 @@ func (b *BSONTable) Scan(keys bool, filter []benchtop.FieldFilter, fields ...str
 
 func (b *BSONTable) Fetch(inputs chan benchtop.Index, workers int) <-chan benchtop.BulkResponse {
 	results := make(chan benchtop.BulkResponse, workers)
-
 	var wg sync.WaitGroup
 	go func() {
-		b.Pb.BulkRead(func(tx *pebblebulk.PebbleBulk) error {
-			for entry := range inputs {
-
-				wg.Add(1)
-				go func(index benchtop.Index) {
-					defer wg.Done()
-
-					// Get offset from Pebble batch
-					val, closer, err := tx.Get(benchtop.NewPosKey(b.tableId, index.Key))
-					if err != nil {
-						results <- benchtop.BulkResponse{Key: string(index.Key), Data: nil, Err: func() string {
-							if err != nil {
-								return err.Error()
-							}
-							return ""
-						}()}
-						return
-					}
-					defer closer.Close()
-
-					data, err := b.readFromFile(binary.LittleEndian.Uint64(val))
-					if err != nil {
-						data = nil
-					}
-					results <- benchtop.BulkResponse{Key: string(index.Key), Data: data, Err: func() string {
-						if err != nil {
-							return err.Error()
-						}
-						return ""
-					}()}
-
-				}(entry)
-			}
-			return nil
-		})
-
-		wg.Wait()
-		close(results)
-	}()
-
-	return results
-}
-
-func (b *BSONTable) Load(inputs chan benchtop.Entry) error {
-	b.handleLock.Lock()
-	defer b.handleLock.Unlock()
-	offset, err := b.handle.Seek(0, io.SeekEnd)
-	if err != nil {
-		return err
-	}
-
-	b.Pb.BulkWrite(func(tx *pebblebulk.PebbleBulk) error {
 		for entry := range inputs {
-			dData, err := b.packData(entry.Value, string(entry.Key))
-			if err != nil {
-				log.Errorf("pack data err in Load: bulkSet: %s", err)
-			}
-			bData, err := bson.Marshal(dData)
-			if err != nil {
-				log.Errorf("bson Marshall err in Load: bulkSet: %s", err)
-			}
-
-			// make Next offset equal to existing offset + length of data
-			writeSize, err := b.writeBsonEntry(offset, bData)
-			if err != nil {
-				log.Errorf("write handler err in Load: bulkSet: %s", err)
-			}
-			b.addTableEntryInfo(entry.Key, uint64(offset), uint64(writeSize))
-			offset += int64(writeSize) + 8
-		}
-		return nil
-	})
-
-	return nil
-}
-
-func (b *BSONTable) Remove(inputs chan benchtop.Index, workers int) <-chan benchtop.BulkResponse {
-	results := make(chan benchtop.BulkResponse, workers)
-
-	batchDeletes := make(chan benchtop.Index, workers)
-
-	go func() {
-		b.Pb.BulkWrite(func(tx *pebblebulk.PebbleBulk) error {
-			for index := range batchDeletes {
-				err := b.Pb.Delete(benchtop.NewPosKey(b.tableId, index.Key), nil)
+			wg.Add(1)
+			go func(index benchtop.Index) {
+				defer wg.Done()
+				val, closer, err := b.db.Get(benchtop.NewPosKey(b.tableId, index.Key))
 				if err != nil {
 					results <- benchtop.BulkResponse{Key: string(index.Key), Data: nil, Err: func() string {
 						if err != nil {
@@ -517,52 +436,127 @@ func (b *BSONTable) Remove(inputs chan benchtop.Index, workers int) <-chan bench
 						}
 						return ""
 					}()}
+					return
 				}
+				defer closer.Close()
+
+				data, err := b.readFromFile(binary.LittleEndian.Uint64(val))
+				if err != nil {
+					data = nil
+				}
+
+				results <- benchtop.BulkResponse{Key: string(index.Key), Data: data, Err: func() string {
+					if err != nil {
+						return err.Error()
+					}
+					return ""
+				}()}
+
+			}(entry)
+		}
+		wg.Wait()
+		close(results)
+	}()
+	return results
+}
+
+func (b *BSONTable) Load(inputs chan benchtop.Row) error {
+	var errs *multierror.Error
+	b.handleLock.Lock()
+	defer b.handleLock.Unlock()
+	offset, err := b.handle.Seek(0, io.SeekEnd)
+	if err != nil {
+		return err
+	}
+
+	err = b.Pb.BulkWrite(func(tx *pebblebulk.PebbleBulk) error {
+		for entry := range inputs {
+			dData, err := b.packData(entry.Data, string(entry.Id))
+			if err != nil {
+				errs = multierror.Append(errs, err)
+				log.Errorf("pack data err in Load: bulkSet: %s", err)
 			}
-			return nil
-		})
+			bData, err := bson.Marshal(dData)
+			if err != nil {
+				errs = multierror.Append(errs, err)
+				log.Errorf("bson Marshall err in Load: bulkSet: %s", err)
+			}
+
+			// make Next offset equal to existing offset + length of data
+			writeSize, err := b.writeBsonEntry(offset, bData)
+			if err != nil {
+				errs = multierror.Append(errs, err)
+				log.Errorf("write handler err in Load: bulkSet: %s", err)
+			}
+			b.addTableEntryInfo(tx, entry.Id, uint64(offset), uint64(writeSize))
+			offset += int64(writeSize) + 8
+		}
+		return nil
+	})
+	if err != nil {
+		log.Errorf("Err: %s", err)
+		errs = multierror.Append(errs, err)
+	}
+	return errs.ErrorOrNil()
+
+}
+
+func (b *BSONTable) Remove(inputs chan benchtop.Index, workers int) <-chan benchtop.BulkResponse {
+	results := make(chan benchtop.BulkResponse, workers)
+	batchDeletes := make(chan benchtop.Index, workers)
+
+	go func() {
+		for index := range batchDeletes {
+			err := b.db.Delete(benchtop.NewPosKey(b.tableId, index.Key), nil)
+			if err != nil {
+				results <- benchtop.BulkResponse{Key: string(index.Key), Data: nil, Err: func() string {
+					if err != nil {
+						return err.Error()
+					}
+					return ""
+				}()}
+			}
+		}
+
 		close(results)
 	}()
 
 	var wg sync.WaitGroup
 	go func() {
 		defer close(batchDeletes)
-		b.Pb.BulkRead(func(tx *pebblebulk.PebbleBulk) error {
-			for index := range inputs {
-				wg.Add(1)
-				go func(index benchtop.Index) {
-					defer wg.Done()
+		for index := range inputs {
+			wg.Add(1)
+			go func(index benchtop.Index) {
+				defer wg.Done()
 
-					key := string(index.Key)
-					val, closer, err := b.Pb.Get(benchtop.NewPosKey(b.tableId, index.Key))
-					if err != nil {
-						results <- benchtop.BulkResponse{Key: key, Data: nil, Err: func() string {
-							if err != nil {
-								return err.Error()
-							}
-							return ""
-						}()}
-						return
-					}
-					defer closer.Close()
+				key := string(index.Key)
+				val, closer, err := b.db.Get(benchtop.NewPosKey(b.tableId, index.Key))
+				if err != nil {
+					results <- benchtop.BulkResponse{Key: key, Data: nil, Err: func() string {
+						if err != nil {
+							return err.Error()
+						}
+						return ""
+					}()}
+					return
+				}
+				defer closer.Close()
 
-					offset := binary.LittleEndian.Uint64(val)
-					if err := b.markDelete(offset); err != nil {
-						results <- benchtop.BulkResponse{Key: key, Data: nil, Err: func() string {
-							if err != nil {
-								return err.Error()
-							}
-							return ""
-						}()}
-						return
-					}
+				offset := binary.LittleEndian.Uint64(val)
+				if err := b.markDelete(offset); err != nil {
+					results <- benchtop.BulkResponse{Key: key, Data: nil, Err: func() string {
+						if err != nil {
+							return err.Error()
+						}
+						return ""
+					}()}
+					return
+				}
 
-					batchDeletes <- index
-					results <- benchtop.BulkResponse{Key: key, Data: nil, Err: ""}
-				}(index)
-			}
-			return nil
-		})
+				batchDeletes <- index
+				results <- benchtop.BulkResponse{Key: key, Data: nil, Err: ""}
+			}(index)
+		}
 		wg.Wait()
 	}()
 

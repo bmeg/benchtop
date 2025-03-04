@@ -7,7 +7,7 @@ import (
 	"github.com/cockroachdb/pebble"
 )
 
-const bufferSize = 1000
+const bufferSize = 100
 
 // List all unique col names held by all tables
 func (b *BSONDriver) GetAllColNames() chan string {
@@ -31,8 +31,22 @@ func (b *BSONDriver) GetAllColNames() chan string {
 	return out
 }
 
-func (b *BSONDriver) LoadAllTables() {
-	prefix := []byte{benchtop.TablePrefix}
+func (b *BSONDriver) GetLabels() chan string {
+	out := make(chan string, bufferSize)
+	go func() {
+		defer close(out)
+		prefix := []byte{benchtop.TablePrefix}
+		it, _ := b.db.NewIter(&pebble.IterOptions{LowerBound: prefix})
+		for it.SeekGE(prefix); it.Valid() && bytes.HasPrefix(it.Key(), prefix); it.Next() {
+			out <- string(it.Key())
+		}
+		return
+	}()
+	return out
+}
+
+func (b *BSONDriver) LoadTables(tType byte) {
+	prefix := []byte{tType}
 	it, _ := b.db.NewIter(&pebble.IterOptions{LowerBound: prefix})
 	for it.SeekGE(prefix); it.Valid() && bytes.HasPrefix(it.Key(), prefix); it.Next() {
 		table, _ := b.Get(string(it.Key()))

@@ -18,22 +18,24 @@ type TableInfo struct {
 
 type ColumnDef struct {
 	Name string    `json:"name"`
-	Type FieldType `json:"type"`
 	Key  string    `json:"key"`
+	Type FieldType `json:"type"`
 }
 
 type TableDriver interface {
 	New(name string, columns []ColumnDef) (TableStore, error)
 	Get(name string) (TableStore, error)
+	GetAllColNames() chan string
+	GetLabels() chan string
 	List() []string
 	Delete(name string) error
 	Close()
-	GetAllColNames() chan string
 }
 
-type Entry struct {
-	Key   []byte
-	Value map[string]any
+type Row struct {
+	Id    []byte
+	Label []byte
+	Data  map[string]any
 }
 
 type Index struct {
@@ -48,16 +50,16 @@ type BulkResponse struct {
 }
 
 type TableStore interface {
-	GetColumns() []ColumnDef
-	Add(key []byte, row map[string]any) error
-	Get(key []byte, fields ...string) (map[string]any, error)
-	Delete(key []byte) error
+	GetColumnDefs() []ColumnDef
+	AddRow(elem Row) error
+	GetRow(key []byte, fields ...string) (map[string]any, error)
+	DeleteRow(key []byte) error
 
 	Fetch(inputs chan Index, workers int) <-chan BulkResponse
 	Remove(inputs chan Index, workers int) <-chan BulkResponse
 	Scan(key bool, filter []FieldFilter, fields ...string) (chan map[string]any, error)
+	Load(chan Row) error
 	Keys() (chan Index, error)
-	Load(chan Entry) error
 
 	Compact() error
 	Close()

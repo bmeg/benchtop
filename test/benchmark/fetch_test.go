@@ -34,13 +34,13 @@ func BenchmarkFetch(b *testing.B) {
 		b.Fatal(err)
 	}
 
-	inputChan := make(chan benchtop.Entry, 100)
+	inputChan := make(chan benchtop.Row, 100)
 	go func() {
 		count := 0
 		for j := 0; j < fetchNumKeys; j++ {
 			key := []byte(fmt.Sprintf("key_%d", j))
 			value := fixtures.GenerateRandomBytes(fetchValueSize)
-			inputChan <- benchtop.Entry{Key: key, Value: map[string]any{"data": value}}
+			inputChan <- benchtop.Row{Id: key, Data: map[string]any{"data": value}}
 			count++
 		}
 		b.Logf("Inserted %d entries into inputChan", count)
@@ -57,8 +57,6 @@ func BenchmarkFetch(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
-
-	b.Log("KEYS", keys)
 
 	outStruct := compactbsonTable.Fetch(keys, 5)
 	keyCount := 0

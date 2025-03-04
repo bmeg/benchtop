@@ -8,6 +8,7 @@ import (
 	"go.mongodb.org/mongo-driver/bson"
 )
 
+// Specify a table type prefix to differentiate between edge tables and vertex tables
 func (dr *BSONDriver) getMaxTablePrefix() uint32 {
 	// get the max table uint32. Useful for fetching keys.
 	prefix := []byte{benchtop.TablePrefix}

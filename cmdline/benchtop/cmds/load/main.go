@@ -41,7 +41,7 @@ var Cmd = &cobra.Command{
 			return err
 		}
 
-		records := make(chan benchtop.Entry, 10)
+		records := make(chan benchtop.Row, 10)
 		go func() {
 			defer close(records)
 			bar := progressbar.Default(int64(lineCount))
@@ -52,7 +52,7 @@ var Cmd = &cobra.Command{
 
 				if key, ok := data[keyField]; ok {
 					keyStr := key.(string)
-					records <- benchtop.Entry{Key: []byte(keyStr), Value: data}
+					records <- benchtop.Row{Id: []byte(keyStr), Data: data}
 				} else {
 					log.Printf("Key %s not found", keyField)
 				}

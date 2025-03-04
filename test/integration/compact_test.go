@@ -27,13 +27,13 @@ func TestCompact(t *testing.T) {
 	}
 
 	for k, r := range fixtures.ScanData {
-		err := ts.Add([]byte(k), r)
+		err := ts.AddRow(benchtop.Row{Id: []byte(k), Data: r})
 		if err != nil {
 			t.Fatal(err)
 		}
 	}
 
-	err = ts.Delete([]byte("key4"))
+	err = ts.DeleteRow([]byte("key4"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -72,7 +72,7 @@ func TestCompact(t *testing.T) {
 		t.Log(elem)
 	}
 
-	val, err := ts.Get([]byte("key8"))
+	val, err := ts.GetRow([]byte("key8"))
 	if err != nil {
 		t.Error(err)
 	}
@@ -83,7 +83,7 @@ func TestCompact(t *testing.T) {
 	}
 
 	// Get another key to double check that it works
-	val, err = ts.Get([]byte("key7"))
+	val, err = ts.GetRow([]byte("key7"))
 	if err != nil {
 		t.Error(err)
 	}

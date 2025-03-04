@@ -52,7 +52,7 @@ func TestOpenClose(t *testing.T) {
 		t.Error(err)
 	}
 
-	if len(ot.GetColumns()) != 2 {
+	if len(ot.GetColumnDefs()) != 2 {
 		t.Errorf("Incorrect re-open")
 	}
 	defer or.Close()
@@ -77,14 +77,14 @@ func TestInsert(t *testing.T) {
 	}
 
 	for k, r := range data {
-		err := ts.Add([]byte(k), r)
+		err := ts.AddRow(benchtop.Row{Id: []byte(k), Data: r})
 		if err != nil {
 			t.Error(err)
 		}
 	}
 
 	for k := range data {
-		post, err := ts.Get([]byte(k))
+		post, err := ts.GetRow([]byte(k))
 		fmt.Printf("%#v\n", post)
 		if err != nil {
 			t.Error(err)

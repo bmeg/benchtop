@@ -29,10 +29,10 @@ func TestDelete(t *testing.T) {
 	totalCount := 100
 	for i := 0; i < totalCount; i++ {
 		key := fmt.Sprintf("key_%d", i)
-		err := ts.Add([]byte(key), map[string]any{
+		err := ts.AddRow(benchtop.Row{Id: []byte(key), Data: map[string]any{
 			"id":   key,
 			"data": i,
-		})
+		}})
 		if err != nil {
 			t.Error(err)
 		}
@@ -44,7 +44,7 @@ func TestDelete(t *testing.T) {
 		t.Error(err)
 	}
 	for i := range r {
-		_, err := ts.Get(i.Key)
+		_, err := ts.GetRow(i.Key)
 		if err != nil {
 			t.Errorf("Get %s error: %s", string(i.Key), err)
 		}
@@ -59,7 +59,7 @@ func TestDelete(t *testing.T) {
 	i := 0
 	for k := range keys {
 		if i%3 == 0 {
-			err := ts.Delete(k.Key)
+			err := ts.DeleteRow(k.Key)
 			if err != nil {
 				t.Errorf("delete %s error: %s", string(k.Key), err)
 			}

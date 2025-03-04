@@ -28,7 +28,7 @@ func TestScan(t *testing.T) {
 	}
 
 	for k, r := range fixtures.ScanData {
-		err := ts.Add([]byte(k), r)
+		err := ts.AddRow(benchtop.Row{Id: []byte(k), Data: r})
 		if err != nil {
 			t.Error(err)
 		}
@@ -84,7 +84,7 @@ func TestScan(t *testing.T) {
 		t.Error("Expecting 7 items returned but got ", scanChanLen)
 	}
 
-	err = ts.Delete([]byte("key4"))
+	err = ts.DeleteRow([]byte("key4"))
 	if err != nil {
 		t.Error(err)
 	}
