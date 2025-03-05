@@ -34,15 +34,17 @@ func (b *BSONTable) packData(entry map[string]any, key string) (bson.D, error) {
 	return bson.D{{Key: "columns", Value: columns}, {Key: "data", Value: other}, {Key: "key", Value: key}}, nil
 }
 
-func (b *BSONTable) addTableEntryInfo(tx *pebblebulk.PebbleBulk, name []byte, offset, size uint64) {
+func (b *BSONTable) addTableEntryInfo(tx *pebblebulk.PebbleBulk, rowId []byte, label string, offset, size uint64) {
 	value := benchtop.NewPosValue(offset, size)
-	posKey := benchtop.NewPosKey(b.tableId, name)
+	posKey := benchtop.NewPosKey(b.tableId, rowId)
+	rtAsocKey := benchtop.NewRowTableAsocKey(rowId)
 	if tx != nil {
+		tx.Set(rtAsocKey, []byte(label), nil)
 		tx.Set(posKey, value, nil)
 	} else {
+		b.db.Set(rtAsocKey, []byte(label), nil)
 		b.db.Set(posKey, value, nil)
 	}
-
 }
 
 func (b *BSONTable) colUnpack(v bson.RawElement, colType benchtop.FieldType) any {
@@ -72,7 +74,8 @@ func (b *BSONTable) getBlockPos(id []byte) (uint64, uint64, error) {
 
 func (b *BSONTable) setIndices(inputs chan benchtop.Index) {
 	for index := range inputs {
-		b.addTableEntryInfo(nil, index.Key, index.Position, 0)
+		// TODO fix "" arg in compact func
+		b.addTableEntryInfo(nil, index.Key, "", index.Position, 0)
 	}
 }
 

@@ -73,7 +73,7 @@ func (b *BSONTable) AddRow(elem benchtop.Row) error {
 		log.Errorf("write handler err in Load: bulkSet: %s", err)
 	}
 
-	b.addTableEntryInfo(nil, elem.Id, uint64(offset), uint64(writesize))
+	b.addTableEntryInfo(nil, elem.Id, elem.Label, uint64(offset), uint64(writesize))
 	return nil
 
 }
@@ -395,14 +395,20 @@ func (b *BSONTable) Scan(keys bool, filter []benchtop.FieldFilter, fields ...str
 
 			vOut := map[string]any{}
 
-			for _, colName := range fields {
-				if i, ok := b.columnMap[colName]; ok {
-					n := b.columns[i]
-					unpack := b.colUnpack(columns.Index(uint(i)), n.Type)
-					if filters.PassesFilters(unpack, filter) {
-						vOut[n.Name] = unpack
-						if keys {
-							vOut["_key"] = bd.Index(2).Value().StringValue()
+			if len(fields) == 0 {
+				if keys {
+					vOut["_key"] = bd.Index(2).Value().StringValue()
+				}
+			} else {
+				for _, colName := range fields {
+					if i, ok := b.columnMap[colName]; ok {
+						n := b.columns[i]
+						unpack := b.colUnpack(columns.Index(uint(i)), n.Type)
+						if filters.PassesFilters(unpack, filter) {
+							vOut[n.Name] = unpack
+							if keys {
+								vOut["_key"] = bd.Index(2).Value().StringValue()
+							}
 						}
 					}
 				}
@@ -488,7 +494,7 @@ func (b *BSONTable) Load(inputs chan benchtop.Row) error {
 				errs = multierror.Append(errs, err)
 				log.Errorf("write handler err in Load: bulkSet: %s", err)
 			}
-			b.addTableEntryInfo(tx, entry.Id, uint64(offset), uint64(writeSize))
+			b.addTableEntryInfo(tx, entry.Id, entry.Label, uint64(offset), uint64(writeSize))
 			offset += int64(writeSize) + 8
 		}
 		return nil

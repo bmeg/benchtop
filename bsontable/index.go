@@ -31,14 +31,17 @@ func (b *BSONDriver) GetAllColNames() chan string {
 	return out
 }
 
-func (b *BSONDriver) GetLabels() chan string {
+func (b *BSONDriver) GetLabels(edges bool) chan string {
 	out := make(chan string, bufferSize)
 	go func() {
 		defer close(out)
 		prefix := []byte{benchtop.TablePrefix}
 		it, _ := b.db.NewIter(&pebble.IterOptions{LowerBound: prefix})
 		for it.SeekGE(prefix); it.Valid() && bytes.HasPrefix(it.Key(), prefix); it.Next() {
-			out <- string(it.Key())
+			strKey := string(benchtop.ParseTableKey(it.Key()))
+			if (edges && strKey[:2] == "e_") || (!edges && strKey[:2] == "v_") {
+				out <- strKey[2:]
+			}
 		}
 		return
 	}()

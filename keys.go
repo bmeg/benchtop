@@ -10,10 +10,15 @@ import (
 // The starting point for vertex table ids in th pebble index
 var TablePrefix = byte('T')
 
+// RowTableAsociation Reverse index
+// Key: R
+// given an ID return the table uint32 associated with it
+var RowTableAsocPrefix = byte('R')
+
 // Position
-// key: P | TableId | TermType | Entry | Position
+// key: P | TableId | Position
 // The position and offset of the document.
-var posPrefix = byte('P')
+var PosPrefix = byte('P')
 
 // Field
 // key: F
@@ -29,6 +34,30 @@ func FieldKeyParse(key []byte) string {
 	field := string(tmp[1])
 	return field
 }
+
+func NewRowTableAsocKey(id []byte) []byte {
+	out := make([]byte, len(id)+1)
+	out[0] = RowTableAsocPrefix
+	copy(out[1:], id)
+	return out
+}
+
+func ParseTableAsocKey(key []byte) []byte {
+	//duplicate the key, because pebble reuses memory
+	out := make([]byte, len(key)-1)
+	copy(out, key[1:])
+	return out
+}
+
+/*func PutRowTableAsocValue(table uint32) []byte {
+	out := make([]byte, 4)
+	binary.LittleEndian.PutUint32(out, table)
+	return out
+}
+
+func GetRowTableAsocValue(id []byte) uint32 {
+	return binary.LittleEndian.Uint32(id)
+}*/
 
 func NewTableKey(id []byte) []byte {
 	out := make([]byte, len(id)+1)
@@ -47,7 +76,7 @@ func ParseTableKey(key []byte) []byte {
 /* New pos key used for creating a pos key from a table entry*/
 func NewPosKey(table uint32, name []byte) []byte {
 	out := make([]byte, 5+len(name))
-	out[0] = posPrefix
+	out[0] = PosPrefix
 	binary.LittleEndian.PutUint32(out[1:], table)
 	copy(out[5:], name)
 	return out
@@ -62,7 +91,7 @@ func ParsePosKey(key []byte) (uint32, []byte) {
 
 func NewPosKeyPrefix(table uint32) []byte {
 	out := make([]byte, 5)
-	out[0] = posPrefix
+	out[0] = PosPrefix
 	binary.LittleEndian.PutUint32(out[1:], table)
 	return out
 }

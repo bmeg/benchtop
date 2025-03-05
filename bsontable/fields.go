@@ -2,7 +2,6 @@ package bsontable
 
 import (
 	"bytes"
-	"fmt"
 	"strings"
 
 	"github.com/bmeg/benchtop"
@@ -39,18 +38,21 @@ func (dr *BSONDriver) GetIDsForLabel(field string) chan string {
 	out := make(chan string, 10)
 	go func() {
 		defer close(out)
-		dr.lock.RLock()
-		defer dr.lock.RUnlock()
-		table, _ := dr.Get(field)
+		log.Infoln("GET TABLE")
+		table, err := dr.Get(field)
+		if err != nil {
+			log.Errorf("GetIdsForLabel: %s on graph: %s", err, field)
+		}
+		log.Infoln("TABLE AQUIRED")
 
-		rowsChan, err := table.Scan(true, nil, field)
+		rowsChan, err := table.Scan(true, nil)
 		if err != nil {
 			log.Errorf("Error scanning field %s: %s", field, err)
 			return
 		}
 
 		for row := range rowsChan {
-			fmt.Println("ROW: ", row)
+			log.Infoln("ROW: ", row)
 			if id, ok := row["_key"].(string); ok {
 				out <- id
 			}
