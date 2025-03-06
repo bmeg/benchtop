@@ -327,17 +327,14 @@ func (b *BSONTable) Keys() (chan benchtop.Index, error) {
 	out := make(chan benchtop.Index, 10)
 	go func() {
 		defer close(out)
-
 		prefix := benchtop.NewPosKeyPrefix(b.tableId)
-		it, err := b.db.NewIter(&pebble.IterOptions{})
-		if err != nil {
-			log.Errorf("error: %s", err)
-		}
-		for it.SeekGE(prefix); it.Valid() && bytes.HasPrefix(it.Key(), prefix); it.Next() {
-			_, value := benchtop.ParsePosKey(it.Key())
-			out <- benchtop.Index{Key: value}
-		}
-		it.Close()
+		b.Pb.View(func(it *pebblebulk.PebbleIterator) error {
+			for it.Seek(prefix); it.Valid() && bytes.HasPrefix(it.Key(), prefix); it.Next() {
+				_, value := benchtop.ParsePosKey(it.Key())
+				out <- benchtop.Index{Key: value}
+			}
+			return nil
+		})
 	}()
 	return out, nil
 }

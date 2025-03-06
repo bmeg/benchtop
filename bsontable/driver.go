@@ -45,7 +45,57 @@ func NewBSONDriver(path string) (benchtop.TableDriver, error) {
 			InsertCount:  0,
 			CompactLimit: uint32(1000),
 		},
+		Fields: map[string][]string{},
 	}, nil
+}
+
+func LoadBSONDriver(path string) (benchtop.TableDriver, error) {
+	db, err := pebble.Open(path, &pebble.Options{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to open database: %v", err)
+	}
+
+	tableDir := filepath.Join(path, "TABLES")
+	if !util.FileExists(tableDir) {
+		return nil, fmt.Errorf("TABLES directory not found at %s", tableDir)
+	}
+
+	driver := &BSONDriver{
+		base:   path,
+		db:     db,
+		Tables: map[string]*BSONTable{},
+		Pb: &pebblebulk.PebbleKV{
+			Db:           db,
+			InsertCount:  0,
+			CompactLimit: uint32(1000),
+		},
+		Fields: map[string][]string{},
+	}
+
+	tableNames := driver.List()
+	for _, tableName := range tableNames {
+		table, err := driver.Get(tableName)
+		if err != nil {
+			driver.Close()
+			return nil, fmt.Errorf("failed to load table %s: %v", tableName, err)
+		}
+
+		bsonTable, ok := table.(*BSONTable)
+		if !ok {
+			driver.Close()
+			return nil, fmt.Errorf("invalid table type for %s", tableName)
+		}
+
+		bsonTable.Pb = &pebblebulk.PebbleKV{
+			Db:           db,
+			InsertCount:  0,
+			CompactLimit: uint32(1000),
+		}
+
+		driver.Tables[tableName] = bsonTable
+	}
+
+	return driver, nil
 }
 
 func (dr *BSONDriver) New(name string, columns []benchtop.ColumnDef) (benchtop.TableStore, error) {
@@ -102,21 +152,36 @@ func (dr *BSONDriver) New(name string, columns []benchtop.ColumnDef) (benchtop.T
 func (dr *BSONDriver) List() []string {
 	out := []string{}
 	prefix := []byte{benchtop.TablePrefix}
-	it, _ := dr.db.NewIter(&pebble.IterOptions{LowerBound: prefix})
-	for it.SeekGE(prefix); it.Valid() && bytes.HasPrefix(it.Key(), prefix); it.Next() {
-		value := benchtop.ParseTableKey(it.Key())
-		out = append(out, string(value))
-	}
-	it.Close()
+	dr.Pb.View(func(it *pebblebulk.PebbleIterator) error {
+		for it.Seek(prefix); it.Valid() && bytes.HasPrefix(it.Key(), prefix); it.Next() {
+			value := benchtop.ParseTableKey(it.Key())
+			out = append(out, string(value))
+		}
+		return nil
+	})
 	return out
 }
 
 func (dr *BSONDriver) Close() {
-	log.Infoln("Closing driver")
-	for _, i := range dr.Tables {
-		i.handle.Close()
+	dr.Lock.Lock()
+	defer dr.Lock.Unlock()
+	log.Infoln("Closing BSONDriver...")
+	for name, table := range dr.Tables {
+		if table.handle != nil {
+			if syncErr := table.handle.Sync(); syncErr != nil {
+				log.Errorf("Error syncing table %s: %v", name, syncErr)
+			}
+			if closeErr := table.handle.Close(); closeErr != nil {
+				log.Errorf("Error closing table %s: %v", name, closeErr)
+			} else {
+				log.Debugf("Closed table %s", name)
+			}
+			table.handle = nil // Prevent reuse
+		}
 	}
-	dr.db.Close()
+	if closeErr := dr.db.Close(); closeErr != nil {
+		log.Errorf("Error closing db: %v", closeErr)
+	}
 }
 
 func (dr *BSONDriver) Get(name string) (benchtop.TableStore, error) {
@@ -139,9 +204,9 @@ func (dr *BSONDriver) Get(name string) (benchtop.TableStore, error) {
 
 	tPath := filepath.Join(dr.base, "TABLES", name)
 
-	f, err := os.Open(tPath)
+	f, err := os.OpenFile(tPath, os.O_RDWR|os.O_CREATE, 0644)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to open table %s: %v", tPath, err)
 	}
 
 	out := &BSONTable{
@@ -282,7 +347,7 @@ func (dr *BSONDriver) BulkLoad(inputs chan *benchtop.Row) error {
 		_, exists := dr.Tables[row.Label]
 		dr.Lock.RUnlock()
 		if !exists {
-			log.Infof("Creating new table for: %s on graph %s", row.Label, dr.base)
+			log.Debugf("Creating new table for: %s on graph %s", row.Label, dr.base)
 			newTable, err := dr.New(row.Label, nil)
 			if err != nil {
 				mu.Lock()
@@ -299,7 +364,6 @@ func (dr *BSONDriver) BulkLoad(inputs chan *benchtop.Row) error {
 
 	close(rowChan)
 	wg.Wait()
-	log.Infoln("Ending bulk load")
 
 	return errs.ErrorOrNil()
 }

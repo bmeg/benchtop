@@ -118,6 +118,20 @@ func (pit *PebbleIterator) Valid() bool {
 	return pit.iter.Valid()
 }
 
+func (pit *PebbleIterator) Value() ([]byte, error) {
+	return pit.value, nil
+}
+
+func (pit *PebbleIterator) Get(id []byte) ([]byte, error) {
+	v, c, err := pit.db.Get(id)
+	if err != nil {
+		return nil, err
+	}
+	out := copyBytes(v)
+	c.Close()
+	return out, nil
+}
+
 func (pit *PebbleIterator) Seek(id []byte) error {
 	pit.forward = true
 	if !pit.iter.SeekGE(id) {

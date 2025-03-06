@@ -34,25 +34,23 @@ func (dr *BSONDriver) ListFields() []string {
 	return out
 }
 
-func (dr *BSONDriver) GetIDsForLabel(field string) chan string {
+func (dr *BSONDriver) GetIDsForLabel(label string) chan string {
 	out := make(chan string, 10)
 	go func() {
 		defer close(out)
-		log.Infoln("GET TABLE")
-		table, err := dr.Get(field)
+		table, err := dr.Get(label)
 		if err != nil {
-			log.Errorf("GetIdsForLabel: %s on graph: %s", err, field)
+			log.Infof("GetIdsForLabel: %s on table: %s", err, label)
+			return
 		}
-		log.Infoln("TABLE AQUIRED")
 
 		rowsChan, err := table.Scan(true, nil)
 		if err != nil {
-			log.Errorf("Error scanning field %s: %s", field, err)
+			log.Errorf("Error scanning field %s: %s", label, err)
 			return
 		}
 
 		for row := range rowsChan {
-			log.Infoln("ROW: ", row)
 			if id, ok := row["_key"].(string); ok {
 				out <- id
 			}
