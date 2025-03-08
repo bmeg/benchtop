@@ -13,16 +13,15 @@ import (
 var data = map[string]map[string]any{
 	"key1": {
 		"field1": 0.1,
-		"name":   "alice",
 		"other":  "other data",
 	},
 	"key2": {
 		"field1": 0.2,
-		"name":   "bob",
+		"other":  "other data",
 	},
 	"key3": {
 		"field1": 0.3,
-		"name":   "chelsie",
+		"other":  "other data",
 	},
 }
 
@@ -34,8 +33,8 @@ func TestOpenClose(t *testing.T) {
 	}
 
 	_, err = dr.New("table_1", []benchtop.ColumnDef{
-		{Name: "field1", Type: benchtop.Double},
-		{Name: "name", Type: benchtop.String},
+		{Key: "field1", Type: benchtop.Double},
+		{Key: "other", Type: benchtop.String},
 	})
 
 	if err != nil {
@@ -68,8 +67,8 @@ func TestInsert(t *testing.T) {
 	}
 
 	ts, err := dr.New("table_1", []benchtop.ColumnDef{
-		{Name: "field1", Type: benchtop.Double},
-		{Name: "name", Type: benchtop.String},
+		{Key: "field1", Type: benchtop.Double},
+		{Key: "other", Type: benchtop.String},
 	})
 
 	if err != nil {
@@ -127,8 +126,8 @@ func TestDeleteTable(t *testing.T) {
 	}
 
 	_, err = dr.New("table_1", []benchtop.ColumnDef{
-		{Name: "field1", Type: benchtop.Double},
-		{Name: "name", Type: benchtop.String},
+		{Key: "field1", Type: benchtop.Double},
+		{Key: "other", Type: benchtop.String},
 	})
 	if err != nil {
 		t.Error(err)

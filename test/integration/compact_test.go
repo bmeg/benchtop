@@ -19,8 +19,8 @@ func TestCompact(t *testing.T) {
 	}
 
 	ts, err := dr.New("table_1", []benchtop.ColumnDef{
-		{Name: "field1", Type: benchtop.Double},
-		{Name: "name", Type: benchtop.String},
+		{Key: "field1", Type: benchtop.Double},
+		{Key: "name", Type: benchtop.String},
 	})
 	if err != nil {
 		t.Fatal(err)

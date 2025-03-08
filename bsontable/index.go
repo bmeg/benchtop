@@ -22,7 +22,7 @@ func (b *BSONDriver) GetAllColNames() chan string {
 				continue
 			}
 			for _, col := range info.Columns {
-				out <- col.Name
+				out <- col.Key
 			}
 		}
 		return

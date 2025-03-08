@@ -2,6 +2,7 @@ package bsontable
 
 import (
 	"encoding/binary"
+	"fmt"
 	"io"
 	"os"
 
@@ -14,7 +15,7 @@ func (b *BSONTable) packData(entry map[string]any, key string) (bson.D, error) {
 	// pack named columns
 	columns := []any{}
 	for _, c := range b.columns {
-		if e, ok := entry[c.Name]; ok {
+		if e, ok := entry[c.Key]; ok {
 			v, err := benchtop.CheckType(e, c.Type)
 			if err != nil {
 				return nil, err
@@ -47,18 +48,33 @@ func (b *BSONTable) addTableEntryInfo(tx *pebblebulk.PebbleBulk, rowId []byte, l
 	}
 }
 
-func (b *BSONTable) colUnpack(v bson.RawElement, colType benchtop.FieldType) any {
-	if colType == benchtop.String {
-		return v.Value().StringValue()
-	} else if colType == benchtop.Double {
-		return v.Value().Double()
-	} else if colType == benchtop.Int64 {
-		return v.Value().Int64()
-	} else if colType == benchtop.Bytes {
+// Check to make sure defined type is the actual type of the data. Throw error on mismatch
+func (b *BSONTable) colUnpack(v bson.RawElement, colType benchtop.FieldType) (any, error) {
+	switch colType {
+	case benchtop.String:
+		if v.Value().Type != bson.TypeString {
+			return nil, fmt.Errorf("expected String but got %s", v.Value().Type)
+		}
+		return v.Value().StringValue(), nil
+	case benchtop.Double:
+		if v.Value().Type != bson.TypeDouble {
+			return nil, fmt.Errorf("expected Double but got %s", v.Value().Type)
+		}
+		return v.Value().Double(), nil
+	case benchtop.Int64:
+		if v.Value().Type != bson.TypeInt64 {
+			return nil, fmt.Errorf("expected Int64 but got %s", v.Value().Type)
+		}
+		return v.Value().Int64(), nil
+	case benchtop.Bytes:
+		if v.Value().Type != bson.TypeBinary {
+			return nil, fmt.Errorf("expected Binary but got %s", v.Value().Type)
+		}
 		_, data := v.Value().Binary()
-		return data
+		return data, nil
+	default:
+		return nil, fmt.Errorf("unknown column type: %s", colType)
 	}
-	return nil
 }
 
 func (b *BSONTable) getBlockPos(id []byte) (uint64, uint64, error) {
@@ -142,7 +158,7 @@ func (b *BSONTable) readFromFile(offset uint64) (map[string]any, error) {
 		return nil, err
 	}
 	for i, n := range b.columns {
-		out[n.Name] = b.colUnpack(elem[i], n.Type)
+		out[n.Key], _ = b.colUnpack(elem[i], n.Type)
 	}
 
 	return out, nil

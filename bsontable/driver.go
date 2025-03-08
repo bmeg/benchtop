@@ -120,7 +120,7 @@ func (dr *BSONDriver) New(name string, columns []benchtop.ColumnDef) (benchtop.T
 	}
 	out.handle = f
 	for n, d := range columns {
-		out.columnMap[d.Name] = n
+		out.columnMap[d.Key] = n
 	}
 
 	outData, err := bson.Marshal(out)
@@ -282,11 +282,11 @@ func (dr *BSONDriver) BulkLoad(inputs chan *benchtop.Row) error {
 					defer wg.Done()
 
 					dr.Lock.RLock()
-					table, exists := dr.Tables[row.Label]
+					table, exists := dr.Tables[row.TableName]
 					dr.Lock.RUnlock()
 					if !exists {
 						mu.Lock()
-						errs = multierror.Append(errs, fmt.Errorf("table %s not found after creation", row.Label))
+						errs = multierror.Append(errs, fmt.Errorf("table %s not found after creation", row.TableName))
 						mu.Unlock()
 						return
 					}
@@ -294,16 +294,16 @@ func (dr *BSONDriver) BulkLoad(inputs chan *benchtop.Row) error {
 					dData, err := table.packData(row.Data, string(row.Id))
 					if err != nil {
 						mu.Lock()
-						log.Errorf("pack data error for table %s: %v", row.Label, err)
-						errs = multierror.Append(errs, fmt.Errorf("pack data error for table %s: %v", row.Label, err))
+						log.Errorf("pack data error for table %s: %v", row.TableName, err)
+						errs = multierror.Append(errs, fmt.Errorf("pack data error for table %s: %v", row.TableName, err))
 						mu.Unlock()
 						return
 					}
 					bData, err := bson.Marshal(dData)
 					if err != nil {
 						mu.Lock()
-						log.Errorf("bson marshal error for table %s: %v", row.Label, err)
-						errs = multierror.Append(errs, fmt.Errorf("bson marshal error for table %s: %v", row.Label, err))
+						log.Errorf("bson marshal error for table %s: %v", row.TableName, err)
+						errs = multierror.Append(errs, fmt.Errorf("bson marshal error for table %s: %v", row.TableName, err))
 						mu.Unlock()
 						return
 					}
@@ -313,22 +313,22 @@ func (dr *BSONDriver) BulkLoad(inputs chan *benchtop.Row) error {
 					offset, err := table.handle.Seek(0, io.SeekEnd)
 					if err != nil {
 						mu.Lock()
-						errs = multierror.Append(errs, fmt.Errorf("seek error for table %s: %v", row.Label, err))
+						errs = multierror.Append(errs, fmt.Errorf("seek error for table %s: %v", row.TableName, err))
 						mu.Unlock()
 						return
 					}
 
 					writeSize, err := table.writeBsonEntry(offset, bData)
 					if err != nil {
-						log.Errorf("write error for table %s: %v", row.Label, err)
+						log.Errorf("write error for table %s: %v", row.TableName, err)
 						mu.Lock()
-						errs = multierror.Append(errs, fmt.Errorf("write error for table %s: %v", row.Label, err))
+						errs = multierror.Append(errs, fmt.Errorf("write error for table %s: %v", row.TableName, err))
 						mu.Unlock()
 						return
 					}
 
 					//log.Infof("ID: %s, OFFSET: %d, WRITE SIZE: %d", row.Id, offset, writeSize)
-					table.addTableEntryInfo(tx, row.Id, row.Label, uint64(offset), uint64(writeSize))
+					table.addTableEntryInfo(tx, row.Id, row.TableName, uint64(offset), uint64(writeSize))
 					//log.Infof("Finished processing table: %s", label)
 				}(row)
 			}
@@ -344,18 +344,18 @@ func (dr *BSONDriver) BulkLoad(inputs chan *benchtop.Row) error {
 
 	for row := range inputs {
 		dr.Lock.RLock()
-		_, exists := dr.Tables[row.Label]
+		_, exists := dr.Tables[row.TableName]
 		dr.Lock.RUnlock()
 		if !exists {
-			log.Debugf("Creating new table for: %s on graph %s", row.Label, dr.base)
-			newTable, err := dr.New(row.Label, nil)
+			log.Debugf("Creating new table for: %s on graph %s", row.TableName, dr.base)
+			newTable, err := dr.New(row.TableName, nil)
 			if err != nil {
 				mu.Lock()
-				errs = multierror.Append(errs, fmt.Errorf("failed to create table %s: %v", row.Label, err))
+				errs = multierror.Append(errs, fmt.Errorf("failed to create table %s: %v", row.TableName, err))
 				mu.Unlock()
 			} else {
 				dr.Lock.Lock()
-				dr.Tables[row.Label] = newTable.(*BSONTable)
+				dr.Tables[row.TableName] = newTable.(*BSONTable)
 				dr.Lock.Unlock()
 			}
 		}

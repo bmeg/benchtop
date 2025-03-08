@@ -73,7 +73,7 @@ func (b *BSONTable) AddRow(elem benchtop.Row) error {
 		log.Errorf("write handler err in Load: bulkSet: %s", err)
 	}
 
-	b.addTableEntryInfo(nil, elem.Id, elem.Label, uint64(offset), uint64(writesize))
+	b.addTableEntryInfo(nil, elem.Id, elem.TableName, uint64(offset), uint64(writesize))
 	return nil
 
 }
@@ -116,14 +116,14 @@ func (b *BSONTable) GetRow(id []byte, fields ...string) (map[string]any, error) 
 			return nil, err
 		}
 		for i, n := range b.columns {
-			out[n.Name] = b.colUnpack(elem[i], n.Type)
+			out[n.Key], _ = b.colUnpack(elem[i], n.Type)
 		}
 	} else {
 		for _, colName := range fields {
 			if i, ok := b.columnMap[colName]; ok {
 				n := b.columns[i]
 				elem := columns.Index(uint(i))
-				out[n.Name] = b.colUnpack(elem, n.Type)
+				out[n.Key], _ = b.colUnpack(elem, n.Type)
 			}
 		}
 	}
@@ -400,9 +400,9 @@ func (b *BSONTable) Scan(keys bool, filter []benchtop.FieldFilter, fields ...str
 				for _, colName := range fields {
 					if i, ok := b.columnMap[colName]; ok {
 						n := b.columns[i]
-						unpack := b.colUnpack(columns.Index(uint(i)), n.Type)
+						unpack, _ := b.colUnpack(columns.Index(uint(i)), n.Type)
 						if filters.PassesFilters(unpack, filter) {
-							vOut[n.Name] = unpack
+							vOut[n.Key] = unpack
 							if keys {
 								vOut["_key"] = bd.Index(2).Value().StringValue()
 							}
@@ -433,7 +433,7 @@ func (b *BSONTable) Fetch(inputs chan benchtop.Index, workers int) <-chan bencht
 				defer wg.Done()
 				val, closer, err := b.db.Get(benchtop.NewPosKey(b.tableId, index.Key))
 				if err != nil {
-					results <- benchtop.BulkResponse{Key: string(index.Key), Data: nil, Err: func() string {
+					results <- benchtop.BulkResponse{Key: index.Key, Data: nil, Err: func() string {
 						if err != nil {
 							return err.Error()
 						}
@@ -448,7 +448,7 @@ func (b *BSONTable) Fetch(inputs chan benchtop.Index, workers int) <-chan bencht
 					data = nil
 				}
 
-				results <- benchtop.BulkResponse{Key: string(index.Key), Data: data, Err: func() string {
+				results <- benchtop.BulkResponse{Key: index.Key, Data: data, Err: func() string {
 					if err != nil {
 						return err.Error()
 					}
@@ -491,7 +491,7 @@ func (b *BSONTable) Load(inputs chan benchtop.Row) error {
 				errs = multierror.Append(errs, err)
 				log.Errorf("write handler err in Load: bulkSet: %s", err)
 			}
-			b.addTableEntryInfo(tx, entry.Id, entry.Label, uint64(offset), uint64(writeSize))
+			b.addTableEntryInfo(tx, entry.Id, entry.TableName, uint64(offset), uint64(writeSize))
 			offset += int64(writeSize) + 8
 		}
 		return nil
@@ -512,7 +512,7 @@ func (b *BSONTable) Remove(inputs chan benchtop.Index, workers int) <-chan bench
 		for index := range batchDeletes {
 			err := b.db.Delete(benchtop.NewPosKey(b.tableId, index.Key), nil)
 			if err != nil {
-				results <- benchtop.BulkResponse{Key: string(index.Key), Data: nil, Err: func() string {
+				results <- benchtop.BulkResponse{Key: index.Key, Data: nil, Err: func() string {
 					if err != nil {
 						return err.Error()
 					}
@@ -532,10 +532,9 @@ func (b *BSONTable) Remove(inputs chan benchtop.Index, workers int) <-chan bench
 			go func(index benchtop.Index) {
 				defer wg.Done()
 
-				key := string(index.Key)
 				val, closer, err := b.db.Get(benchtop.NewPosKey(b.tableId, index.Key))
 				if err != nil {
-					results <- benchtop.BulkResponse{Key: key, Data: nil, Err: func() string {
+					results <- benchtop.BulkResponse{Key: index.Key, Data: nil, Err: func() string {
 						if err != nil {
 							return err.Error()
 						}
@@ -547,7 +546,7 @@ func (b *BSONTable) Remove(inputs chan benchtop.Index, workers int) <-chan bench
 
 				offset := binary.LittleEndian.Uint64(val)
 				if err := b.markDelete(offset); err != nil {
-					results <- benchtop.BulkResponse{Key: key, Data: nil, Err: func() string {
+					results <- benchtop.BulkResponse{Key: index.Key, Data: nil, Err: func() string {
 						if err != nil {
 							return err.Error()
 						}
@@ -557,7 +556,7 @@ func (b *BSONTable) Remove(inputs chan benchtop.Index, workers int) <-chan bench
 				}
 
 				batchDeletes <- index
-				results <- benchtop.BulkResponse{Key: key, Data: nil, Err: ""}
+				results <- benchtop.BulkResponse{Key: index.Key, Data: nil, Err: ""}
 			}(index)
 		}
 		wg.Wait()

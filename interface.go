@@ -17,7 +17,6 @@ type TableInfo struct {
 }
 
 type ColumnDef struct {
-	Name string    `json:"name"`
 	Key  string    `json:"key"`
 	Type FieldType `json:"type"`
 }
@@ -33,9 +32,9 @@ type TableDriver interface {
 }
 
 type Row struct {
-	Id    []byte
-	Label string
-	Data  map[string]any
+	Id        []byte
+	TableName string
+	Data      map[string]any
 }
 
 type Index struct {
@@ -44,7 +43,7 @@ type Index struct {
 }
 
 type BulkResponse struct {
-	Key  string
+	Key  []byte
 	Data map[string]any
 	Err  string
 }

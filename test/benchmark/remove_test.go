@@ -27,7 +27,7 @@ func BenchmarkRemove(b *testing.B) {
 		b.Fatal(err)
 	}
 
-	columns := []benchtop.ColumnDef{{Name: "data", Type: benchtop.Bytes}}
+	columns := []benchtop.ColumnDef{{Key: "data", Type: benchtop.Bytes}}
 
 	compactbsonTable, err := compactbsonDriver.New(removename, columns)
 	if err != nil {

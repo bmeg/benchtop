@@ -18,8 +18,8 @@ func TestDelete(t *testing.T) {
 	}
 
 	ts, err := dr.New("table_1", []benchtop.ColumnDef{
-		{Name: "data", Type: benchtop.Int64},
-		{Name: "id", Type: benchtop.String},
+		{Key: "data", Type: benchtop.Int64},
+		{Key: "id", Type: benchtop.String},
 	})
 
 	if err != nil {

@@ -36,7 +36,7 @@ func BenchmarkScaleWriteBson(b *testing.B) {
 		}
 	}
 
-	columns := []benchtop.ColumnDef{{Name: "data", Type: benchtop.Bytes}}
+	columns := []benchtop.ColumnDef{{Key: "data", Type: benchtop.Bytes}}
 
 	if bsonTable == nil {
 		table, err := bsonDriver.New(Bsonname, columns)

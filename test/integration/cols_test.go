@@ -17,32 +17,32 @@ func TestGetAllColls(t *testing.T) {
 	}
 
 	_, err = dr.New("table_1", []benchtop.ColumnDef{
-		{Name: "field1", Type: benchtop.Double},
-		{Name: "name1", Type: benchtop.String},
+		{Key: "field1", Type: benchtop.Double},
+		{Key: "name1", Type: benchtop.String},
 	})
 	if err != nil {
 		t.Error(err)
 	}
 
 	_, err = dr.New("table_2", []benchtop.ColumnDef{
-		{Name: "field2", Type: benchtop.Double},
-		{Name: "name2", Type: benchtop.String},
+		{Key: "field2", Type: benchtop.Double},
+		{Key: "name2", Type: benchtop.String},
 	})
 	if err != nil {
 		t.Error(err)
 	}
 
 	_, err = dr.New("table_3", []benchtop.ColumnDef{
-		{Name: "field3", Type: benchtop.Double},
-		{Name: "name3", Type: benchtop.String},
+		{Key: "field3", Type: benchtop.Double},
+		{Key: "name3", Type: benchtop.String},
 	})
 	if err != nil {
 		t.Error(err)
 	}
 
 	_, err = dr.New("table_4", []benchtop.ColumnDef{
-		{Name: "field3", Type: benchtop.Double},
-		{Name: "name3", Type: benchtop.String},
+		{Key: "field3", Type: benchtop.Double},
+		{Key: "name3", Type: benchtop.String},
 	})
 	if err != nil {
 		t.Error(err)
