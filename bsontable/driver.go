@@ -7,8 +7,11 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 
+	"github.com/akrylysov/pogreb"
 	"github.com/bmeg/benchtop"
 	"github.com/bmeg/benchtop/pebblebulk"
 	"github.com/bmeg/benchtop/util"
@@ -19,15 +22,16 @@ import (
 )
 
 type BSONDriver struct {
-	base   string
-	Lock   sync.RWMutex
-	db     *pebble.DB
-	Pb     *pebblebulk.PebbleKV
-	Tables map[string]*BSONTable
-	Fields map[string][]string
+	base           string
+	Lock           sync.RWMutex
+	pogrebInstance *pogreb.DB
+	db             *pebble.DB
+	Pb             *pebblebulk.PebbleKV
+	Tables         map[string]*BSONTable
+	Fields         map[string][]string
 }
 
-func NewBSONDriver(path string) (benchtop.TableDriver, error) {
+func NewBSONDriver(path string, pogrebInstance *pogreb.DB) (benchtop.TableDriver, error) {
 	db, err := pebble.Open(path, &pebble.Options{})
 	if err != nil {
 		return nil, err
@@ -45,11 +49,12 @@ func NewBSONDriver(path string) (benchtop.TableDriver, error) {
 			InsertCount:  0,
 			CompactLimit: uint32(1000),
 		},
-		Fields: map[string][]string{},
+		Fields:         map[string][]string{},
+		pogrebInstance: pogrebInstance,
 	}, nil
 }
 
-func LoadBSONDriver(path string) (benchtop.TableDriver, error) {
+func LoadBSONDriver(path string, pogrebInstance *pogreb.DB) (benchtop.TableDriver, error) {
 	db, err := pebble.Open(path, &pebble.Options{})
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %v", err)
@@ -61,9 +66,10 @@ func LoadBSONDriver(path string) (benchtop.TableDriver, error) {
 	}
 
 	driver := &BSONDriver{
-		base:   path,
-		db:     db,
-		Tables: map[string]*BSONTable{},
+		base:           path,
+		db:             db,
+		Tables:         map[string]*BSONTable{},
+		pogrebInstance: pogrebInstance,
 		Pb: &pebblebulk.PebbleKV{
 			Db:           db,
 			InsertCount:  0,
@@ -98,6 +104,15 @@ func LoadBSONDriver(path string) (benchtop.TableDriver, error) {
 	return driver, nil
 }
 
+func padToSixDigits(number int) string {
+	numStr := strconv.Itoa(number)
+	numZeros := 6 - len(numStr)
+	if numZeros < 0 {
+		return numStr
+	}
+	return strings.Repeat("0", numZeros) + numStr
+}
+
 func (dr *BSONDriver) New(name string, columns []benchtop.ColumnDef) (benchtop.TableStore, error) {
 	p, _ := dr.Get(name)
 	if p != nil {
@@ -107,7 +122,10 @@ func (dr *BSONDriver) New(name string, columns []benchtop.ColumnDef) (benchtop.T
 	dr.Lock.Lock()
 	defer dr.Lock.Unlock()
 
-	tPath := filepath.Join(dr.base, "TABLES", name)
+	formattedName := padToSixDigits(len(dr.Tables))
+	err := dr.pogrebInstance.Put([]byte(name), []byte(formattedName))
+
+	tPath := filepath.Join(dr.base, "TABLES", formattedName)
 	out := &BSONTable{
 		columns:    columns,
 		handleLock: sync.RWMutex{},
@@ -202,7 +220,11 @@ func (dr *BSONDriver) Get(name string) (benchtop.TableStore, error) {
 	bson.Unmarshal(value, &tinfo)
 	closer.Close()
 
-	tPath := filepath.Join(dr.base, "TABLES", name)
+	tName, err := dr.pogrebInstance.Get([]byte(name))
+	if err != nil {
+		return nil, err
+	}
+	tPath := filepath.Join(dr.base, "TABLES", string(tName))
 
 	f, err := os.OpenFile(tPath, os.O_RDWR|os.O_CREATE, 0644)
 	if err != nil {
@@ -239,7 +261,11 @@ func (dr *BSONDriver) Delete(name string) error {
 		}
 	}
 
-	tPath := filepath.Join(dr.base, "TABLES", name)
+	pgName, err := dr.pogrebInstance.Get([]byte(name))
+	if err != nil {
+		return err
+	}
+	tPath := filepath.Join(dr.base, "TABLES", string(pgName))
 	if err := os.Remove(tPath); err != nil {
 		return fmt.Errorf("failed to delete table file %s: %v", tPath, err)
 	}
@@ -348,6 +374,7 @@ func (dr *BSONDriver) BulkLoad(inputs chan *benchtop.Row) error {
 		dr.Lock.RUnlock()
 		if !exists {
 			log.Debugf("Creating new table for: %s on graph %s", row.TableName, dr.base)
+
 			newTable, err := dr.New(row.TableName, nil)
 			if err != nil {
 				mu.Lock()

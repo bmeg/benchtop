@@ -5,6 +5,7 @@ import (
 	"os"
 	"testing"
 
+	"github.com/akrylysov/pogreb"
 	"github.com/bmeg/benchtop"
 	"github.com/bmeg/benchtop/bsontable"
 	"github.com/bmeg/benchtop/test/fixtures"
@@ -22,10 +23,17 @@ const (
 
 func BenchmarkScaleWriteBson(b *testing.B) {
 	b.Log("BenchmarkScaleWriteBson start")
+	pogrebName := Bsonname + "pogreb"
+	defer os.RemoveAll(pogrebName)
+
+	pg, perr := pogreb.Open(pogrebName, nil)
+	if perr != nil {
+		b.Error(perr)
+	}
 
 	var err error
 	if bsonDriver == nil {
-		driver, err := bsontable.NewBSONDriver(Bsonname)
+		driver, err := bsontable.NewBSONDriver(Bsonname, pg)
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -72,9 +80,17 @@ func BenchmarkScaleWriteBson(b *testing.B) {
 }
 
 func BenchmarkRandomReadBson(b *testing.B) {
+	pogrebName := Bsonname + "pogreb"
+	defer os.RemoveAll(pogrebName)
+
+	pg, perr := pogreb.Open(pogrebName, nil)
+	if perr != nil {
+		b.Error(perr)
+	}
+
 	var err error
 	if bsonDriver == nil {
-		driver, err := bsontable.NewBSONDriver(Bsonname)
+		driver, err := bsontable.NewBSONDriver(Bsonname, pg)
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -112,9 +128,17 @@ func BenchmarkRandomReadBson(b *testing.B) {
 }
 
 func BenchmarkRandomKeysBson(b *testing.B) {
+	pogrebName := Bsonname + "pogreb"
+	defer os.RemoveAll(pogrebName)
+
+	pg, perr := pogreb.Open(pogrebName, nil)
+	if perr != nil {
+		b.Error(perr)
+	}
+
 	var err error
 	if bsonDriver == nil {
-		driver, err := bsontable.NewBSONDriver(Bsonname)
+		driver, err := bsontable.NewBSONDriver(Bsonname, pg)
 		if err != nil {
 			b.Fatal(err)
 		}

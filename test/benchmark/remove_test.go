@@ -5,6 +5,7 @@ import (
 	"os"
 	"testing"
 
+	"github.com/akrylysov/pogreb"
 	"github.com/bmeg/benchtop"
 	"github.com/bmeg/benchtop/bsontable"
 	"github.com/bmeg/benchtop/test/fixtures"
@@ -18,11 +19,18 @@ const (
 
 func BenchmarkRemove(b *testing.B) {
 	var removename = "test.bson" + util.RandomString(5)
-	defer os.Remove(removename) // Clean up
+	defer os.RemoveAll(removename) // Clean up
+	pogrebName := removename + "pogreb"
+	defer os.RemoveAll(pogrebName)
+
+	pg, err := pogreb.Open(pogrebName, nil)
+	if err != nil {
+		b.Error(err)
+	}
 
 	b.Log("BenchmarkScaleWriteBson start")
 
-	compactbsonDriver, err := bsontable.NewBSONDriver(removename)
+	compactbsonDriver, err := bsontable.NewBSONDriver(removename, pg)
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -89,6 +97,4 @@ func BenchmarkRemove(b *testing.B) {
 	for elem := range scaChan {
 		fmt.Println("ELEM: ", elem)
 	}
-
-	os.RemoveAll(removename)
 }

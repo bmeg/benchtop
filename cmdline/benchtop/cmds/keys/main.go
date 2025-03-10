@@ -3,6 +3,7 @@ package keys
 import (
 	"fmt"
 
+	"github.com/akrylysov/pogreb"
 	"github.com/bmeg/benchtop/bsontable"
 	"github.com/spf13/cobra"
 )
@@ -16,8 +17,14 @@ var Cmd = &cobra.Command{
 
 		dbPath := args[0]
 		tableName := args[1]
+		pogrebPath := args[2]
+		pg, err := pogreb.Open(pogrebPath, nil)
+		if err != nil {
+			return err
+		}
 
-		driver, err := bsontable.NewBSONDriver(dbPath)
+
+		driver, err := bsontable.NewBSONDriver(dbPath, pg)
 		if err != nil {
 			return err
 		}

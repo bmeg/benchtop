@@ -5,6 +5,7 @@ import (
 	"os"
 	"testing"
 
+	"github.com/akrylysov/pogreb"
 	"github.com/bmeg/benchtop"
 	"github.com/bmeg/benchtop/bsontable"
 	"github.com/bmeg/benchtop/util"
@@ -27,7 +28,16 @@ var data = map[string]map[string]any{
 
 func TestOpenClose(t *testing.T) {
 	name := "test.data" + util.RandomString(5)
-	dr, err := bsontable.NewBSONDriver(name)
+	pogrebName := name + "pogreb"
+	defer os.RemoveAll(name)
+	defer os.RemoveAll(pogrebName)
+
+	pg, err := pogreb.Open(pogrebName, nil)
+	if err != nil {
+		t.Error(err)
+	}
+
+	dr, err := bsontable.NewBSONDriver(name, pg)
 	if err != nil {
 		t.Error(err)
 	}
@@ -42,7 +52,7 @@ func TestOpenClose(t *testing.T) {
 	}
 	dr.Close()
 
-	or, err := bsontable.NewBSONDriver(name)
+	or, err := bsontable.NewBSONDriver(name, pg)
 	if err != nil {
 		t.Error(err)
 	}
@@ -55,13 +65,20 @@ func TestOpenClose(t *testing.T) {
 		t.Errorf("Incorrect re-open")
 	}
 	defer or.Close()
-	os.RemoveAll(name)
 }
 
 func TestInsert(t *testing.T) {
 	dbname := "test.data" + util.RandomString(5)
+	pogrebName := dbname + "pogreb"
+	defer os.RemoveAll(dbname)
+	defer os.RemoveAll(pogrebName)
 
-	dr, err := bsontable.NewBSONDriver(dbname)
+	pg, err := pogreb.Open(pogrebName, nil)
+	if err != nil {
+		t.Error(err)
+	}
+
+	dr, err := bsontable.NewBSONDriver(dbname, pg)
 	if err != nil {
 		t.Error(err)
 	}
@@ -115,12 +132,20 @@ func TestInsert(t *testing.T) {
 
 	ts.Compact()
 	defer dr.Close()
-	os.RemoveAll(dbname)
 }
 
 func TestDeleteTable(t *testing.T) {
 	name := "test.data" + util.RandomString(5)
-	dr, err := bsontable.NewBSONDriver(name)
+	pogrebName := name + "pogreb"
+	defer os.RemoveAll(name)
+	defer os.RemoveAll(pogrebName)
+
+	pg, err := pogreb.Open(pogrebName, nil)
+	if err != nil {
+		t.Error(err)
+	}
+
+	dr, err := bsontable.NewBSONDriver(name, pg)
 	if err != nil {
 		t.Error(err)
 	}
@@ -140,7 +165,7 @@ func TestDeleteTable(t *testing.T) {
 
 	dr.Close()
 
-	or, err := bsontable.NewBSONDriver(name)
+	or, err := bsontable.NewBSONDriver(name, pg)
 	if err != nil {
 		t.Error(err)
 	}
@@ -151,5 +176,4 @@ func TestDeleteTable(t *testing.T) {
 	}
 
 	defer or.Close()
-	os.RemoveAll(name)
 }

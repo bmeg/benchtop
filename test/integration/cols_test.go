@@ -4,6 +4,7 @@ import (
 	"os"
 	"testing"
 
+	"github.com/akrylysov/pogreb"
 	"github.com/bmeg/benchtop"
 	"github.com/bmeg/benchtop/bsontable"
 	"github.com/bmeg/benchtop/util"
@@ -11,7 +12,16 @@ import (
 
 func TestGetAllColls(t *testing.T) {
 	name := "test.data" + util.RandomString(5)
-	dr, err := bsontable.NewBSONDriver(name)
+	pogrebName := name + "pogreb"
+	defer os.RemoveAll(name)
+	defer os.RemoveAll(pogrebName)
+
+	pg, err := pogreb.Open(pogrebName, nil)
+	if err != nil {
+		t.Error(err)
+	}
+
+	dr, err := bsontable.NewBSONDriver(name, pg)
 	if err != nil {
 		t.Error(err)
 	}
@@ -52,5 +62,4 @@ func TestGetAllColls(t *testing.T) {
 	}
 
 	defer dr.Close()
-	os.RemoveAll(name)
 }
