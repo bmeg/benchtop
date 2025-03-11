@@ -32,6 +32,7 @@ type BSONTable struct {
 	tableId    uint32
 	handleLock sync.RWMutex
 	Path       string
+	Name       string
 	tType      byte
 }
 
@@ -73,7 +74,8 @@ func (b *BSONTable) AddRow(elem benchtop.Row) error {
 		log.Errorf("write handler err in Load: bulkSet: %s", err)
 	}
 
-	b.addTableEntryInfo(nil, elem.Id, elem.TableName, uint64(offset), uint64(writesize))
+	b.addTableDeleteEntryInfo(nil, elem.Id, elem.TableName)
+	b.addTableEntryInfo(nil, elem.Id, uint64(offset), uint64(writesize))
 	return nil
 
 }
@@ -491,7 +493,7 @@ func (b *BSONTable) Load(inputs chan benchtop.Row) error {
 				errs = multierror.Append(errs, err)
 				log.Errorf("write handler err in Load: bulkSet: %s", err)
 			}
-			b.addTableEntryInfo(tx, entry.Id, entry.TableName, uint64(offset), uint64(writeSize))
+			b.addTableEntryInfo(tx, entry.Id, uint64(offset), uint64(writeSize))
 			offset += int64(writeSize) + 8
 		}
 		return nil

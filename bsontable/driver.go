@@ -21,6 +21,8 @@ import (
 	"go.mongodb.org/mongo-driver/bson"
 )
 
+const batchSize = 1000
+
 type BSONDriver struct {
 	base           string
 	Lock           sync.RWMutex
@@ -131,6 +133,7 @@ func (dr *BSONDriver) New(name string, columns []benchtop.ColumnDef) (benchtop.T
 		handleLock: sync.RWMutex{},
 		columnMap:  map[string]int{},
 		Path:       tPath,
+		Name:       name,
 	}
 	f, err := os.Create(tPath)
 	if err != nil {
@@ -198,7 +201,7 @@ func (dr *BSONDriver) Close() {
 		}
 	}
 	if closeErr := dr.db.Close(); closeErr != nil {
-		log.Errorf("Error closing db: %v", closeErr)
+		log.Errorf("Error closing pebble db: %v", closeErr)
 	}
 }
 
@@ -294,103 +297,174 @@ func (dr *BSONDriver) DeleteAnyRow(name []byte) error {
 }
 
 func (dr *BSONDriver) BulkLoad(inputs chan *benchtop.Row) error {
-	var mu sync.Mutex
 	var wg sync.WaitGroup
-	var errs *multierror.Error
-	rowChan := make(chan *benchtop.Row, 100)
+	tableChannels := make(map[string]chan *benchtop.Row)
+	metadataChan := make(chan struct {
+		table    *BSONTable
+		metadata []struct {
+			id           string
+			offset, size uint64
+		}
+		err error
+	}, 100)
 
-	// Start a goroutine to consume from rowChan
-	go func() {
-		err := dr.Pb.BulkWrite(func(tx *pebblebulk.PebbleBulk) error {
-			for row := range rowChan {
-				wg.Add(1)
-				go func(row *benchtop.Row) {
-					defer wg.Done()
+	startTableGoroutine := func(tableName string) {
+		ch := make(chan *benchtop.Row, 100)
+		tableChannels[tableName] = ch
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			var metadata []struct {
+				id           string
+				offset, size uint64
+			}
+			var localErr *multierror.Error
 
-					dr.Lock.RLock()
-					table, exists := dr.Tables[row.TableName]
-					dr.Lock.RUnlock()
-					if !exists {
-						mu.Lock()
-						errs = multierror.Append(errs, fmt.Errorf("table %s not found after creation", row.TableName))
-						mu.Unlock()
-						return
+			dr.Lock.RLock()
+			table, exists := dr.Tables[tableName]
+			dr.Lock.RUnlock()
+			if !exists {
+				newTable, err := dr.New(tableName, nil)
+				if err != nil {
+					localErr = multierror.Append(localErr, fmt.Errorf("failed to create table %s: %v", tableName, err))
+					metadataChan <- struct {
+						table    *BSONTable
+						metadata []struct {
+							id           string
+							offset, size uint64
+						}
+						err error
+					}{nil, nil, localErr.ErrorOrNil()}
+					return
+				}
+				table = newTable.(*BSONTable)
+				dr.Lock.Lock()
+				dr.Tables[tableName] = table
+				dr.Lock.Unlock()
+			}
+			for {
+				batch := make([]*benchtop.Row, 0, batchSize)
+				for i := 0; i < batchSize; i++ {
+					row, ok := <-ch
+					if !ok {
+						break
 					}
+					batch = append(batch, row)
+				}
+				if len(batch) == 0 {
+					break
+				}
 
+				bDatas := make([][]byte, 0, batchSize)
+				ids := make([]string, 0, batchSize)
+				for _, row := range batch {
 					dData, err := table.packData(row.Data, string(row.Id))
 					if err != nil {
-						mu.Lock()
-						log.Errorf("pack data error for table %s: %v", row.TableName, err)
-						errs = multierror.Append(errs, fmt.Errorf("pack data error for table %s: %v", row.TableName, err))
-						mu.Unlock()
-						return
+						localErr = multierror.Append(localErr, fmt.Errorf("pack data error for table %s: %v", tableName, err))
+						continue
 					}
 					bData, err := bson.Marshal(dData)
 					if err != nil {
-						mu.Lock()
-						log.Errorf("bson marshal error for table %s: %v", row.TableName, err)
-						errs = multierror.Append(errs, fmt.Errorf("bson marshal error for table %s: %v", row.TableName, err))
-						mu.Unlock()
-						return
+						localErr = multierror.Append(localErr, fmt.Errorf("bson marshal error for table %s: %v", tableName, err))
+						continue
 					}
+					bDatas = append(bDatas, bData)
+					ids = append(ids, string(row.Id))
+				}
+				if len(bDatas) == 0 {
+					continue
+				}
 
-					table.handleLock.Lock()
-					defer table.handleLock.Unlock()
-					offset, err := table.handle.Seek(0, io.SeekEnd)
-					if err != nil {
-						mu.Lock()
-						errs = multierror.Append(errs, fmt.Errorf("seek error for table %s: %v", row.TableName, err))
-						mu.Unlock()
-						return
-					}
+				table.handleLock.Lock()
+				startOffset, err := table.handle.Seek(0, io.SeekEnd)
+				if err != nil {
+					localErr = multierror.Append(localErr, fmt.Errorf("seek error for table %s: %v", tableName, err))
+					table.handleLock.Unlock()
+					continue
+				}
 
-					writeSize, err := table.writeBsonEntry(offset, bData)
-					if err != nil {
-						log.Errorf("write error for table %s: %v", row.TableName, err)
-						mu.Lock()
-						errs = multierror.Append(errs, fmt.Errorf("write error for table %s: %v", row.TableName, err))
-						mu.Unlock()
-						return
-					}
+				offsets := make([]uint64, len(bDatas)+1)
+				offsets[0] = uint64(startOffset)
+				for i, bData := range bDatas {
+					offsets[i+1] = offsets[i] + 8 + uint64(len(bData))
+				}
 
-					//log.Infof("ID: %s, OFFSET: %d, WRITE SIZE: %d", row.Id, offset, writeSize)
-					table.addTableEntryInfo(tx, row.Id, row.TableName, uint64(offset), uint64(writeSize))
-					//log.Infof("Finished processing table: %s", label)
-				}(row)
+				var batchData []byte
+				for i, bData := range bDatas {
+					header := make([]byte, 8)
+					binary.LittleEndian.PutUint64(header, offsets[i+1])
+					batchData = append(batchData, header...)
+					batchData = append(batchData, bData...)
+				}
+
+				_, err = table.handle.Write(batchData)
+				if err != nil {
+					localErr = multierror.Append(localErr, fmt.Errorf("write error for table %s: %v", tableName, err))
+					table.handleLock.Unlock()
+					continue
+				}
+				table.handleLock.Unlock()
+
+				// Record metadata for each record in the batch
+				for i, id := range ids {
+					metadata = append(metadata, struct {
+						id           string
+						offset, size uint64
+					}{id, offsets[i], uint64(len(bDatas[i]))})
+				}
 			}
-			wg.Wait()
-			return errs.ErrorOrNil()
+			metadataChan <- struct {
+				table    *BSONTable
+				metadata []struct {
+					id           string
+					offset, size uint64
+				}
+				err error
+			}{table, metadata, localErr.ErrorOrNil()}
+
+		}()
+	}
+
+	for row := range inputs {
+		tableName := row.TableName
+		if _, exists := tableChannels[tableName]; !exists {
+			startTableGoroutine(tableName)
+		}
+		tableChannels[tableName] <- row
+	}
+
+	for _, ch := range tableChannels {
+		close(ch)
+	}
+
+	var errs *multierror.Error
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		err := dr.Pb.BulkWrite(func(tx *pebblebulk.PebbleBulk) error {
+			for meta := range metadataChan {
+				if meta.err != nil {
+					errs = multierror.Append(errs, meta.err)
+					continue
+				}
+				if meta.table == nil || len(meta.metadata) == 0 {
+					continue
+				}
+				for _, m := range meta.metadata {
+					meta.table.addTableDeleteEntryInfo(tx, []byte(m.id), meta.table.Name)
+					meta.table.addTableEntryInfo(tx, []byte(m.id), m.offset, m.size)
+				}
+			}
+			return nil
 		})
 		if err != nil {
-			mu.Lock()
 			errs = multierror.Append(errs, err)
-			mu.Unlock()
 		}
 	}()
 
-	for row := range inputs {
-		dr.Lock.RLock()
-		_, exists := dr.Tables[row.TableName]
-		dr.Lock.RUnlock()
-		if !exists {
-			log.Debugf("Creating new table for: %s on graph %s", row.TableName, dr.base)
-
-			newTable, err := dr.New(row.TableName, nil)
-			if err != nil {
-				mu.Lock()
-				errs = multierror.Append(errs, fmt.Errorf("failed to create table %s: %v", row.TableName, err))
-				mu.Unlock()
-			} else {
-				dr.Lock.Lock()
-				dr.Tables[row.TableName] = newTable.(*BSONTable)
-				dr.Lock.Unlock()
-			}
-		}
-		rowChan <- row
-	}
-
-	close(rowChan)
 	wg.Wait()
+	close(metadataChan)
+	<-done
 
 	return errs.ErrorOrNil()
 }

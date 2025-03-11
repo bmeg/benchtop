@@ -32,6 +32,9 @@ type PebbleKV struct {
 func (pb *PebbleBulk) Set(id []byte, val []byte, opts *pebble.WriteOptions) error {
 	pb.mu.Lock()
 	defer pb.mu.Unlock()
+	if pb.Batch == nil {
+		pb.Batch = pb.Db.NewBatch()
+	}
 
 	pb.CurSize += len(id) + len(val)
 	pb.totalInserts++
