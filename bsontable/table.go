@@ -51,16 +51,14 @@ func (b *BSONTable) Close() {
 Unary single effect operations
 */
 func (b *BSONTable) AddRow(elem benchtop.Row) error {
-	dData, err := b.packData(elem.Data, string(elem.Id))
+	mData, err := b.packData(elem.Data, string(elem.Id))
 	if err != nil {
 		return err
 	}
-
-	bData, err := bson.Marshal(dData)
+	bData, err := bson.Marshal(mData)
 	if err != nil {
 		return err
 	}
-
 	//append to end of block file
 	b.handleLock.Lock()
 	defer b.handleLock.Unlock()
@@ -81,8 +79,11 @@ func (b *BSONTable) AddRow(elem benchtop.Row) error {
 }
 
 func (b *BSONTable) GetRow(id []byte, fields ...string) (map[string]any, error) {
-	b.handleLock.RLock()
-	defer b.handleLock.RUnlock()
+	file, err := os.Open(b.Path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open file %s: %v", b.Path, err)
+	}
+	defer file.Close()
 
 	offset, _, err := b.getBlockPos(id)
 	if err != nil {
@@ -90,46 +91,28 @@ func (b *BSONTable) GetRow(id []byte, fields ...string) (map[string]any, error) 
 	}
 
 	// Offset skip the first 8 bytes since they are for getting the offset for a scan operation
-	b.handle.Seek(int64(offset+8), io.SeekStart)
+	file.Seek(int64(offset+8), io.SeekStart)
 	//The next 4 bytes of the BSON block is the size
 	sizeBytes := []byte{0x00, 0x00, 0x00, 0x00}
-	_, err = b.handle.Read(sizeBytes)
+	_, err = file.Read(sizeBytes)
 	if err != nil {
 		return nil, err
 	}
 	bSize := int32(binary.LittleEndian.Uint32(sizeBytes))
-	b.handle.Seek(-4, io.SeekCurrent)
+	file.Seek(-4, io.SeekCurrent)
 	rowData := make([]byte, bSize)
-	b.handle.Read(rowData)
-	bd := bson.Raw(rowData)
+	file.Read(rowData)
 
-	columns, ok := bd.Index(0).Value().ArrayOK()
-	if !ok || len(columns) == 0 {
-		return nil, fmt.Errorf("'columns' array is missing or empty")
-	}
-
-	out := map[string]any{}
-	if len(fields) == 0 {
-		if err := bd.Index(1).Value().Unmarshal(&out); err != nil {
-			return nil, err
-		}
-		elem, err := columns.Elements()
+	var m bson.M
+	bson.Unmarshal(rowData, &m)
+	if len(m) > 0 {
+		out, err := b.unpackData(m)
 		if err != nil {
 			return nil, err
 		}
-		for i, n := range b.columns {
-			out[n.Key], _ = b.colUnpack(elem[i], n.Type)
-		}
-	} else {
-		for _, colName := range fields {
-			if i, ok := b.columnMap[colName]; ok {
-				n := b.columns[i]
-				elem := columns.Index(uint(i))
-				out[n.Key], _ = b.colUnpack(elem, n.Type)
-			}
-		}
+		return out, nil
 	}
-	return out, nil
+	return nil, nil
 }
 
 func (b *BSONTable) DeleteRow(name []byte) error {
@@ -249,11 +232,7 @@ func (b *BSONTable) Compact() error {
 
 		// --- Extract 'columns' field from BSON ---
 		startParseBSON := time.Now()
-		raw := bson.Raw(rowBuff)
-		val, exists := raw.LookupErr("key")
-		if exists != nil {
-			return fmt.Errorf("'columns' field not found in BSON document")
-		}
+		val := bson.Raw(rowBuff).Lookup("R").Array().Index(2).Value()
 
 		inputChan <- benchtop.Index{Key: []byte(val.StringValue()), Position: newOffset}
 		log.Debugf("Time to parse BSON 'columns': %v\n", time.Since(startParseBSON))
@@ -389,7 +368,10 @@ func (b *BSONTable) Scan(keys bool, filter []benchtop.FieldFilter, fields ...str
 				return
 			}
 
-			bd := bson.Raw(rowData)
+			bd, ok := bson.Raw(rowData).Lookup("R").ArrayOK()
+			if !ok {
+				return
+			}
 			columns := bd.Index(0).Value().Array()
 
 			vOut := map[string]any{}
@@ -476,12 +458,12 @@ func (b *BSONTable) Load(inputs chan benchtop.Row) error {
 
 	err = b.Pb.BulkWrite(func(tx *pebblebulk.PebbleBulk) error {
 		for entry := range inputs {
-			dData, err := b.packData(entry.Data, string(entry.Id))
+			mData, err := b.packData(entry.Data, string(entry.Id))
 			if err != nil {
 				errs = multierror.Append(errs, err)
 				log.Errorf("pack data err in Load: bulkSet: %s", err)
 			}
-			bData, err := bson.Marshal(dData)
+			bData, err := bson.Marshal(mData)
 			if err != nil {
 				errs = multierror.Append(errs, err)
 				log.Errorf("bson Marshall err in Load: bulkSet: %s", err)
@@ -493,6 +475,7 @@ func (b *BSONTable) Load(inputs chan benchtop.Row) error {
 				errs = multierror.Append(errs, err)
 				log.Errorf("write handler err in Load: bulkSet: %s", err)
 			}
+			b.addTableDeleteEntryInfo(tx, entry.Id, entry.TableName)
 			b.addTableEntryInfo(tx, entry.Id, uint64(offset), uint64(writeSize))
 			offset += int64(writeSize) + 8
 		}

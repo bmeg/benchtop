@@ -116,5 +116,4 @@ func TestScan(t *testing.T) {
 
 	ts.Compact()
 	defer dr.Close()
-	os.RemoveAll(dbname)
 }

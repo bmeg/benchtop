@@ -172,7 +172,7 @@ func TestDeleteTable(t *testing.T) {
 
 	_, err = or.Get("table_1")
 	if err == nil {
-		t.Log("expected table to be gone. table still exists")
+		t.Errorf("expected table to be gone. table still exists")
 	}
 
 	defer or.Close()

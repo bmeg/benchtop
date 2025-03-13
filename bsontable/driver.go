@@ -268,6 +268,11 @@ func (dr *BSONDriver) Delete(name string) error {
 	if err != nil {
 		return err
 	}
+	err = dr.pogrebInstance.Delete([]byte(name))
+	if err != nil {
+		return err
+	}
+
 	tPath := filepath.Join(dr.base, "TABLES", string(pgName))
 	if err := os.Remove(tPath); err != nil {
 		return fmt.Errorf("failed to delete table file %s: %v", tPath, err)
@@ -358,14 +363,14 @@ func (dr *BSONDriver) BulkLoad(inputs chan *benchtop.Row) error {
 				bDatas := make([][]byte, 0, batchSize)
 				ids := make([]string, 0, batchSize)
 				for _, row := range batch {
-					dData, err := table.packData(row.Data, string(row.Id))
+					mData, err := table.packData(row.Data, string(row.Id))
 					if err != nil {
 						localErr = multierror.Append(localErr, fmt.Errorf("pack data error for table %s: %v", tableName, err))
 						continue
 					}
-					bData, err := bson.Marshal(dData)
+					bData, err := bson.Marshal(mData)
 					if err != nil {
-						localErr = multierror.Append(localErr, fmt.Errorf("bson marshal error for table %s: %v", tableName, err))
+						localErr = multierror.Append(localErr, fmt.Errorf("marshal data error for table %s: %v", tableName, err))
 						continue
 					}
 					bDatas = append(bDatas, bData)

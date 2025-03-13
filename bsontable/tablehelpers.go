@@ -2,16 +2,19 @@ package bsontable
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"os"
+	"time"
 
 	"github.com/bmeg/benchtop"
 	"github.com/bmeg/benchtop/pebblebulk"
 	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
-func (b *BSONTable) packData(entry map[string]any, key string) (bson.D, error) {
+func (b *BSONTable) packData(entry map[string]any, key string) (bson.M, error) {
 	// pack named columns
 	columns := []any{}
 	for _, c := range b.columns {
@@ -32,7 +35,7 @@ func (b *BSONTable) packData(entry map[string]any, key string) (bson.D, error) {
 			other[k] = v
 		}
 	}
-	return bson.D{{Key: "columns", Value: columns}, {Key: "data", Value: other}, {Key: "key", Value: key}}, nil
+	return bson.M{"R": bson.A{columns, other, key}}, nil
 }
 
 func (b *BSONTable) addTableDeleteEntryInfo(tx *pebblebulk.PebbleBulk, rowId []byte, label string) {
@@ -53,7 +56,66 @@ func (b *BSONTable) addTableEntryInfo(tx *pebblebulk.PebbleBulk, rowId []byte, o
 	}
 }
 
-// Check to make sure defined type is the actual type of the data. Throw error on mismatch
+func convertBSONTypes(value any) any {
+	switch v := value.(type) {
+	case primitive.ObjectID:
+		// Convert ObjectID to its hexadecimal string
+		return v.Hex()
+	case primitive.DateTime:
+		// Convert milliseconds since epoch to time.Time
+		return time.Unix(int64(v)/1000, (int64(v)%1000)*1000000)
+	case primitive.Binary:
+		// Extract binary data as []byte
+		return v.Data
+	case bson.M:
+		// Recursively convert nested maps
+		result := make(map[string]any)
+		for k, val := range v {
+			result[k] = convertBSONTypes(val)
+		}
+		return result
+	case primitive.A:
+		// Recursively convert nested arrays
+		result := make([]any, len(v))
+		for i, val := range v {
+			result[i] = convertBSONTypes(val)
+		}
+		return result
+	default:
+		// Return value as-is for standard types (string, int, float64, bool, nil, etc.)
+		return value
+	}
+}
+
+func (b *BSONTable) unpackData(doc bson.M) (map[string]any, error) {
+	row, ok := doc["R"].(primitive.A)
+	if !ok || len(row) != 3 {
+		return nil, errors.New("invalid row format: must be an array of 3 elements")
+	}
+
+	columnsArray, ok := row[0].(primitive.A)
+	if !ok || len(columnsArray) != len(b.columns) {
+		return nil, errors.New("invalid columns array: must match number of defined columns")
+	}
+
+	otherMap, ok := row[1].(bson.M)
+	if !ok {
+		return nil, errors.New("invalid other map: must be a map")
+	}
+
+	result := make(map[string]any)
+	for i, col := range b.columns {
+		result[col.Key] = columnsArray[i]
+	}
+
+	for k, v := range otherMap {
+		convertedValue := convertBSONTypes(v)
+		result[k] = convertedValue
+	}
+
+	return result, nil
+}
+
 func (b *BSONTable) colUnpack(v bson.RawElement, colType benchtop.FieldType) (any, error) {
 	switch colType {
 	case benchtop.String:
@@ -61,24 +123,28 @@ func (b *BSONTable) colUnpack(v bson.RawElement, colType benchtop.FieldType) (an
 			return nil, fmt.Errorf("expected String but got %s", v.Value().Type)
 		}
 		return v.Value().StringValue(), nil
+
 	case benchtop.Double:
 		if v.Value().Type != bson.TypeDouble {
 			return nil, fmt.Errorf("expected Double but got %s", v.Value().Type)
 		}
 		return v.Value().Double(), nil
+
 	case benchtop.Int64:
 		if v.Value().Type != bson.TypeInt64 {
 			return nil, fmt.Errorf("expected Int64 but got %s", v.Value().Type)
 		}
 		return v.Value().Int64(), nil
+
 	case benchtop.Bytes:
 		if v.Value().Type != bson.TypeBinary {
 			return nil, fmt.Errorf("expected Binary but got %s", v.Value().Type)
 		}
-		_, data := v.Value().Binary()
-		return data, nil
+		binData, _ := v.Value().Binary()
+		return binData, nil
+
 	default:
-		return nil, fmt.Errorf("unknown column type: %b", colType)
+		return nil, fmt.Errorf("unknown column type: %d", colType)
 	}
 }
 
@@ -148,23 +214,12 @@ func (b *BSONTable) readFromFile(offset uint64) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-
-	bd := bson.Raw(rowData)
-	columns := bd.Index(0).Value().Array()
-	out := map[string]any{}
-
-	if err := bd.Index(1).Value().Unmarshal(&out); err != nil {
-		return nil, err
-	}
-
-	elem, err := columns.Elements()
+	var m bson.M
+	bson.Unmarshal(rowData, &m)
+	out, err := b.unpackData(m)
 	if err != nil {
 		return nil, err
 	}
-	for i, n := range b.columns {
-		out[n.Key], _ = b.colUnpack(elem[i], n.Type)
-	}
-
 	return out, nil
 }
 
@@ -172,6 +227,13 @@ func (b *BSONTable) writeBsonEntry(offset int64, bData []byte) (int, error) {
 	// make next offset equal to existing offset + length of data
 	buffer := make([]byte, 8)
 	binary.LittleEndian.PutUint64(buffer, uint64(offset)+uint64(len(bData))+8)
-	b.handle.Write(buffer)
-	return b.handle.Write(bData)
+	_, err := b.handle.Write(buffer)
+	if err != nil {
+		return 0, fmt.Errorf("write offset error: %v", err)
+	}
+	n, err := b.handle.Write(bData)
+	if err != nil {
+		return 0, fmt.Errorf("write BSON error: %v", err)
+	}
+	return n, nil
 }
