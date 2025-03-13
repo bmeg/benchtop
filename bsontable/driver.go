@@ -167,6 +167,10 @@ func (dr *BSONDriver) New(name string, columns []benchtop.ColumnDef) (benchtop.T
 	}
 	out.tableId = newId
 	dr.Tables[name] = out
+	if err := out.Init(10); err != nil { // Pool size 10 as example
+		log.Errorln("TABLE POOL ERR: ", err)
+	}
+
 	return out, nil
 }
 
@@ -349,7 +353,7 @@ func (dr *BSONDriver) BulkLoad(inputs chan *benchtop.Row) error {
 			}
 			for {
 				batch := make([]*benchtop.Row, 0, batchSize)
-				for i := 0; i < batchSize; i++ {
+				for range batchSize {
 					row, ok := <-ch
 					if !ok {
 						break

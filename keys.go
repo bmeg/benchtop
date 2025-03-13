@@ -49,16 +49,6 @@ func ParseTableAsocKey(key []byte) []byte {
 	return out
 }
 
-/*func PutRowTableAsocValue(table uint32) []byte {
-	out := make([]byte, 4)
-	binary.LittleEndian.PutUint32(out, table)
-	return out
-}
-
-func GetRowTableAsocValue(id []byte) uint32 {
-	return binary.LittleEndian.Uint32(id)
-}*/
-
 func NewTableKey(id []byte) []byte {
 	out := make([]byte, len(id)+1)
 	out[0] = TablePrefix

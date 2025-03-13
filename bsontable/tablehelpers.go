@@ -103,7 +103,7 @@ func (b *BSONTable) unpackData(doc bson.M) (map[string]any, error) {
 		return nil, errors.New("invalid other map: must be a map")
 	}
 
-	result := make(map[string]any)
+	result := make(map[string]any, len(b.columns)+len(otherMap))
 	for i, col := range b.columns {
 		result[col.Key] = columnsArray[i]
 	}
@@ -161,7 +161,7 @@ func (b *BSONTable) getBlockPos(id []byte) (uint64, uint64, error) {
 
 func (b *BSONTable) setIndices(inputs chan benchtop.Index) {
 	for index := range inputs {
-		b.addTableEntryInfo(nil, index.Key, index.Position, 0)
+		b.addTableEntryInfo(nil, index.Key, index.Position, index.Size)
 	}
 }
 

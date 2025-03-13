@@ -40,6 +40,7 @@ type Row struct {
 type Index struct {
 	Key      []byte
 	Position uint64
+	Size     uint64
 }
 
 type BulkResponse struct {
