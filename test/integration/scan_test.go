@@ -4,7 +4,6 @@ import (
 	"os"
 	"testing"
 
-	"github.com/akrylysov/pogreb"
 	"github.com/bmeg/benchtop"
 	"github.com/bmeg/benchtop/bsontable"
 	"github.com/bmeg/benchtop/test/fixtures"
@@ -14,16 +13,9 @@ import (
 
 func TestScan(t *testing.T) {
 	dbname := "test.data" + util.RandomString(5)
-	pogrebName := dbname + "pogreb"
 	defer os.RemoveAll(dbname)
-	defer os.RemoveAll(pogrebName)
 
-	pg, err := pogreb.Open(pogrebName, nil)
-	if err != nil {
-		t.Error(err)
-	}
-
-	dr, err := bsontable.NewBSONDriver(dbname, pg)
+	dr, err := bsontable.NewBSONDriver(dbname)
 	if err != nil {
 		t.Error(err)
 	}

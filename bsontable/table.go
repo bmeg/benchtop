@@ -34,6 +34,7 @@ type BSONTable struct {
 	Name       string
 	tType      byte
 	filePool   chan *os.File
+	fileName   string
 }
 
 func (b *BSONTable) Init(poolSize int) error {

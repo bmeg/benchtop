@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"log"
 
-	"github.com/akrylysov/pogreb"
 	"github.com/bmeg/benchtop"
 	"github.com/bmeg/benchtop/bsontable"
 	"github.com/bmeg/benchtop/util"
@@ -24,14 +23,8 @@ var Cmd = &cobra.Command{
 		dbPath := args[0]
 		tableName := args[1]
 		filePath := args[2]
-		pogrebPath := args[3]
-		pg, err := pogreb.Open(pogrebPath, nil)
-		if err != nil {
-			return err
-		}
 
-
-		driver, err := bsontable.NewBSONDriver(dbPath, pg)
+		driver, err := bsontable.NewBSONDriver(dbPath)
 		if err != nil {
 			return err
 		}

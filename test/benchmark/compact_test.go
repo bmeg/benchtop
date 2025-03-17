@@ -5,7 +5,6 @@ import (
 	"os"
 	"testing"
 
-	"github.com/akrylysov/pogreb"
 	"github.com/bmeg/benchtop"
 	"github.com/bmeg/benchtop/bsontable"
 	"github.com/bmeg/benchtop/test/fixtures"
@@ -21,17 +20,10 @@ const (
 func BenchmarkCompactBson(b *testing.B) {
 	var compactbsoname = "test.bson" + util.RandomString(5)
 	defer os.RemoveAll(compactbsoname)
-	pogrebName := compactbsoname + "pogreb"
-	defer os.RemoveAll(pogrebName)
-
-	pg, err := pogreb.Open(pogrebName, nil)
-	if err != nil {
-		b.Error(err)
-	}
 
 	b.Log("BenchmarkScaleWriteBson start")
 
-	compactbsonDriver, err := bsontable.NewBSONDriver(compactbsoname, pg)
+	compactbsonDriver, err := bsontable.NewBSONDriver(compactbsoname)
 	if err != nil {
 		b.Fatal(err)
 	}

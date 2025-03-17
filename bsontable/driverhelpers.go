@@ -21,8 +21,8 @@ func (dr *BSONDriver) getMaxTablePrefix() uint32 {
 	return maxID
 }
 
-func (dr *BSONDriver) addTable(id uint32, name string, columns []benchtop.ColumnDef) error {
-	tdata, _ := bson.Marshal(benchtop.TableInfo{Columns: columns, Id: id})
+func (dr *BSONDriver) addTable(id uint32, name string, columns []benchtop.ColumnDef, fileName string) error {
+	tdata, _ := bson.Marshal(benchtop.TableInfo{Columns: columns, Id: id, FileName: fileName})
 	nkey := benchtop.NewTableKey([]byte(name))
 	return dr.db.Set(nkey, tdata, nil)
 }

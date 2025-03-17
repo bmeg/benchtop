@@ -13,6 +13,7 @@ import (
 	"unsafe"
 
 	"github.com/bmeg/benchtop"
+	"github.com/bmeg/benchtop/bsontable"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
@@ -20,7 +21,7 @@ import (
 func NewDriver(base *C.char) uintptr {
 	fmt.Printf("Creating a driver\n")
 	s := C.GoString(base)
-	o, err := benchtop.NewBSONDriver(s)
+	o, err := bsontable.NewBSONDriver(s)
 	if err != nil {
 		//TODO: clean this up
 		fmt.Printf("Error!!!: %s\n", err)
@@ -65,7 +66,7 @@ func NewTable(d uintptr, name *C.char, def *C.PyObject) uintptr {
 				valueNameStr := C.GoString(valueNameCStr)
 				if valueNameStr == "float" {
 					fmt.Printf("Type float\n")
-					cdef = append(cdef, benchtop.ColumnDef{Path: keyStr, Type: benchtop.Double})
+					cdef = append(cdef, benchtop.ColumnDef{Key: keyStr, Type: benchtop.Double})
 				} else {
 					fmt.Printf("Type Value: %s\n", valueNameStr)
 				}
@@ -103,13 +104,13 @@ func CloseTable(tb uintptr) {
 func AddDataTable(tb uintptr, name *C.char, obj *C.PyObject) {
 	data := PyDict2Go(obj)
 	table := cgo.Handle(tb).Value().(benchtop.TableStore)
-	table.Add([]byte(C.GoString(name)), data)
+	table.AddRow(benchtop.Row{Id: []byte(C.GoString(name)), Data: data})
 }
 
 //export GetDataTable
 func GetDataTable(tb uintptr, name *C.char) *C.PyObject {
 	table := cgo.Handle(tb).Value().(benchtop.TableStore)
-	data, err := table.Get([]byte(C.GoString(name)))
+	data, err := table.GetRow([]byte(C.GoString(name)))
 	if err != nil {
 		return nil
 	}
