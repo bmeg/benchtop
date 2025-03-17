@@ -27,6 +27,12 @@ func (dr *BSONDriver) addTable(id uint32, name string, columns []benchtop.Column
 	return dr.db.Set(nkey, tdata, nil)
 }
 
+func (dr *BSONDriver) dropTable(name string) error {
+	nkey := benchtop.NewTableKey([]byte(name))
+	return dr.db.Delete(nkey, nil)
+
+}
+
 func (dr *BSONDriver) getTableInfo(name string) (benchtop.TableInfo, error) {
 	value, closer, err := dr.db.Get([]byte(name))
 	if err != nil {

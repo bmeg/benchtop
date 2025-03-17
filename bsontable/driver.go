@@ -129,6 +129,7 @@ func (dr *BSONDriver) New(name string, columns []benchtop.ColumnDef) (benchtop.T
 		columnMap:  map[string]int{},
 		Path:       tPath,
 		Name:       name,
+		fileName:   formattedName,
 	}
 	f, err := os.Create(tPath)
 	if err != nil {
@@ -228,7 +229,7 @@ func (dr *BSONDriver) Get(name string) (benchtop.TableStore, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to open table %s: %v", tPath, err)
 	}
-
+	log.Infof("Opening %s", tinfo.FileName)
 	out := &BSONTable{
 		columns:  tinfo.Columns,
 		db:       dr.db,
@@ -258,6 +259,7 @@ func (dr *BSONDriver) Delete(name string) error {
 		if err := table.handle.Close(); err != nil {
 			log.Errorf("Error closing table %s handle: %v", name, err)
 		}
+		table.handle = nil
 	}
 
 	tPath := filepath.Join(dr.base, "TABLES", string(table.fileName))
@@ -265,6 +267,7 @@ func (dr *BSONDriver) Delete(name string) error {
 		return fmt.Errorf("failed to delete table file %s: %v", tPath, err)
 	}
 	delete(dr.Tables, name)
+	dr.dropTable(name)
 
 	return nil
 }
