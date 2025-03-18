@@ -94,7 +94,12 @@ func LoadBSONDriver(path string) (benchtop.TableDriver, error) {
 			CompactLimit: uint32(1000),
 		}
 
+		if err := bsonTable.Init(10); err != nil { // Pool size 10 as example
+			log.Errorln("bsonTable pool Init err: ", err)
+			return nil, fmt.Errorf("bsonTable pool Init err: '%s'", err)
+		}
 		driver.Tables[tableName] = bsonTable
+
 	}
 
 	return driver, nil
