@@ -7,8 +7,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strconv"
-	"strings"
 	"sync"
 
 	"github.com/bmeg/benchtop"
@@ -102,15 +100,6 @@ func LoadBSONDriver(path string) (benchtop.TableDriver, error) {
 	return driver, nil
 }
 
-func padToSixDigits(number int) string {
-	numStr := strconv.Itoa(number)
-	numZeros := 6 - len(numStr)
-	if numZeros < 0 {
-		return numStr
-	}
-	return strings.Repeat("0", numZeros) + numStr
-}
-
 func (dr *BSONDriver) New(name string, columns []benchtop.ColumnDef) (benchtop.TableStore, error) {
 	p, _ := dr.Get(name)
 	if p != nil {
@@ -120,7 +109,7 @@ func (dr *BSONDriver) New(name string, columns []benchtop.ColumnDef) (benchtop.T
 	dr.Lock.Lock()
 	defer dr.Lock.Unlock()
 
-	formattedName := padToSixDigits(len(dr.Tables))
+	formattedName := util.PadToSixDigits(len(dr.Tables))
 
 	tPath := filepath.Join(dr.base, "TABLES", formattedName)
 	out := &BSONTable{
@@ -129,7 +118,7 @@ func (dr *BSONDriver) New(name string, columns []benchtop.ColumnDef) (benchtop.T
 		columnMap:  map[string]int{},
 		Path:       tPath,
 		Name:       name,
-		fileName:   formattedName,
+		FileName:   formattedName,
 	}
 	f, err := os.Create(tPath)
 	if err != nil {
@@ -236,7 +225,7 @@ func (dr *BSONDriver) Get(name string) (benchtop.TableStore, error) {
 		tableId:  tinfo.Id,
 		handle:   f,
 		Path:     tPath,
-		fileName: tinfo.FileName,
+		FileName: tinfo.FileName,
 	}
 
 	dr.Tables[name] = out
@@ -262,7 +251,7 @@ func (dr *BSONDriver) Delete(name string) error {
 		table.handle = nil
 	}
 
-	tPath := filepath.Join(dr.base, "TABLES", string(table.fileName))
+	tPath := filepath.Join(dr.base, "TABLES", string(table.FileName))
 	if err := os.Remove(tPath); err != nil {
 		return fmt.Errorf("failed to delete table file %s: %v", tPath, err)
 	}
