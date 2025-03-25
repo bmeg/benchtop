@@ -3,6 +3,7 @@ package bsontable
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -15,6 +16,13 @@ import (
 	"github.com/bmeg/benchtop/pebblebulk"
 	"github.com/bmeg/grip/log"
 	multierror "github.com/hashicorp/go-multierror"
+	"github.com/sirupsen/logrus"
+	"github.com/weaviate/weaviate/adapters/repos/db"
+	"github.com/weaviate/weaviate/adapters/repos/db/lsmkv"
+	"github.com/weaviate/weaviate/adapters/repos/db/vector/hnsw"
+	"github.com/weaviate/weaviate/adapters/repos/db/vector/hnsw/distancer"
+	"github.com/weaviate/weaviate/entities/cyclemanager"
+	ent "github.com/weaviate/weaviate/entities/vectorindex/hnsw"
 
 	"github.com/cockroachdb/pebble"
 
@@ -35,17 +43,116 @@ type BSONTable struct {
 	tType      byte
 	filePool   chan *os.File
 	FileName   string
+
+	// hnsw vars
+	logger           *logrus.Logger
+	Store            *lsmkv.Store
+	HnswIndex        db.VectorIndex
+	hnswPath         string // New field for HNSW-specific path
+	VectorField      string // Name of the vector field (if any)
+	vectorFieldIndex int
 }
 
 func (b *BSONTable) Init(poolSize int) error {
 	b.filePool = make(chan *os.File, poolSize)
-	for range 10 {
+	for range poolSize {
 		file, err := os.Open(b.Path)
 		if err != nil {
 			return fmt.Errorf("failed to init file pool for %s: %v", b.Path, err)
 		}
 		b.filePool <- file
 	}
+
+	b.logger = logrus.New()
+	b.logger.SetLevel(logrus.InfoLevel)
+
+	b.hnswPath = b.Path + "_hnsw"
+	if err := os.MkdirAll(b.hnswPath, 0755); err != nil {
+		return fmt.Errorf("failed to create HNSW directory %s: %v", b.hnswPath, err)
+	}
+
+	fmt.Println("PATH: ", b.hnswPath)
+	store, err := newStore(b.hnswPath, b.logger)
+	if err != nil {
+		return fmt.Errorf("failed to create LSMKV store: %v", err)
+	}
+	b.Store = store
+
+	// Identify vector field
+	for i, col := range b.columns {
+		if col.Type == benchtop.VectorArray {
+			b.VectorField = col.Key
+			b.vectorFieldIndex = i
+			break
+		}
+	}
+
+	// Initialize HNSW if there's a vector field
+	if b.VectorField != "" {
+		log.Infof("Init hnsw")
+		err = b.initHNSW()
+		if err != nil {
+			return fmt.Errorf("failed to initialize HNSW index: %v", err)
+		}
+	}
+
+	return nil
+}
+
+func newStore(rootDir string, logger logrus.FieldLogger) (*lsmkv.Store, error) {
+	if err := os.MkdirAll(rootDir, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create directory %s: %v", rootDir, err)
+	}
+
+	compactCallbacks := cyclemanager.NewCallbackGroup("compact", logger, 1)
+	flushCallbacks := cyclemanager.NewCallbackGroup("flush", logger, 1)
+	tombstoneCallbacks := cyclemanager.NewCallbackGroup("tombstone", logger, 1)
+
+	store, err := lsmkv.New(
+		rootDir, rootDir, logger, nil,
+		compactCallbacks, flushCallbacks, tombstoneCallbacks,
+	)
+	return store, err
+}
+
+func (b *BSONTable) initHNSW() error {
+	makeCL := func() (hnsw.CommitLogger, error) {
+		return hnsw.NewCommitLogger(b.hnswPath, b.Name, b.logger, cyclemanager.NewCallbackGroup("commitLoggerThunk", b.logger, 1))
+	}
+	index, err := hnsw.New(hnsw.Config{
+		RootPath:              b.hnswPath,
+		ID:                    fmt.Sprintf("%s_%s", b.Name, b.VectorField),
+		MakeCommitLoggerThunk: makeCL,
+		DistanceProvider:      distancer.NewL2SquaredProvider(),
+		VectorForIDThunk: func(ctx context.Context, id uint64) ([]float32, error) {
+			key := make([]byte, 8)
+			binary.LittleEndian.PutUint64(key, id)
+			data, err := b.GetRow(key)
+			if err != nil {
+				return nil, err
+			}
+			if vec, ok := data[b.VectorField].([]float32); ok {
+				return vec, nil
+			}
+			return nil, fmt.Errorf("vector for ID %d not found", id)
+		},
+	}, ent.UserConfig{
+		CleanupIntervalSeconds: 10,
+		VectorCacheMaxObjects:  1000000,
+		Distance:               "l2-squared",
+		DynamicEFMin:           20,
+		DynamicEFMax:           100,
+		DynamicEFFactor:        8,
+		EFConstruction:         200,
+		MaxConnections:         10,
+	}, cyclemanager.NewCallbackGroup("tombstone", b.logger, 1), b.Store)
+
+	if err != nil {
+		return err
+	}
+	b.HnswIndex = index
+
+	index.PostStartup()
 	return nil
 }
 
@@ -54,7 +161,24 @@ func (b *BSONTable) GetColumnDefs() []benchtop.ColumnDef {
 }
 
 func (b *BSONTable) Close() {
-	//because the table could be opened by other threads, don't actually close
+	b.Store.WriteWALs()
+	err := b.Store.FlushMemtables(context.Background())
+	if err != nil {
+		log.Errorf("Failed to flush mem tables: %v", err)
+	}
+	b.Store.Shutdown(context.Background())
+	if err != nil {
+		log.Errorf("Failed to shutdown store: %v", err)
+	}
+	if b.HnswIndex != nil {
+		if err := b.HnswIndex.Flush(); err != nil {
+			log.Errorf("Failed to flush HNSW index: %v", err)
+		}
+		if err := b.HnswIndex.Shutdown(context.Background()); err != nil {
+			log.Errorf("Failed to shutdown HNSW index for table %s: %v", b.Name, err)
+		}
+		b.HnswIndex = nil
+	}
 }
 
 /*
@@ -70,7 +194,6 @@ func (b *BSONTable) AddRow(elem benchtop.Row) error {
 	if err != nil {
 		return err
 	}
-	//append to end of block file
 	b.handleLock.Lock()
 	defer b.handleLock.Unlock()
 	offset, err := b.handle.Seek(0, io.SeekEnd)
@@ -80,13 +203,23 @@ func (b *BSONTable) AddRow(elem benchtop.Row) error {
 
 	writesize, err := b.writeBsonEntry(offset, bData)
 	if err != nil {
-		log.Errorf("write handler err in Load: bulkSet: %s", err)
+		log.Errorf("write handler err in AddRow: %s", err)
+		return err
 	}
 
 	b.addTableDeleteEntryInfo(nil, elem.Id, elem.TableName)
 	b.addTableEntryInfo(nil, elem.Id, uint64(offset), uint64(writesize))
-	return nil
 
+	// Add to HNSW if vector field exists
+	if b.VectorField != "" {
+		if vec, ok := elem.Data[b.VectorField].([]float32); ok {
+			id := binary.LittleEndian.Uint64(elem.Id)
+			if err := b.HnswIndex.Add(context.Background(), id, vec); err != nil {
+				log.Errorf("failed to add vector to HNSW: %v", err)
+			}
+		}
+	}
+	return nil
 }
 
 func (b *BSONTable) GetRow(id []byte, fields ...string) (map[string]any, error) {
@@ -136,6 +269,21 @@ func (b *BSONTable) DeleteRow(name []byte) error {
 
 	posKey := benchtop.NewPosKey(b.tableId, name)
 	b.db.Delete(posKey, nil)
+
+	if b.VectorField != "" && b.HnswIndex != nil {
+		// The 'name' parameter is the row ID, which we use as the HNSW ID
+		id := binary.LittleEndian.Uint64(name)
+		if err := b.HnswIndex.Delete(id); err != nil {
+			log.Errorf("failed to delete vector from HNSW index for ID %d: %v", id, err)
+		}
+
+		// verify that vector has been deleted
+		if b.HnswIndex.ContainsDoc(id) {
+			return fmt.Errorf("vector for ID %d still exists in HNSW index after deletion", id)
+		}
+		log.Infof("Verified deletion of vector for ID %d from HNSW index", id)
+
+	}
 
 	return nil
 }
@@ -457,32 +605,83 @@ func (b *BSONTable) Load(inputs chan benchtop.Row) error {
 			mData, err := b.packData(entry.Data, string(entry.Id))
 			if err != nil {
 				errs = multierror.Append(errs, err)
-				log.Errorf("pack data err in Load: bulkSet: %s", err)
+				continue
 			}
 			bData, err := bson.Marshal(mData)
 			if err != nil {
 				errs = multierror.Append(errs, err)
-				log.Errorf("bson Marshall err in Load: bulkSet: %s", err)
+				continue
 			}
-
-			// make Next offset equal to existing offset + length of data
-			writeSize, err := b.writeBsonEntry(offset, bData)
+			writesize, err := b.writeBsonEntry(offset, bData)
 			if err != nil {
 				errs = multierror.Append(errs, err)
-				log.Errorf("write handler err in Load: bulkSet: %s", err)
+				continue
 			}
 			b.addTableDeleteEntryInfo(tx, entry.Id, entry.TableName)
-			b.addTableEntryInfo(tx, entry.Id, uint64(offset), uint64(writeSize))
-			offset += int64(writeSize) + 8
+			b.addTableEntryInfo(tx, entry.Id, uint64(offset), uint64(writesize))
+			offset += int64(writesize) + 8
+
+			// Add to HNSW
+			if b.VectorField != "" {
+				if vec, ok := entry.Data[b.VectorField].([]float32); ok {
+					id := binary.LittleEndian.Uint64(entry.Id)
+					if err := b.HnswIndex.Add(context.Background(), id, vec); err != nil {
+						errs = multierror.Append(errs, fmt.Errorf("failed to add vector to HNSW: %v", err))
+					}
+				}
+			}
 		}
 		return nil
 	})
 	if err != nil {
-		log.Errorf("Err: %s", err)
 		errs = multierror.Append(errs, err)
 	}
 	return errs.ErrorOrNil()
+}
 
+func (b *BSONTable) VectorSearch(field string, queryVector []float32, k int) ([]benchtop.VectorSearchResult, error) {
+	if field != b.VectorField {
+		return nil, fmt.Errorf("field %s is not a vector field or does not match configured vector field %s", field, b.VectorField)
+	}
+	if b.HnswIndex == nil {
+		return nil, fmt.Errorf("no HNSW index initialized for vector search")
+	}
+
+	ctx := context.Background()
+	ids, distances, err := b.HnswIndex.SearchByVector(ctx, queryVector, k, nil)
+	if err != nil {
+		log.Errorf("HNSW search failed: %v", err)
+		return nil, err
+	}
+
+	results := make([]benchtop.VectorSearchResult, 0, len(ids))
+	for i, id := range ids {
+		key := make([]byte, 8)
+		binary.LittleEndian.PutUint64(key, id)
+		data, err := b.GetRow(key)
+		if err != nil {
+			log.Infof("GetRow failed for ID %d: %v", id, err)
+			continue
+		}
+		vec, ok := data[b.VectorField].(bson.A)
+		if !ok {
+			log.Infof("Vector field %s not bson.A for ID %d", b.VectorField, id)
+			continue
+		}
+
+		returnVec := make([]float32, len(vec), len(vec))
+		for i, val := range vec {
+			returnVec[i] = float32(val.(float64))
+		}
+
+		results = append(results, benchtop.VectorSearchResult{
+			Key:      key,
+			Distance: distances[i],
+			Vector:   returnVec,
+			Data:     data,
+		})
+	}
+	return results, nil
 }
 
 func (b *BSONTable) Remove(inputs chan benchtop.Index, workers int) <-chan benchtop.BulkResponse {
