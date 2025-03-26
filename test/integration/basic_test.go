@@ -2,38 +2,41 @@ package test
 
 import (
 	"fmt"
+	"os"
 	"testing"
 
 	"github.com/bmeg/benchtop"
+	"github.com/bmeg/benchtop/bsontable"
 	"github.com/bmeg/benchtop/util"
 )
 
 var data = map[string]map[string]any{
 	"key1": {
 		"field1": 0.1,
-		"name":   "alice",
 		"other":  "other data",
 	},
 	"key2": {
 		"field1": 0.2,
-		"name":   "bob",
+		"other":  "other data",
 	},
 	"key3": {
 		"field1": 0.3,
-		"name":   "chelsie",
+		"other":  "other data",
 	},
 }
 
 func TestOpenClose(t *testing.T) {
 	name := "test.data" + util.RandomString(5)
-	dr, err := benchtop.NewBSONDriver(name)
+	defer os.RemoveAll(name)
+
+	dr, err := bsontable.NewBSONDriver(name)
 	if err != nil {
 		t.Error(err)
 	}
 
 	_, err = dr.New("table_1", []benchtop.ColumnDef{
-		{Path: "field1", Type: benchtop.Double},
-		{Path: "name", Type: benchtop.String},
+		{Key: "field1", Type: benchtop.Double},
+		{Key: "other", Type: benchtop.String},
 	})
 
 	if err != nil {
@@ -41,7 +44,7 @@ func TestOpenClose(t *testing.T) {
 	}
 	dr.Close()
 
-	or, err := benchtop.NewBSONDriver(name)
+	or, err := bsontable.NewBSONDriver(name)
 	if err != nil {
 		t.Error(err)
 	}
@@ -50,23 +53,24 @@ func TestOpenClose(t *testing.T) {
 		t.Error(err)
 	}
 
-	if len(ot.GetColumns()) != 2 {
+	if len(ot.GetColumnDefs()) != 2 {
 		t.Errorf("Incorrect re-open")
 	}
-	or.Close()
+	defer or.Close()
 }
 
 func TestInsert(t *testing.T) {
 	dbname := "test.data" + util.RandomString(5)
+	defer os.RemoveAll(dbname)
 
-	dr, err := benchtop.NewBSONDriver(dbname)
+	dr, err := bsontable.NewBSONDriver(dbname)
 	if err != nil {
 		t.Error(err)
 	}
 
 	ts, err := dr.New("table_1", []benchtop.ColumnDef{
-		{Path: "field1", Type: benchtop.Double},
-		{Path: "name", Type: benchtop.String},
+		{Key: "field1", Type: benchtop.Double},
+		{Key: "other", Type: benchtop.String},
 	})
 
 	if err != nil {
@@ -74,14 +78,14 @@ func TestInsert(t *testing.T) {
 	}
 
 	for k, r := range data {
-		err := ts.Add([]byte(k), r)
+		err := ts.AddRow(benchtop.Row{Id: []byte(k), Data: r})
 		if err != nil {
 			t.Error(err)
 		}
 	}
 
 	for k := range data {
-		post, err := ts.Get([]byte(k))
+		post, err := ts.GetRow([]byte(k))
 		fmt.Printf("%#v\n", post)
 		if err != nil {
 			t.Error(err)
@@ -102,15 +106,52 @@ func TestInsert(t *testing.T) {
 	oCount := 0
 	for i := range keyList {
 		oCount++
-		if _, ok := data[string(i)]; !ok {
-			t.Errorf("Unknown key returned: %s", i)
+		if _, ok := data[string(i.Key)]; !ok {
+			t.Errorf("Unknown key returned: %s", string(i.Key))
 		}
-		fmt.Printf("%s\n", i)
+		fmt.Printf("%s\n", string(i.Key))
 	}
 	if oCount != len(data) {
 		t.Errorf("Incorrect key count %d != %d", oCount, len(data))
 	}
 
 	ts.Compact()
+	defer dr.Close()
+}
+
+func TestDeleteTable(t *testing.T) {
+	name := "test.data" + util.RandomString(5)
+	defer os.RemoveAll(name)
+
+	dr, err := bsontable.NewBSONDriver(name)
+	if err != nil {
+		t.Error(err)
+	}
+
+	_, err = dr.New("table_1", []benchtop.ColumnDef{
+		{Key: "field1", Type: benchtop.Double},
+		{Key: "other", Type: benchtop.String},
+	})
+	if err != nil {
+		t.Error(err)
+	}
+
+	err = dr.Delete("table_1")
+	if err != nil {
+		t.Error(err)
+	}
+
 	dr.Close()
+
+	or, err := bsontable.NewBSONDriver(name)
+	if err != nil {
+		t.Error(err)
+	}
+
+	_, err = or.Get("table_1")
+	if err == nil {
+		t.Errorf("expected table to be gone. table still exists")
+	}
+
+	defer or.Close()
 }

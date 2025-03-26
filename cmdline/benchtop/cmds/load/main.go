@@ -5,6 +5,7 @@ import (
 	"log"
 
 	"github.com/bmeg/benchtop"
+	"github.com/bmeg/benchtop/bsontable"
 	"github.com/bmeg/benchtop/util"
 	"github.com/schollz/progressbar/v3"
 	"github.com/spf13/cobra"
@@ -23,7 +24,7 @@ var Cmd = &cobra.Command{
 		tableName := args[1]
 		filePath := args[2]
 
-		driver, err := benchtop.NewBSONDriver(dbPath)
+		driver, err := bsontable.NewBSONDriver(dbPath)
 		if err != nil {
 			return err
 		}
@@ -40,7 +41,7 @@ var Cmd = &cobra.Command{
 			return err
 		}
 
-		records := make(chan benchtop.Entry, 10)
+		records := make(chan benchtop.Row, 10)
 		go func() {
 			defer close(records)
 			bar := progressbar.Default(int64(lineCount))
@@ -51,7 +52,7 @@ var Cmd = &cobra.Command{
 
 				if key, ok := data[keyField]; ok {
 					keyStr := key.(string)
-					records <- benchtop.Entry{Key: []byte(keyStr), Value: data}
+					records <- benchtop.Row{Id: []byte(keyStr), Data: data}
 				} else {
 					log.Printf("Key %s not found", keyField)
 				}

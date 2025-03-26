@@ -1,64 +1,87 @@
 package benchtop
 
 import (
+	"bytes"
 	"encoding/binary"
 )
 
-var idPrefix = byte('T')
-var namePrefix = byte('t')
-var posPrefix = byte('p')
+// Vertex TableId
+// key: T | TableId | VtablePrefix'
+// The starting point for vertex table ids in th pebble index
+var TablePrefix = byte('T')
 
-func NewNameKey(id []byte) []byte {
+// RowTableAsociation Reverse index
+// Key: R
+// given an ID return the table uint32 associated with it
+var RowTableAsocPrefix = byte('R')
+
+// Position
+// key: P | TableId | Position
+// The position and offset of the document.
+var PosPrefix = byte('P')
+
+// Field
+// key: F
+// used for indexing specific field values in kvgraph
+var FieldPrefix = []byte("F")
+
+func FieldKey(field string) []byte {
+	return bytes.Join([][]byte{FieldPrefix, []byte(field)}, []byte{0})
+}
+
+func FieldKeyParse(key []byte) string {
+	tmp := bytes.Split(key, []byte{0})
+	field := string(tmp[1])
+	return field
+}
+
+func NewRowTableAsocKey(id []byte) []byte {
 	out := make([]byte, len(id)+1)
-	out[0] = namePrefix
-	for i := 0; i < len(id); i++ {
-		out[i+1] = id[i]
-	}
+	out[0] = RowTableAsocPrefix
+	copy(out[1:], id)
 	return out
 }
 
-func ParseNameKey(key []byte) []byte {
+func ParseTableAsocKey(key []byte) []byte {
 	//duplicate the key, because pebble reuses memory
 	out := make([]byte, len(key)-1)
-	for i := 0; i < len(key)-1; i++ {
-		out[i] = key[i+1]
-	}
+	copy(out, key[1:])
 	return out
 }
 
-func NewIDKey(id uint32) []byte {
-	out := make([]byte, 5)
-	out[0] = idPrefix
-	binary.LittleEndian.PutUint32(out[1:], id)
+func NewTableKey(id []byte) []byte {
+	out := make([]byte, len(id)+1)
+	out[0] = TablePrefix
+	copy(out[1:], id)
 	return out
 }
 
-func ParseIDKey(key []byte) uint32 {
-	return binary.LittleEndian.Uint32(key[1:])
+func ParseTableKey(key []byte) []byte {
+	//duplicate the key, because pebble reuses memory
+	out := make([]byte, len(key)-1)
+	copy(out, key[1:])
+	return out
 }
 
+/* New pos key used for creating a pos key from a table entry*/
 func NewPosKey(table uint32, name []byte) []byte {
 	out := make([]byte, 5+len(name))
-	out[0] = posPrefix
+	out[0] = PosPrefix
 	binary.LittleEndian.PutUint32(out[1:], table)
-	for i := 0; i < len(name); i++ {
-		out[i+5] = name[i]
-	}
+	copy(out[5:], name)
 	return out
 }
 
 func ParsePosKey(key []byte) (uint32, []byte) {
 	//duplicate the key, because pebble reuses memory
 	out := make([]byte, len(key)-5)
-	for i := 0; i < len(key)-5; i++ {
-		out[i] = key[i+5]
-	}
-	return binary.LittleEndian.Uint32(key[1:]), out
+	copy(out, key[5:])
+	return binary.LittleEndian.Uint32(key[1:5]), out
 }
 
 func NewPosKeyPrefix(table uint32) []byte {
 	out := make([]byte, 5)
-	out[0] = posPrefix
+	out[0] = PosPrefix
 	binary.LittleEndian.PutUint32(out[1:], table)
 	return out
 }

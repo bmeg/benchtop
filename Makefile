@@ -4,3 +4,4 @@ benchtop: *.go cmdline/benchtop
 
 clean:
 	rm benchtop
+
