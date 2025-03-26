@@ -2,6 +2,8 @@ package util
 
 import (
 	"os"
+	"strconv"
+	"strings"
 	"time"
 
 	"golang.org/x/exp/rand"
@@ -30,4 +32,13 @@ func CopyBytes(in []byte) []byte {
 	out := make([]byte, len(in))
 	copy(out, in)
 	return out
+}
+
+func PadToSixDigits(number int) string {
+	numStr := strconv.Itoa(number)
+	numZeros := 6 - len(numStr)
+	if numZeros < 0 {
+		return numStr
+	}
+	return strings.Repeat("0", numZeros) + numStr
 }

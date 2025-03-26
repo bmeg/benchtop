@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/bmeg/benchtop"
+	"github.com/bmeg/benchtop/bsontable"
 	"github.com/bmeg/benchtop/util"
 
 	"github.com/schollz/progressbar/v3"
@@ -18,7 +19,7 @@ func main() {
 	file := flag.Arg(0)
 	dbPath := flag.Arg(1)
 
-	db, err := benchtop.NewBSONDriver(dbPath)
+	db, err := bsontable.NewBSONDriver(dbPath)
 	if err != nil {
 		fmt.Printf("Error: %s", err)
 		return
@@ -33,7 +34,11 @@ func main() {
 	lineCount, _ := util.LineCounter(file)
 
 	lines, err := util.StreamLines(file, 10)
-	records := make(chan benchtop.Entry, 10)
+	if err != nil {
+		fmt.Printf("Error: %s", err)
+		return
+	}
+	records := make(chan benchtop.Row, 10)
 
 	go func() {
 		defer close(records)
@@ -49,11 +54,10 @@ func main() {
 			entry := map[string]any{
 				"embedding": data,
 			}
-			records <- benchtop.Entry{Key: []byte(row[0]), Value: entry}
+			records <- benchtop.Row{Id: []byte(row[0]), Data: entry}
 			bar.Add(1)
 		}
 	}()
 	table.Load(records)
-
 	db.Close()
 }

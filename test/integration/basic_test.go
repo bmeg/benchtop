@@ -5,7 +5,6 @@ import (
 	"os"
 	"testing"
 
-	"github.com/akrylysov/pogreb"
 	"github.com/bmeg/benchtop"
 	"github.com/bmeg/benchtop/bsontable"
 	"github.com/bmeg/benchtop/util"
@@ -28,16 +27,9 @@ var data = map[string]map[string]any{
 
 func TestOpenClose(t *testing.T) {
 	name := "test.data" + util.RandomString(5)
-	pogrebName := name + "pogreb"
 	defer os.RemoveAll(name)
-	defer os.RemoveAll(pogrebName)
 
-	pg, err := pogreb.Open(pogrebName, nil)
-	if err != nil {
-		t.Error(err)
-	}
-
-	dr, err := bsontable.NewBSONDriver(name, pg)
+	dr, err := bsontable.NewBSONDriver(name)
 	if err != nil {
 		t.Error(err)
 	}
@@ -52,7 +44,7 @@ func TestOpenClose(t *testing.T) {
 	}
 	dr.Close()
 
-	or, err := bsontable.NewBSONDriver(name, pg)
+	or, err := bsontable.NewBSONDriver(name)
 	if err != nil {
 		t.Error(err)
 	}
@@ -69,16 +61,9 @@ func TestOpenClose(t *testing.T) {
 
 func TestInsert(t *testing.T) {
 	dbname := "test.data" + util.RandomString(5)
-	pogrebName := dbname + "pogreb"
 	defer os.RemoveAll(dbname)
-	defer os.RemoveAll(pogrebName)
 
-	pg, err := pogreb.Open(pogrebName, nil)
-	if err != nil {
-		t.Error(err)
-	}
-
-	dr, err := bsontable.NewBSONDriver(dbname, pg)
+	dr, err := bsontable.NewBSONDriver(dbname)
 	if err != nil {
 		t.Error(err)
 	}
@@ -136,16 +121,9 @@ func TestInsert(t *testing.T) {
 
 func TestDeleteTable(t *testing.T) {
 	name := "test.data" + util.RandomString(5)
-	pogrebName := name + "pogreb"
 	defer os.RemoveAll(name)
-	defer os.RemoveAll(pogrebName)
 
-	pg, err := pogreb.Open(pogrebName, nil)
-	if err != nil {
-		t.Error(err)
-	}
-
-	dr, err := bsontable.NewBSONDriver(name, pg)
+	dr, err := bsontable.NewBSONDriver(name)
 	if err != nil {
 		t.Error(err)
 	}
@@ -165,7 +143,7 @@ func TestDeleteTable(t *testing.T) {
 
 	dr.Close()
 
-	or, err := bsontable.NewBSONDriver(name, pg)
+	or, err := bsontable.NewBSONDriver(name)
 	if err != nil {
 		t.Error(err)
 	}

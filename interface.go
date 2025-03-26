@@ -12,8 +12,9 @@ type FieldFilter struct {
 }
 
 type TableInfo struct {
-	Id      uint32      `json:"id"`
-	Columns []ColumnDef `json:"columns"`
+	Id       uint32      `json:"id"`
+	FileName string      `json:"fileName"`
+	Columns  []ColumnDef `json:"columns"`
 }
 
 type ColumnDef struct {

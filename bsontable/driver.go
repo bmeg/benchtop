@@ -7,11 +7,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strconv"
-	"strings"
 	"sync"
 
-	"github.com/akrylysov/pogreb"
 	"github.com/bmeg/benchtop"
 	"github.com/bmeg/benchtop/pebblebulk"
 	"github.com/bmeg/benchtop/util"
@@ -24,16 +21,15 @@ import (
 const batchSize = 1000
 
 type BSONDriver struct {
-	base           string
-	Lock           sync.RWMutex
-	pogrebInstance *pogreb.DB
-	db             *pebble.DB
-	Pb             *pebblebulk.PebbleKV
-	Tables         map[string]*BSONTable
-	Fields         map[string][]string
+	base   string
+	Lock   sync.RWMutex
+	db     *pebble.DB
+	Pb     *pebblebulk.PebbleKV
+	Tables map[string]*BSONTable
+	Fields map[string][]string
 }
 
-func NewBSONDriver(path string, pogrebInstance *pogreb.DB) (benchtop.TableDriver, error) {
+func NewBSONDriver(path string) (benchtop.TableDriver, error) {
 	db, err := pebble.Open(path, &pebble.Options{})
 	if err != nil {
 		return nil, err
@@ -51,12 +47,11 @@ func NewBSONDriver(path string, pogrebInstance *pogreb.DB) (benchtop.TableDriver
 			InsertCount:  0,
 			CompactLimit: uint32(1000),
 		},
-		Fields:         map[string][]string{},
-		pogrebInstance: pogrebInstance,
+		Fields: map[string][]string{},
 	}, nil
 }
 
-func LoadBSONDriver(path string, pogrebInstance *pogreb.DB) (benchtop.TableDriver, error) {
+func LoadBSONDriver(path string) (benchtop.TableDriver, error) {
 	db, err := pebble.Open(path, &pebble.Options{})
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %v", err)
@@ -68,10 +63,9 @@ func LoadBSONDriver(path string, pogrebInstance *pogreb.DB) (benchtop.TableDrive
 	}
 
 	driver := &BSONDriver{
-		base:           path,
-		db:             db,
-		Tables:         map[string]*BSONTable{},
-		pogrebInstance: pogrebInstance,
+		base:   path,
+		db:     db,
+		Tables: map[string]*BSONTable{},
 		Pb: &pebblebulk.PebbleKV{
 			Db:           db,
 			InsertCount:  0,
@@ -100,19 +94,15 @@ func LoadBSONDriver(path string, pogrebInstance *pogreb.DB) (benchtop.TableDrive
 			CompactLimit: uint32(1000),
 		}
 
+		if err := bsonTable.Init(10); err != nil {
+			log.Errorf("Failed to init table %s: %v", tableName, err)
+			return nil, fmt.Errorf("failed to init table %s: %v", tableName, err)
+		}
 		driver.Tables[tableName] = bsonTable
+
 	}
 
 	return driver, nil
-}
-
-func padToSixDigits(number int) string {
-	numStr := strconv.Itoa(number)
-	numZeros := 6 - len(numStr)
-	if numZeros < 0 {
-		return numStr
-	}
-	return strings.Repeat("0", numZeros) + numStr
 }
 
 func (dr *BSONDriver) New(name string, columns []benchtop.ColumnDef) (benchtop.TableStore, error) {
@@ -124,8 +114,7 @@ func (dr *BSONDriver) New(name string, columns []benchtop.ColumnDef) (benchtop.T
 	dr.Lock.Lock()
 	defer dr.Lock.Unlock()
 
-	formattedName := padToSixDigits(len(dr.Tables))
-	err := dr.pogrebInstance.Put([]byte(name), []byte(formattedName))
+	formattedName := util.PadToSixDigits(len(dr.Tables))
 
 	tPath := filepath.Join(dr.base, "TABLES", formattedName)
 	out := &BSONTable{
@@ -134,6 +123,7 @@ func (dr *BSONDriver) New(name string, columns []benchtop.ColumnDef) (benchtop.T
 		columnMap:  map[string]int{},
 		Path:       tPath,
 		Name:       name,
+		FileName:   formattedName,
 	}
 	f, err := os.Create(tPath)
 	if err != nil {
@@ -155,7 +145,7 @@ func (dr *BSONDriver) New(name string, columns []benchtop.ColumnDef) (benchtop.T
 	out.handle.Write(outData)
 
 	newId := dr.getMaxTablePrefix()
-	if err := dr.addTable(newId, name, columns); err != nil {
+	if err := dr.addTable(newId, name, columns, formattedName); err != nil {
 		log.Errorf("Error: %s", err)
 	}
 
@@ -227,23 +217,24 @@ func (dr *BSONDriver) Get(name string) (benchtop.TableStore, error) {
 	bson.Unmarshal(value, &tinfo)
 	closer.Close()
 
-	tName, err := dr.pogrebInstance.Get([]byte(name))
-	if err != nil {
-		return nil, err
-	}
-	tPath := filepath.Join(dr.base, "TABLES", string(tName))
+	tPath := filepath.Join(dr.base, "TABLES", string(tinfo.FileName))
 
 	f, err := os.OpenFile(tPath, os.O_RDWR|os.O_CREATE, 0644)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open table %s: %v", tPath, err)
 	}
-
+	log.Infof("Opening %s", tinfo.FileName)
 	out := &BSONTable{
-		columns: tinfo.Columns,
-		db:      dr.db,
-		tableId: tinfo.Id,
-		handle:  f,
-		Path:    tPath,
+		columns:   tinfo.Columns,
+		db:        dr.db,
+		columnMap: map[string]int{},
+		tableId:   tinfo.Id,
+		handle:    f,
+		Path:      tPath,
+		FileName:  tinfo.FileName,
+	}
+	for n, d := range out.columns {
+		out.columnMap[d.Key] = n
 	}
 
 	dr.Tables[name] = out
@@ -266,22 +257,15 @@ func (dr *BSONDriver) Delete(name string) error {
 		if err := table.handle.Close(); err != nil {
 			log.Errorf("Error closing table %s handle: %v", name, err)
 		}
+		table.handle = nil
 	}
 
-	pgName, err := dr.pogrebInstance.Get([]byte(name))
-	if err != nil {
-		return err
-	}
-	err = dr.pogrebInstance.Delete([]byte(name))
-	if err != nil {
-		return err
-	}
-
-	tPath := filepath.Join(dr.base, "TABLES", string(pgName))
+	tPath := filepath.Join(dr.base, "TABLES", string(table.FileName))
 	if err := os.Remove(tPath); err != nil {
 		return fmt.Errorf("failed to delete table file %s: %v", tPath, err)
 	}
 	delete(dr.Tables, name)
+	dr.dropTable(name)
 
 	return nil
 }
@@ -305,7 +289,9 @@ func (dr *BSONDriver) DeleteAnyRow(name []byte) error {
 	return nil
 }
 
-func (dr *BSONDriver) BulkLoad(inputs chan *benchtop.Row) error {
+// BulkLoad
+// tx: set null to initialize pebble bulk write context
+func (dr *BSONDriver) BulkLoad(inputs chan *benchtop.Row, tx *pebblebulk.PebbleBulk) error {
 	var wg sync.WaitGroup
 	tableChannels := make(map[string]chan *benchtop.Row)
 	metadataChan := make(chan struct {
@@ -450,7 +436,8 @@ func (dr *BSONDriver) BulkLoad(inputs chan *benchtop.Row) error {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		err := dr.Pb.BulkWrite(func(tx *pebblebulk.PebbleBulk) error {
+
+		writeFunc := func(tx *pebblebulk.PebbleBulk) error {
 			for meta := range metadataChan {
 				if meta.err != nil {
 					errs = multierror.Append(errs, meta.err)
@@ -465,7 +452,14 @@ func (dr *BSONDriver) BulkLoad(inputs chan *benchtop.Row) error {
 				}
 			}
 			return nil
-		})
+		}
+
+		var err error
+		if tx == nil {
+			err = dr.Pb.BulkWrite(writeFunc)
+		} else {
+			writeFunc(tx)
+		}
 		if err != nil {
 			errs = multierror.Append(errs, err)
 		}
