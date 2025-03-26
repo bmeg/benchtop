@@ -5,13 +5,6 @@ import (
 	"go.mongodb.org/mongo-driver/bson/bsontype"
 )
 
-type VectorSearchResult struct {
-	Key      []byte
-	Distance float32
-	Vector   []float32
-	Data     map[string]any
-}
-
 type FieldFilter struct {
 	Field    string
 	Operator string // supported operators "==", "!=", ">", "<", ">=", "<=", "contains", "startswith", "endswith"
@@ -66,8 +59,6 @@ type TableStore interface {
 	Fetch(inputs chan Index, workers int) <-chan BulkResponse
 	Remove(inputs chan Index, workers int) <-chan BulkResponse
 	Scan(key bool, filter []FieldFilter, fields ...string) (chan map[string]any, error)
-	VectorSearch(string, []float32, int) ([]VectorSearchResult, error)
-
 	Load(chan Row) error
 	Keys() (chan Index, error)
 

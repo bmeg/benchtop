@@ -2,8 +2,8 @@
 #define PY_SSIZE_T_CLEAN
 
 // I leave this here to comment out the code. cgo seems not to recompile
-// pybenchtop.h unless pybenchtop.c compiles correctly. So I set this to
-// 0 and recompile to get an updated header file.
+// pybenchtop.h unless pybenchtop.c compiles correctly. So I set this to 
+// 0 and recompile to get an updated header file. 
 #if 1
 
 #include <Python.h>
@@ -12,10 +12,6 @@
 
 
 //Header stuff
-
-typedef struct {
-    PyObject_HEAD
-} Vector;
 
 typedef struct {
     PyObject_HEAD
@@ -33,27 +29,6 @@ static PyTypeObject TableType;
 static int Table_init(Table *self, PyObject *args, PyObject *kwds);
 
 // Benchtop Driver class
-
-
-static PyObject *Vector_new(PyTypeObject *type, PyObject *args, PyObject *kwds) {
-    Vector *self;
-    self = (Vector *)type->tp_alloc(type, 0);
-    return (PyObject *)self;
-}
-static void Vector_dealloc(Vector *self) {
-    Py_TYPE(self)->tp_free((PyObject *)self);
-}
-static PyTypeObject VectorType = {
-    PyVarObject_HEAD_INIT(NULL, 0)
-    .tp_name = "pybenchtop.Vector",
-    .tp_doc = "Vector type for pybenchtop",
-    .tp_basicsize = sizeof(Vector),
-    .tp_itemsize = 0,
-    .tp_flags = Py_TPFLAGS_DEFAULT,
-    .tp_new = Vector_new,
-    .tp_dealloc = (destructor)Vector_dealloc,
-};
-
 
 static PyObject * Driver_new(PyTypeObject *type, PyObject *args, PyObject *kwds) {
     Driver *self;
@@ -187,7 +162,7 @@ static int Table_init(Table *self, PyObject *args, PyObject *kwds) {
     if (tb == 0) {
         printf("Table not found\n");
         PyErr_SetString(PyExc_TypeError, "table not found");
-        return -1;
+        return -1;  
     }
     printf("Returning Table\n");
     self->table = tb;
@@ -195,51 +170,27 @@ static int Table_init(Table *self, PyObject *args, PyObject *kwds) {
 }
 
 static PyObject * Table_add(Table *self, PyObject *args, PyObject *kwds) {
-    int k;
+    char *key;
     PyObject *data;
 
-    if (! PyArg_ParseTuple(args, "iO", &k, &data))
+    if (! PyArg_ParseTuple(args, "sO", &key, &data))
        Py_RETURN_NONE;
 
-    AddDataTable(self->table, k, data);
+    AddDataTable(self->table, key, data);
     return PyUnicode_FromFormat("Running table add");
 }
-static PyObject *Table_vectorsearch(Table *self, PyObject *args, PyObject *kwds) {
-    char *field;
-    PyObject *queryVector;
-    int k;
 
-
-    if (!PyArg_ParseTuple(args, "sOi", &field, &queryVector, &k)) {
-        return NULL;
-    }
-
-    if (self->table == 0) {
-        PyErr_SetString(PyExc_ValueError, "Table is not initialized");
-        return NULL;
-    }
-
-    PyObject *search = TableVectorSearch(self->table, field, queryVector, k);
-    if (search == NULL) {
-        PyErr_SetString(PyExc_RuntimeError, "Vector search failed in Go");
-        return NULL;
-    }
-    return search;
-}
-
-static PyObject *Table_get(Table *self, PyObject *args, PyObject *kwds) {
+static PyObject * Table_get(Table *self, PyObject *args, PyObject *kwds) {
     char *key;
-    if (!PyArg_ParseTuple(args, "s", &key)) {
-        return NULL;
-    }
-    if (self->table == 0) {
-        PyErr_SetString(PyExc_ValueError, "Table is not initialized");
-        return NULL;
-    }
+    
+    if (! PyArg_ParseTuple(args, "s", &key))
+        Py_RETURN_NONE;
+
     PyObject *data = GetDataTable(self->table, key);
     if (data == NULL) {
-        Py_RETURN_NONE;  // Return None if data not found or error
-    }
+        PyErr_SetString(PyExc_TypeError, "data not found");
+        return NULL;
+    }    
     return data;
 }
 
@@ -250,7 +201,6 @@ static PyMemberDef Table_members[] = {
 static PyMethodDef Table_methods[] = {
     {"add", (PyCFunction)Table_add, METH_VARARGS, "Add data to table",},
     {"get", (PyCFunction)Table_get, METH_VARARGS, "Get data from table",},
-    {"vectorsearch", (PyCFunction)Table_vectorsearch, METH_VARARGS, "Perform vector search"},
     {NULL}  /* Sentinel */
 };
 
@@ -291,12 +241,6 @@ PyInit_pybenchtop(void) {
 
     Py_INCREF(&DriverType);
     PyModule_AddObject(m, "Driver", (PyObject *)&DriverType);
-
-    if (PyType_Ready(&VectorType) < 0)
-        return NULL;
-
-    Py_INCREF(&VectorType);
-    PyModule_AddObject(m, "Vector", (PyObject *)&VectorType);
 
     return m;
 }

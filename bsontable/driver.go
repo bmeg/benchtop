@@ -93,11 +93,11 @@ func LoadBSONDriver(path string) (benchtop.TableDriver, error) {
 			InsertCount:  0,
 			CompactLimit: uint32(1000),
 		}
-		if err := bsonTable.Init(10); err != nil {
-			log.Errorf("Failed to init table %s: %v", tableName, err)
-			return nil, fmt.Errorf("failed to init table %s: %v", tableName, err)
+
+		if err := bsonTable.Init(10); err != nil { // Pool size 10 as example
+			log.Errorln("bsonTable pool Init err: ", err)
+			return nil, fmt.Errorf("bsonTable pool Init err: '%s'", err)
 		}
-		log.Infof("Loaded table %s with vector field %s, HNSW index: %v", tableName, bsonTable.VectorField, bsonTable.HnswIndex != nil)
 		driver.Tables[tableName] = bsonTable
 
 	}
@@ -182,7 +182,6 @@ func (dr *BSONDriver) Close() {
 	defer dr.Lock.Unlock()
 	log.Infoln("Closing BSONDriver...")
 	for name, table := range dr.Tables {
-		table.Close()
 		if table.handle != nil {
 			if syncErr := table.handle.Sync(); syncErr != nil {
 				log.Errorf("Error syncing table %s: %v", name, syncErr)
@@ -192,15 +191,11 @@ func (dr *BSONDriver) Close() {
 			} else {
 				log.Debugf("Closed table %s", name)
 			}
-			table.handle = nil
+			table.handle = nil // Prevent reuse
 		}
 	}
-	dr.Tables = make(map[string]*BSONTable) // Clear tables to prevent re-closing
-	if dr.db != nil {
-		if closeErr := dr.db.Close(); closeErr != nil {
-			log.Errorf("Error closing pebble db: %v", closeErr)
-		}
-		dr.db = nil
+	if closeErr := dr.db.Close(); closeErr != nil {
+		log.Errorf("Error closing pebble db: %v", closeErr)
 	}
 }
 
@@ -230,17 +225,12 @@ func (dr *BSONDriver) Get(name string) (benchtop.TableStore, error) {
 	}
 	log.Infof("Opening %s", tinfo.FileName)
 	out := &BSONTable{
-		columns:   tinfo.Columns,
-		columnMap: map[string]int{},
-		db:        dr.db,
-		tableId:   tinfo.Id,
-		handle:    f,
-		Path:      tPath,
-		FileName:  tinfo.FileName,
-	}
-
-	for n, d := range out.columns {
-		out.columnMap[d.Key] = n
+		columns:  tinfo.Columns,
+		db:       dr.db,
+		tableId:  tinfo.Id,
+		handle:   f,
+		Path:     tPath,
+		FileName: tinfo.FileName,
 	}
 
 	dr.Tables[name] = out

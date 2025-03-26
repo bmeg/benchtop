@@ -23,7 +23,7 @@ typedef struct { const char *p; ptrdiff_t n; } _GoString_;
 
  #define Py_LIMITED_API
  #include <Python.h>
- #include <stdint.h>
+ #include <stdint.h> // for uintptr_t
  #include "shim.h"
 
 #line 1 "cgo-generated-wrapper"
@@ -82,14 +82,13 @@ typedef struct { void *data; GoInt len; GoInt cap; } GoSlice;
 extern "C" {
 #endif
 
-extern uintptr_t NewDriver(char* base);
-extern void DriverClose(uintptr_t d);
-extern uintptr_t NewTable(uintptr_t d, char* name, PyObject* def);
-extern uintptr_t GetTable(uintptr_t d, char* name);
-extern void CloseTable(uintptr_t tb);
-extern void AddDataTable(uintptr_t tb, GoInt name, PyObject* obj);
-extern PyObject* GetDataTable(uintptr_t tb, char* name);
-extern PyObject* TableVectorSearch(uintptr_t tb, char* field, PyObject* queryVector, int k);
+extern GoUintptr NewDriver(char* base);
+extern void DriverClose(GoUintptr d);
+extern GoUintptr NewTable(GoUintptr d, char* name, PyObject* def);
+extern GoUintptr GetTable(GoUintptr d, char* name);
+extern void CloseTable(GoUintptr tb);
+extern void AddDataTable(GoUintptr tb, char* name, PyObject* obj);
+extern PyObject* GetDataTable(GoUintptr tb, char* name);
 
 #ifdef __cplusplus
 }
