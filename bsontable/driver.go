@@ -94,9 +94,9 @@ func LoadBSONDriver(path string) (benchtop.TableDriver, error) {
 			CompactLimit: uint32(1000),
 		}
 
-		if err := bsonTable.Init(10); err != nil { // Pool size 10 as example
-			log.Errorln("bsonTable pool Init err: ", err)
-			return nil, fmt.Errorf("bsonTable pool Init err: '%s'", err)
+		if err := bsonTable.Init(10); err != nil {
+			log.Errorf("Failed to init table %s: %v", tableName, err)
+			return nil, fmt.Errorf("failed to init table %s: %v", tableName, err)
 		}
 		driver.Tables[tableName] = bsonTable
 
@@ -225,12 +225,16 @@ func (dr *BSONDriver) Get(name string) (benchtop.TableStore, error) {
 	}
 	log.Infof("Opening %s", tinfo.FileName)
 	out := &BSONTable{
-		columns:  tinfo.Columns,
-		db:       dr.db,
-		tableId:  tinfo.Id,
-		handle:   f,
-		Path:     tPath,
-		FileName: tinfo.FileName,
+		columns:   tinfo.Columns,
+		db:        dr.db,
+		columnMap: map[string]int{},
+		tableId:   tinfo.Id,
+		handle:    f,
+		Path:      tPath,
+		FileName:  tinfo.FileName,
+	}
+	for n, d := range out.columns {
+		out.columnMap[d.Key] = n
 	}
 
 	dr.Tables[name] = out
