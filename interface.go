@@ -18,8 +18,9 @@ type TableInfo struct {
 }
 
 type ColumnDef struct {
-	Key  string    `json:"key"`
-	Type FieldType `json:"type"`
+	Key     string    `json:"key"`
+	Type    FieldType `json:"type"`
+	Indexed bool      `json:"indexed"`
 }
 
 type TableDriver interface {

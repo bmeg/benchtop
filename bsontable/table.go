@@ -85,6 +85,7 @@ func (b *BSONTable) AddRow(elem benchtop.Row) error {
 
 	b.addTableDeleteEntryInfo(nil, elem.Id, elem.TableName)
 	b.addTableEntryInfo(nil, elem.Id, uint64(offset), uint64(writesize))
+
 	return nil
 
 }

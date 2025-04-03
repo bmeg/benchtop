@@ -223,7 +223,7 @@ func (dr *BSONDriver) Get(name string) (benchtop.TableStore, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to open table %s: %v", tPath, err)
 	}
-	log.Infof("Opening %s", tinfo.FileName)
+	log.Debugf("Opening %s", tinfo.FileName)
 	out := &BSONTable{
 		columns:   tinfo.Columns,
 		db:        dr.db,
