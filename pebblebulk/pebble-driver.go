@@ -11,7 +11,8 @@ import (
 )
 
 const (
-	maxWriterBuffer = 3 << 30
+	//256 BM
+	maxWriterBuffer = 1 << 28
 )
 
 type PebbleBulk struct {
@@ -32,25 +33,37 @@ type PebbleKV struct {
 func (pb *PebbleBulk) Set(id []byte, val []byte, opts *pebble.WriteOptions) error {
 	pb.mu.Lock()
 	defer pb.mu.Unlock()
+
 	if pb.Batch == nil {
 		pb.Batch = pb.Db.NewBatch()
 	}
 
 	pb.CurSize += len(id) + len(val)
 	pb.totalInserts++
+
 	if pb.Highest == nil || bytes.Compare(id, pb.Highest) > 0 {
 		pb.Highest = util.CopyBytes(id)
 	}
 	if pb.Lowest == nil || bytes.Compare(id, pb.Lowest) < 0 {
 		pb.Lowest = util.CopyBytes(id)
 	}
+
 	err := pb.Batch.Set(id, val, nil)
+	if err != nil {
+		return err
+	}
+
+	// Offload batch commit to the background if buffer is full
 	if pb.CurSize > maxWriterBuffer {
-		pb.Batch.Commit(nil)
+		// Swap the batch with a new one
+		if err := pb.Batch.Commit(nil); err != nil {
+			log.Errorf("Batch commit failed: %v", err)
+		}
 		pb.Batch.Reset()
 		pb.CurSize = 0
 	}
-	return err
+
+	return nil
 }
 
 func (pb *PebbleBulk) Get(key []byte) ([]byte, io.Closer, error) {
@@ -68,8 +81,9 @@ func (pdb *PebbleKV) Set(id []byte, val []byte) error {
 func (pdb *PebbleKV) BulkWrite(u func(tx *PebbleBulk) error) error {
 	batch := pdb.Db.NewBatch()
 	ptx := &PebbleBulk{pdb.Db, batch, nil, nil, 0, sync.Mutex{}, 0}
+
 	err := u(ptx)
-	batch.Commit(nil)
+	batch.Apply(batch, nil)
 	batch.Close()
 
 	pdb.InsertCount += ptx.totalInserts
@@ -121,8 +135,8 @@ func (pit *PebbleIterator) Valid() bool {
 	return pit.iter.Valid()
 }
 
-func (pit *PebbleIterator) Value() ([]byte, error) {
-	return pit.value, nil
+func (pit *PebbleIterator) Value() []byte {
+	return pit.value
 }
 
 func (pit *PebbleIterator) Get(id []byte) ([]byte, error) {

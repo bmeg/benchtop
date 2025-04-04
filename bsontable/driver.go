@@ -7,12 +7,14 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/bmeg/benchtop"
 	"github.com/bmeg/benchtop/pebblebulk"
 	"github.com/bmeg/benchtop/util"
 	"github.com/bmeg/grip/log"
+	"github.com/bmeg/jsonpath"
 	"github.com/cockroachdb/pebble"
 	multierror "github.com/hashicorp/go-multierror"
 	"go.mongodb.org/mongo-driver/bson"
@@ -26,7 +28,8 @@ type BSONDriver struct {
 	db     *pebble.DB
 	Pb     *pebblebulk.PebbleKV
 	Tables map[string]*BSONTable
-	Fields map[string][]string
+	// first map is table name, second map is field jsonpath
+	Fields map[string]map[string]struct{}
 }
 
 func NewBSONDriver(path string) (benchtop.TableDriver, error) {
@@ -47,7 +50,7 @@ func NewBSONDriver(path string) (benchtop.TableDriver, error) {
 			InsertCount:  0,
 			CompactLimit: uint32(1000),
 		},
-		Fields: map[string][]string{},
+		Fields: map[string]map[string]struct{}{},
 	}, nil
 }
 
@@ -71,7 +74,31 @@ func LoadBSONDriver(path string) (benchtop.TableDriver, error) {
 			InsertCount:  0,
 			CompactLimit: uint32(1000),
 		},
-		Fields: map[string][]string{},
+		Fields: map[string]map[string]struct{}{},
+	}
+
+	prefixLen := len(benchtop.FieldPrefix)
+	// Keep all of the initialized schema indices in RAM to be used as 'bookmarks' for fetching field values
+	err = driver.Pb.View(func(it *pebblebulk.PebbleIterator) error {
+		for it.Seek(benchtop.FieldPrefix); it.Valid() && bytes.HasPrefix(it.Key(), benchtop.FieldPrefix); it.Next() {
+			suffix := it.Key()[prefixLen:]
+			// Schema indices have exactly 2 parts: tableName:field
+			if bytes.Count(suffix, []byte(":")) != 1 {
+				continue
+			}
+			colonIdx := bytes.Index(suffix, []byte(":"))
+			tableName := string(bytes.TrimSpace(suffix[:colonIdx]))
+			fieldName := string(bytes.TrimSpace(suffix[colonIdx+1:]))
+			if _, exists := driver.Fields[tableName]; !exists {
+				driver.Fields[tableName] = map[string]struct{}{}
+			}
+			driver.Fields[tableName][fieldName] = struct{}{}
+		}
+		return nil
+	})
+	if err != nil {
+		fmt.Println("ERR: ")
+		return nil, err
 	}
 
 	tableNames := driver.List()
@@ -232,6 +259,7 @@ func (dr *BSONDriver) Get(name string) (benchtop.TableStore, error) {
 		handle:    f,
 		Path:      tPath,
 		FileName:  tinfo.FileName,
+		Name:      name,
 	}
 	for n, d := range out.columns {
 		out.columnMap[d.Key] = n
@@ -294,42 +322,26 @@ func (dr *BSONDriver) DeleteAnyRow(name []byte) error {
 func (dr *BSONDriver) BulkLoad(inputs chan *benchtop.Row, tx *pebblebulk.PebbleBulk) error {
 	var wg sync.WaitGroup
 	tableChannels := make(map[string]chan *benchtop.Row)
-	metadataChan := make(chan struct {
-		table    *BSONTable
-		metadata []struct {
-			id           string
-			offset, size uint64
-		}
-		err error
-	}, 100)
+	errChan := make(chan error, 100)
 
 	startTableGoroutine := func(tableName string) {
 		ch := make(chan *benchtop.Row, 100)
 		tableChannels[tableName] = ch
-		wg.Add(1)
+
+		wg.Add(1) // Ensure this is before the goroutine starts
 		go func() {
 			defer wg.Done()
-			var metadata []struct {
-				id           string
-				offset, size uint64
-			}
 			var localErr *multierror.Error
 
 			dr.Lock.RLock()
 			table, exists := dr.Tables[tableName]
+			fieldMap, fieldExists := dr.Fields[tableName[2:]]
 			dr.Lock.RUnlock()
+
 			if !exists {
 				newTable, err := dr.New(tableName, nil)
 				if err != nil {
-					localErr = multierror.Append(localErr, fmt.Errorf("failed to create table %s: %v", tableName, err))
-					metadataChan <- struct {
-						table    *BSONTable
-						metadata []struct {
-							id           string
-							offset, size uint64
-						}
-						err error
-					}{nil, nil, localErr.ErrorOrNil()}
+					errChan <- fmt.Errorf("failed to create table %s: %v", tableName, err)
 					return
 				}
 				table = newTable.(*BSONTable)
@@ -337,6 +349,21 @@ func (dr *BSONDriver) BulkLoad(inputs chan *benchtop.Row, tx *pebblebulk.PebbleB
 				dr.Tables[tableName] = table
 				dr.Lock.Unlock()
 			}
+			if !fieldExists {
+				log.Infof("tableName '%s' does not exist in fieldMap", table.Name[2:])
+				return
+			}
+
+			compiledPaths := make(map[string]*jsonpath.Compiled)
+			for field := range fieldMap {
+				compiled, err := jsonpath.Compile("$." + field)
+				if err != nil {
+					log.Errorf("Failed to compile JSONPath %s: %v", field, err)
+					continue
+				}
+				compiledPaths[field] = compiled
+			}
+
 			for {
 				batch := make([]*benchtop.Row, 0, batchSize)
 				for range batchSize {
@@ -352,6 +379,8 @@ func (dr *BSONDriver) BulkLoad(inputs chan *benchtop.Row, tx *pebblebulk.PebbleB
 
 				bDatas := make([][]byte, 0, batchSize)
 				ids := make([]string, 0, batchSize)
+				rowDatas := make([]map[string]any, 0, batchSize)
+
 				for _, row := range batch {
 					mData, err := table.packData(row.Data, string(row.Id))
 					if err != nil {
@@ -365,6 +394,7 @@ func (dr *BSONDriver) BulkLoad(inputs chan *benchtop.Row, tx *pebblebulk.PebbleB
 					}
 					bDatas = append(bDatas, bData)
 					ids = append(ids, string(row.Id))
+					rowDatas = append(rowDatas, row.Data)
 				}
 				if len(bDatas) == 0 {
 					continue
@@ -393,30 +423,49 @@ func (dr *BSONDriver) BulkLoad(inputs chan *benchtop.Row, tx *pebblebulk.PebbleB
 				}
 
 				_, err = table.handle.Write(batchData)
+				table.handleLock.Unlock()
 				if err != nil {
 					localErr = multierror.Append(localErr, fmt.Errorf("write error for table %s: %v", tableName, err))
-					table.handleLock.Unlock()
 					continue
 				}
-				table.handleLock.Unlock()
 
-				// Record metadata for each record in the batch
+				// Use separate wait group for indexing
+				var indexWG sync.WaitGroup
+				errChanLocal := make(chan error, len(ids)*len(compiledPaths))
+
 				for i, id := range ids {
-					metadata = append(metadata, struct {
-						id           string
-						offset, size uint64
-					}{id, offsets[i], uint64(len(bDatas[i]))})
+					indexWG.Add(1)
+					go func(i int, id string) {
+						defer indexWG.Done()
+						table.addTableDeleteEntryInfo(tx, []byte(id), table.Name)
+						table.addTableEntryInfo(tx, []byte(id), offsets[i], uint64(len(bDatas[i])))
+						for field, compiled := range compiledPaths {
+							value, err := compiled.Lookup(rowDatas[i])
+							if err != nil {
+								continue
+							}
+							values := flattenValues(value)
+							for _, val := range values {
+								if err := tx.Set(
+									[]byte(string(benchtop.FieldPrefix)+table.Name+":"+field+":"+val+":"+id), nil, nil); err != nil {
+									errChanLocal <- fmt.Errorf("failed to set index %s for %s: %v", field, id, err)
+								}
+							}
+						}
+					}(i, id)
+				}
+
+				// Wait for all indexing goroutines
+				indexWG.Wait()
+				close(errChanLocal)
+
+				for err := range errChanLocal {
+					localErr = multierror.Append(localErr, err)
 				}
 			}
-			metadataChan <- struct {
-				table    *BSONTable
-				metadata []struct {
-					id           string
-					offset, size uint64
-				}
-				err error
-			}{table, metadata, localErr.ErrorOrNil()}
-
+			if localErr != nil {
+				errChan <- localErr.ErrorOrNil()
+			}
 		}()
 	}
 
@@ -432,42 +481,93 @@ func (dr *BSONDriver) BulkLoad(inputs chan *benchtop.Row, tx *pebblebulk.PebbleB
 		close(ch)
 	}
 
-	var errs *multierror.Error
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
+	wg.Wait()
+	close(errChan)
 
-		writeFunc := func(tx *pebblebulk.PebbleBulk) error {
-			for meta := range metadataChan {
-				if meta.err != nil {
-					errs = multierror.Append(errs, meta.err)
+	var errs *multierror.Error
+	for err := range errChan {
+		errs = multierror.Append(errs, err)
+	}
+
+	return errs.ErrorOrNil()
+}
+
+func (dr *BSONDriver) Join(table1, field1, table2, field2 string) (chan struct {
+	Row1, Row2 map[string]interface{}
+}, error) {
+	path1 := fmt.Sprintf("%s.%s", table1, field1)
+	path2 := fmt.Sprintf("%s.%s", table2, field2)
+
+	dr.Lock.RLock()
+	_, exists1 := dr.Fields[path1]
+	_, exists2 := dr.Fields[path2]
+	dr.Lock.RUnlock()
+	if !exists1 || !exists2 {
+		return nil, fmt.Errorf("fields %s or %s are not indexed", path1, path2)
+	}
+
+	out := make(chan struct {
+		Row1, Row2 map[string]interface{}
+	}, 10)
+	prefix1 := []byte(fmt.Sprintf("%s:%s:%s", benchtop.FieldPrefix, table1, field1))
+
+	go func() {
+		defer close(out)
+
+		// Build a map of values to row IDs for table1
+		valueToIDs1 := make(map[string][]string)
+		err := dr.Pb.View(func(it *pebblebulk.PebbleIterator) error {
+			for it.Seek(prefix1); it.Valid() && bytes.HasPrefix(it.Key(), prefix1); it.Next() {
+				parts := strings.Split(string(it.Key()), ":")
+				if len(parts) != 4 {
 					continue
 				}
-				if meta.table == nil || len(meta.metadata) == 0 {
+				value := parts[3]
+				ids := string(it.Value())
+				valueToIDs1[value] = append(valueToIDs1[value], ids)
+			}
+			return nil
+		})
+		if err != nil {
+			log.Errorf("Error scanning table1 indices: %v", err)
+			return
+		}
+
+		// Match against table2
+		prefix2 := []byte(fmt.Sprintf("%s:%s:%s", benchtop.FieldPrefix, table2, field2))
+		err = dr.Pb.View(func(it *pebblebulk.PebbleIterator) error {
+			for it.Seek(prefix2); it.Valid() && bytes.HasPrefix(it.Key(), prefix2); it.Next() {
+				parts := strings.Split(string(it.Key()), ":")
+				if len(parts) != 4 {
 					continue
 				}
-				for _, m := range meta.metadata {
-					meta.table.addTableDeleteEntryInfo(tx, []byte(m.id), meta.table.Name)
-					meta.table.addTableEntryInfo(tx, []byte(m.id), m.offset, m.size)
+				value := parts[3]
+				id2 := string(it.Value())
+				if ids1, ok := valueToIDs1[value]; ok {
+					t1, err1 := dr.Get(table1)
+					t2, err2 := dr.Get(table2)
+					if err1 != nil || err2 != nil {
+						continue
+					}
+					bt1 := t1.(*BSONTable)
+					bt2 := t2.(*BSONTable)
+					for _, id1 := range ids1 {
+						row1, err1 := bt1.GetRow([]byte(id1))
+						row2, err2 := bt2.GetRow([]byte(id2))
+						if err1 == nil && err2 == nil {
+							out <- struct {
+								Row1, Row2 map[string]interface{}
+							}{Row1: row1, Row2: row2}
+						}
+					}
 				}
 			}
 			return nil
-		}
-
-		var err error
-		if tx == nil {
-			err = dr.Pb.BulkWrite(writeFunc)
-		} else {
-			writeFunc(tx)
-		}
+		})
 		if err != nil {
-			errs = multierror.Append(errs, err)
+			log.Errorf("Error scanning table2 indices: %v", err)
 		}
 	}()
 
-	wg.Wait()
-	close(metadataChan)
-	<-done
-
-	return errs.ErrorOrNil()
+	return out, nil
 }

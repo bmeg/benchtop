@@ -16,13 +16,14 @@ func (dr *BSONDriver) BulkAddField(idxChan <-chan *gripql.IndexID) error {
 	err := dr.Pb.BulkWrite(func(tx *pebblebulk.PebbleBulk) error {
 		var bulkErr *multierror.Error
 		for idx := range idxChan {
-			path := fmt.Sprintf("%s.%s", idx.Label, idx.Field)
-			fk := benchtop.FieldKey(path)
-			// TODO: need to load this from disk on db startup
-			dr.Fields[path] = strings.Split(path, ".")
+			fk := benchtop.FieldKey(fmt.Sprintf("%s:%s", idx.Label, idx.Field))
+			if _, exists := dr.Fields[idx.Label]; !exists {
+				dr.Fields[idx.Label] = map[string]struct{}{}
+			}
+			dr.Fields[idx.Label][idx.Field] = struct{}{}
 			err := tx.Set(fk, []byte{}, nil)
 			if err != nil {
-				bulkErr = multierror.Append(bulkErr, fmt.Errorf("failed to set index for %s: %v", path, err))
+				bulkErr = multierror.Append(bulkErr, fmt.Errorf("failed to set index for %s: %v", fk, err))
 			}
 		}
 		return bulkErr.ErrorOrNil()
@@ -31,14 +32,16 @@ func (dr *BSONDriver) BulkAddField(idxChan <-chan *gripql.IndexID) error {
 }
 
 func (dr *BSONDriver) AddFieldIndex(path string) error {
+	pathparts := strings.Split(path, ":")
 	fk := benchtop.FieldKey(path)
-	dr.Fields[path] = strings.Split(path, ".")
+	dr.Fields[pathparts[0]][strings.Join(pathparts[1:], ":")] = struct{}{}
 	return dr.db.Set(fk, []byte{}, nil)
 }
 
 func (dr *BSONDriver) RemoveFieldIndex(path string) error {
+	pathparts := strings.Split(path, ":")
 	fk := benchtop.FieldKey(path)
-	delete(dr.Fields, path)
+	delete(dr.Fields[strings.Join(pathparts[1:], ":")], path)
 	return dr.db.Delete(fk, nil)
 }
 
@@ -49,8 +52,8 @@ func (dr *BSONDriver) ListFields(graphName string) <-chan *gripql.IndexID {
 		defer close(out)
 		err := dr.Pb.View(func(it *pebblebulk.PebbleIterator) error {
 			for it.Seek(fPrefix); it.Valid() && bytes.HasPrefix(it.Key(), fPrefix); it.Next() {
-				t := strings.Split(benchtop.FieldKeyParse(it.Key()), ".")
-				out <- &gripql.IndexID{Graph: graphName, Label: t[0], Field: strings.Join(t[1:], ".")}
+				t := strings.Split(benchtop.FieldKeyParse(it.Key()), ":")
+				out <- &gripql.IndexID{Graph: graphName, Label: t[0], Field: strings.Join(t[1:], ":")}
 
 			}
 			return nil

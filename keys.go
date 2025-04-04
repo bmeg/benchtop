@@ -1,7 +1,6 @@
 package benchtop
 
 import (
-	"bytes"
 	"encoding/binary"
 )
 
@@ -26,13 +25,11 @@ var PosPrefix = byte('P')
 var FieldPrefix = []byte("F")
 
 func FieldKey(field string) []byte {
-	return bytes.Join([][]byte{FieldPrefix, []byte(field)}, []byte{0})
+	return append(FieldPrefix, []byte(field)...)
 }
 
 func FieldKeyParse(key []byte) string {
-	tmp := bytes.Split(key, []byte{0})
-	field := string(tmp[1])
-	return field
+	return string(key[len(FieldPrefix):])
 }
 
 func NewRowTableAsocKey(id []byte) []byte {
