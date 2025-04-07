@@ -70,6 +70,43 @@ func (dr *BSONDriver) GetIDsForLabel(label string) chan string {
 	out := make(chan string, 10)
 	go func() {
 		defer close(out)
+
+		// Check if table exists
+		if _, err := dr.Get(label); err != nil {
+			log.Infof("GetIDsForLabel: %s on table: %s", err, label)
+			return
+		}
+
+		// Prefix for all indices of this table, e.g., "F:Observation:"
+		prefix := []byte(string(benchtop.FieldPrefix) + label + ":")
+		seen := make(map[string]struct{}) // Deduplicate IDs
+
+		err := dr.Pb.View(func(it *pebblebulk.PebbleIterator) error {
+			for it.Seek(prefix); it.Valid() && bytes.HasPrefix(it.Key(), prefix); it.Next() {
+				key := it.Key()
+				lastColon := bytes.LastIndex(key, []byte(":"))
+				if lastColon != -1 && lastColon < len(key)-1 {
+					id := string(key[lastColon+1:])
+					if _, exists := seen[id]; !exists {
+						seen[id] = struct{}{}
+						out <- id
+					}
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			log.Errorf("Error scanning indices for label %s: %v", label, err)
+		}
+	}()
+	return out
+}
+
+/* Not sure which one is faster.
+func (dr *BSONDriver) GetIDsForLabel(label string) chan string {
+	out := make(chan string, 10)
+	go func() {
+		defer close(out)
 		table, err := dr.Get(label)
 		if err != nil {
 			log.Infof("GetIdsForLabel: %s on table: %s", err, label)
@@ -90,3 +127,4 @@ func (dr *BSONDriver) GetIDsForLabel(label string) chan string {
 	}()
 	return out
 }
+*/
