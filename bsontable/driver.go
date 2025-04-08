@@ -108,7 +108,8 @@ func LoadBSONDriver(path string) (benchtop.TableDriver, error) {
 func (dr *BSONDriver) New(name string, columns []benchtop.ColumnDef) (benchtop.TableStore, error) {
 	p, _ := dr.Get(name)
 	if p != nil {
-		return p, fmt.Errorf("table %s already exists", name)
+		// No need to err here, if it exists just return the table
+		return p, nil
 	}
 
 	dr.Lock.Lock()
