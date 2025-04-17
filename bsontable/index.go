@@ -48,14 +48,3 @@ func (b *BSONDriver) GetLabels(edges bool) chan string {
 	}()
 	return out
 }
-
-func (b *BSONDriver) LoadTables(tType byte) {
-	prefix := []byte{tType}
-	b.Pb.View(func(it *pebblebulk.PebbleIterator) error {
-		for it.Seek(prefix); it.Valid() && bytes.HasPrefix(it.Key(), prefix); it.Next() {
-			table, _ := b.Get(string(it.Key()))
-			b.Tables[string(it.Key())] = table.(*BSONTable)
-		}
-		return nil
-	})
-}

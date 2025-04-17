@@ -32,7 +32,6 @@ type BSONTable struct {
 	handleLock sync.RWMutex
 	Path       string
 	Name       string
-	tType      byte
 	filePool   chan *os.File
 	FileName   string
 }
