@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/bmeg/benchtop"
 	"github.com/bmeg/benchtop/pebblebulk"
@@ -116,8 +117,12 @@ func (dr *BSONDriver) New(name string, columns []benchtop.ColumnDef) (benchtop.T
 	defer dr.Lock.Unlock()
 
 	formattedName := util.PadToSixDigits(len(dr.Tables))
-
 	tPath := filepath.Join(dr.base, "TABLES", formattedName)
+	f, err := os.Create(tPath)
+	if err != nil {
+		return nil, err
+	}
+
 	out := &BSONTable{
 		columns:    columns,
 		handleLock: sync.RWMutex{},
@@ -125,14 +130,24 @@ func (dr *BSONDriver) New(name string, columns []benchtop.ColumnDef) (benchtop.T
 		Path:       tPath,
 		Name:       name,
 		FileName:   formattedName,
+		handle:     f,
 	}
-	f, err := os.Create(tPath)
-	if err != nil {
-		return nil, err
-	}
-	out.handle = f
+
 	for n, d := range columns {
 		out.columnMap[d.Key] = n
+	}
+
+	newId := dr.getMaxTablePrefix()
+	out.tableId = newId
+	if err := dr.addTable(newId, name, columns, formattedName); err != nil {
+		log.Errorf("Error: %s", err)
+	}
+
+	out.db = dr.db
+	out.Pb = &pebblebulk.PebbleKV{
+		Db:           dr.db,
+		InsertCount:  0,
+		CompactLimit: uint32(1000),
 	}
 
 	outData, err := bson.Marshal(out)
@@ -145,18 +160,6 @@ func (dr *BSONDriver) New(name string, columns []benchtop.ColumnDef) (benchtop.T
 	out.handle.Write(buffer)
 	out.handle.Write(outData)
 
-	newId := dr.getMaxTablePrefix()
-	if err := dr.addTable(newId, name, columns, formattedName); err != nil {
-		log.Errorf("Error: %s", err)
-	}
-
-	out.db = dr.db
-	out.Pb = &pebblebulk.PebbleKV{
-		Db:           dr.db,
-		InsertCount:  0,
-		CompactLimit: uint32(1000),
-	}
-	out.tableId = newId
 	dr.Tables[name] = out
 	if err := out.Init(10); err != nil { // Pool size 10 as example
 		log.Errorln("TABLE POOL ERR: ", err)
@@ -181,23 +184,36 @@ func (dr *BSONDriver) List() []string {
 func (dr *BSONDriver) Close() {
 	dr.Lock.Lock()
 	defer dr.Lock.Unlock()
+
 	log.Infoln("Closing BSONDriver...")
-	for name, table := range dr.Tables {
+	for tableName, table := range dr.Tables {
+		table.handleLock.Lock()
 		if table.handle != nil {
 			if syncErr := table.handle.Sync(); syncErr != nil {
-				log.Errorf("Error syncing table %s: %v", name, syncErr)
+				log.Errorf("Error syncing table %s handle: %v", tableName, syncErr)
 			}
 			if closeErr := table.handle.Close(); closeErr != nil {
-				log.Errorf("Error closing table %s: %v", name, closeErr)
+				log.Errorf("Error closing table %s handle: %v", tableName, closeErr)
 			} else {
-				log.Debugf("Closed table %s", name)
+				log.Debugf("Closed table %s", tableName)
 			}
-			table.handle = nil // Prevent reuse
+			table.handle = nil
 		}
+		table.handleLock.Unlock()
+		table.Pb = nil
 	}
-	if closeErr := dr.db.Close(); closeErr != nil {
-		log.Errorf("Error closing pebble db: %v", closeErr)
+	dr.Tables = make(map[string]*BSONTable)
+	if dr.db != nil {
+		if closeErr := dr.db.Close(); closeErr != nil {
+			log.Errorf("Error closing Pebble database: %v", closeErr)
+		}
+		dr.db = nil
+		time.Sleep(50 * time.Millisecond)
 	}
+	dr.Pb = nil
+	dr.Fields = make(map[string][]string)
+	log.Infof("Successfully closed BSONDriver for path %s", dr.base)
+	return
 }
 
 func (dr *BSONDriver) Get(name string) (benchtop.TableStore, error) {
@@ -226,13 +242,15 @@ func (dr *BSONDriver) Get(name string) (benchtop.TableStore, error) {
 	}
 	log.Infof("Opening %s", tinfo.FileName)
 	out := &BSONTable{
-		columns:   tinfo.Columns,
-		db:        dr.db,
-		columnMap: map[string]int{},
-		tableId:   tinfo.Id,
-		handle:    f,
-		Path:      tPath,
-		FileName:  tinfo.FileName,
+		columns:    tinfo.Columns,
+		db:         dr.db,
+		columnMap:  map[string]int{},
+		tableId:    tinfo.Id,
+		handle:     f,
+		handleLock: sync.RWMutex{},
+		Path:       tPath,
+		FileName:   tinfo.FileName,
+		Name:       name,
 	}
 	for n, d := range out.columns {
 		out.columnMap[d.Key] = n
@@ -242,6 +260,7 @@ func (dr *BSONDriver) Get(name string) (benchtop.TableStore, error) {
 	return out, nil
 }
 
+// Currently not used
 func (dr *BSONDriver) Delete(name string) error {
 	dr.Lock.Lock()
 	defer dr.Lock.Unlock()
@@ -267,7 +286,6 @@ func (dr *BSONDriver) Delete(name string) error {
 	}
 	delete(dr.Tables, name)
 	dr.dropTable(name)
-
 	return nil
 }
 
