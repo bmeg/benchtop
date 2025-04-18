@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/bmeg/benchtop"
 	"github.com/bmeg/benchtop/pebblebulk"
@@ -183,23 +184,36 @@ func (dr *BSONDriver) List() []string {
 func (dr *BSONDriver) Close() {
 	dr.Lock.Lock()
 	defer dr.Lock.Unlock()
+
 	log.Infoln("Closing BSONDriver...")
-	for name, table := range dr.Tables {
+	for tableName, table := range dr.Tables {
+		table.handleLock.Lock()
 		if table.handle != nil {
 			if syncErr := table.handle.Sync(); syncErr != nil {
-				log.Errorf("Error syncing table %s: %v", name, syncErr)
+				log.Errorf("Error syncing table %s handle: %v", tableName, syncErr)
 			}
 			if closeErr := table.handle.Close(); closeErr != nil {
-				log.Errorf("Error closing table %s: %v", name, closeErr)
+				log.Errorf("Error closing table %s handle: %v", tableName, closeErr)
 			} else {
-				log.Debugf("Closed table %s", name)
+				log.Debugf("Closed table %s", tableName)
 			}
-			table.handle = nil // Prevent reuse
+			table.handle = nil
 		}
+		table.handleLock.Unlock()
+		table.Pb = nil
 	}
-	if closeErr := dr.db.Close(); closeErr != nil {
-		log.Errorf("Error closing pebble db: %v", closeErr)
+	dr.Tables = make(map[string]*BSONTable)
+	if dr.db != nil {
+		if closeErr := dr.db.Close(); closeErr != nil {
+			log.Errorf("Error closing Pebble database: %v", closeErr)
+		}
+		dr.db = nil
+		time.Sleep(50 * time.Millisecond)
 	}
+	dr.Pb = nil
+	dr.Fields = make(map[string][]string)
+	log.Infof("Successfully closed BSONDriver for path %s", dr.base)
+	return
 }
 
 func (dr *BSONDriver) Get(name string) (benchtop.TableStore, error) {
@@ -246,6 +260,7 @@ func (dr *BSONDriver) Get(name string) (benchtop.TableStore, error) {
 	return out, nil
 }
 
+// Currently not used
 func (dr *BSONDriver) Delete(name string) error {
 	dr.Lock.Lock()
 	defer dr.Lock.Unlock()
@@ -271,7 +286,6 @@ func (dr *BSONDriver) Delete(name string) error {
 	}
 	delete(dr.Tables, name)
 	dr.dropTable(name)
-
 	return nil
 }
 
