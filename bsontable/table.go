@@ -85,7 +85,6 @@ func (b *BSONTable) AddRow(elem benchtop.Row) error {
 	b.addTableDeleteEntryInfo(nil, elem.Id, elem.TableName)
 	b.addTableEntryInfo(nil, elem.Id, uint64(offset), uint64(writesize))
 	return nil
-
 }
 
 func (b *BSONTable) GetRow(id []byte, fields ...string) (map[string]any, error) {
@@ -127,15 +126,12 @@ func (b *BSONTable) DeleteRow(name []byte) error {
 	if err != nil {
 		return err
 	}
-	b.handle.Seek(int64(offset+8), io.SeekStart)
-	_, err = b.handle.Write([]byte{0x00, 0x00, 0x00, 0x00})
-	if err != nil {
-		return err
+	b.handleLock.Lock()
+	if _, err := b.handle.WriteAt([]byte{0x00, 0x00, 0x00, 0x00}, int64(offset+8)); err != nil {
+		return fmt.Errorf("writeAt failed: %w", err)
 	}
-
-	posKey := benchtop.NewPosKey(b.tableId, name)
-	b.db.Delete(posKey, nil)
-
+	b.handleLock.Unlock()
+	b.db.Delete(benchtop.NewPosKey(b.tableId, name), nil)
 	return nil
 }
 
@@ -178,7 +174,7 @@ func (b *BSONTable) Compact() error {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		b.setIndices(inputChan)
+		b.setDataIndices(inputChan)
 	}()
 
 	for {
@@ -327,36 +323,40 @@ func (b *BSONTable) Scan(keys bool, filter []benchtop.FieldFilter, fields ...str
 
 	go func() {
 		defer close(out)
+		var offsetSizeData [8]byte
+		var sizeBytes [4]byte
+		rowData := make([]byte, 0)
+
 		for {
-			offsetSizeData := make([]byte, 8)
-			_, err := b.handle.Read(offsetSizeData)
-			if err == io.EOF {
-				break
+			_, err := b.handle.Read(offsetSizeData[:])
+			if err != nil {
+				if err == io.EOF {
+					break
+				}
+				return
 			}
+			nextOffset := binary.LittleEndian.Uint64(offsetSizeData[:])
+
+			_, err = b.handle.Read(sizeBytes[:])
 			if err != nil {
 				return
 			}
-
-			NextOffset := binary.LittleEndian.Uint64(offsetSizeData)
-
-			sizeBytes := make([]byte, 4)
-			_, err = b.handle.Read(sizeBytes)
-			if err != nil {
-				return
-			}
-
-			bSize := int32(binary.LittleEndian.Uint32(sizeBytes))
+			bSize := int32(binary.LittleEndian.Uint32(sizeBytes[:]))
 
 			// Elem has been deleted or at the table header in the begginning of the file skip it.
-			if bSize == 0 || int64(bSize) == int64(NextOffset)-8 {
-				_, err = b.handle.Seek(int64(NextOffset), io.SeekStart)
+			if bSize == 0 || int64(bSize) == int64(nextOffset)-8 {
+				_, err = b.handle.Seek(int64(nextOffset), io.SeekStart)
 				if err == io.EOF {
 					break
 				}
 				continue
 			}
-			rowData := make([]byte, bSize)
-			copy(rowData, sizeBytes)
+			if cap(rowData) < int(bSize) {
+				rowData = make([]byte, bSize)
+			} else {
+				rowData = rowData[:bSize]
+			}
+			copy(rowData, sizeBytes[:])
 
 			_, err = b.handle.Read(rowData[4:])
 			if err != nil {
@@ -370,10 +370,14 @@ func (b *BSONTable) Scan(keys bool, filter []benchtop.FieldFilter, fields ...str
 			columns := bd.Index(0).Value().Array()
 
 			vOut := map[string]any{}
+			var key string
+			if keys {
+				key = bd.Index(2).Value().StringValue()
+			}
 
 			if len(fields) == 0 {
 				if keys {
-					vOut["_key"] = bd.Index(2).Value().StringValue()
+					vOut["_key"] = key
 				}
 			} else {
 				for _, colName := range fields {
@@ -383,7 +387,7 @@ func (b *BSONTable) Scan(keys bool, filter []benchtop.FieldFilter, fields ...str
 						if filters.PassesFilters(unpack, filter) {
 							vOut[n.Key] = unpack
 							if keys {
-								vOut["_key"] = bd.Index(2).Value().StringValue()
+								vOut["_key"] = key
 							}
 						}
 					}
@@ -393,7 +397,7 @@ func (b *BSONTable) Scan(keys bool, filter []benchtop.FieldFilter, fields ...str
 				out <- vOut
 			}
 
-			_, err = b.handle.Seek(int64(NextOffset), io.SeekStart)
+			_, err = b.handle.Seek(int64(nextOffset), io.SeekStart)
 			if err == io.EOF {
 				break
 			}

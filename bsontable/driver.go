@@ -27,7 +27,8 @@ type BSONDriver struct {
 	db     *pebble.DB
 	Pb     *pebblebulk.PebbleKV
 	Tables map[string]*BSONTable
-	Fields map[string][]string
+	// Fields is defined like tableId, field
+	Fields map[string]map[string]struct{}
 }
 
 func NewBSONDriver(path string) (benchtop.TableDriver, error) {
@@ -48,7 +49,7 @@ func NewBSONDriver(path string) (benchtop.TableDriver, error) {
 			InsertCount:  0,
 			CompactLimit: uint32(1000),
 		},
-		Fields: map[string][]string{},
+		Fields: map[string]map[string]struct{}{},
 	}, nil
 }
 
@@ -72,8 +73,12 @@ func LoadBSONDriver(path string) (benchtop.TableDriver, error) {
 			InsertCount:  0,
 			CompactLimit: uint32(1000),
 		},
-		Fields: map[string][]string{},
+		Fields: map[string]map[string]struct{}{},
+		Lock:   sync.RWMutex{},
 	}
+
+	// load Field indices from disk
+	driver.LoadFields()
 
 	tableNames := driver.List()
 	for _, tableName := range tableNames {
@@ -116,7 +121,9 @@ func (dr *BSONDriver) New(name string, columns []benchtop.ColumnDef) (benchtop.T
 	dr.Lock.Lock()
 	defer dr.Lock.Unlock()
 
-	formattedName := util.PadToSixDigits(len(dr.Tables))
+	newId := dr.getMaxTablePrefix()
+	formattedName := util.PadToSixDigits(int(newId))
+
 	tPath := filepath.Join(dr.base, "TABLES", formattedName)
 	f, err := os.Create(tPath)
 	if err != nil {
@@ -137,7 +144,6 @@ func (dr *BSONDriver) New(name string, columns []benchtop.ColumnDef) (benchtop.T
 		out.columnMap[d.Key] = n
 	}
 
-	newId := dr.getMaxTablePrefix()
 	out.tableId = newId
 	if err := dr.addTable(newId, name, columns, formattedName); err != nil {
 		log.Errorf("Error: %s", err)
@@ -211,7 +217,7 @@ func (dr *BSONDriver) Close() {
 		time.Sleep(50 * time.Millisecond)
 	}
 	dr.Pb = nil
-	dr.Fields = make(map[string][]string)
+	dr.Fields = make(map[string]map[string]struct{})
 	log.Infof("Successfully closed BSONDriver for path %s", dr.base)
 	return
 }
@@ -297,14 +303,13 @@ func (dr *BSONDriver) DeleteAnyRow(name []byte) error {
 	if err != nil {
 		return err
 	}
-	dr.Lock.Lock()
+	closer.Close()
+
 	err = dr.Tables[string(rtasocval)].DeleteRow(name)
-	dr.Lock.Unlock()
 
 	if err != nil {
 		return err
 	}
-	closer.Close()
 	return nil
 }
 
@@ -399,16 +404,19 @@ func (dr *BSONDriver) BulkLoad(inputs chan *benchtop.Row, tx *pebblebulk.PebbleB
 
 				offsets := make([]uint64, len(bDatas)+1)
 				offsets[0] = uint64(startOffset)
+				totalLen := 0
 				for i, bData := range bDatas {
 					offsets[i+1] = offsets[i] + 8 + uint64(len(bData))
+					totalLen += 8 + len(bData)
 				}
 
-				var batchData []byte
+				batchData := make([]byte, totalLen)
+				pos := 0
 				for i, bData := range bDatas {
-					header := make([]byte, 8)
-					binary.LittleEndian.PutUint64(header, offsets[i+1])
-					batchData = append(batchData, header...)
-					batchData = append(batchData, bData...)
+					binary.LittleEndian.PutUint64(batchData[pos:pos+8], offsets[i+1])
+					pos += 8
+					copy(batchData[pos:pos+len(bData)], bData)
+					pos += len(bData)
 				}
 
 				_, err = table.handle.Write(batchData)
