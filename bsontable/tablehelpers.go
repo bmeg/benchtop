@@ -159,7 +159,7 @@ func (b *BSONTable) getBlockPos(id []byte) (uint64, uint64, error) {
 	return offset, size, nil
 }
 
-func (b *BSONTable) setIndices(inputs chan benchtop.Index) {
+func (b *BSONTable) setDataIndices(inputs chan benchtop.Index) {
 	for index := range inputs {
 		b.addTableEntryInfo(nil, index.Key, index.Position, index.Size)
 	}
