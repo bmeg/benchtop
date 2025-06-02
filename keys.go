@@ -3,8 +3,9 @@ package benchtop
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/json"
 
-	"go.mongodb.org/mongo-driver/bson"
+	"github.com/bmeg/grip/log"
 )
 
 // Vertex TableId
@@ -29,21 +30,27 @@ var FieldPrefix = []byte("F")
 var FieldSep = []byte(":")
 
 func FieldKey(label, field string, value any, rowID []byte) []byte {
-	valueBytes, _ := bson.Marshal(value)
+	valueBytes, err := json.Marshal(value)
+	if err != nil {
+		log.Infoln("FieldKey Marshal Err: ", err)
+	}
 	parts := [][]byte{
 		FieldPrefix,   // Static prefix
-		[]byte(label), // table label
 		[]byte(field), // table field
 		valueBytes,    // BSON-encoded value
+		[]byte(label), // label
 		rowID,         // Row ID
 	}
 	return bytes.Join(parts, FieldSep)
 }
 
-func FieldKeyParse(fieldKey []byte) (label string, field string, value any, rowID []byte) {
+func FieldKeyParse(fieldKey []byte) (field string, value any, label string, rowID []byte) {
 	parts := bytes.Split(fieldKey, FieldSep)
-	_ = bson.Unmarshal(parts[3], &value)
-	return string(parts[1]), string(parts[2]), value, parts[4]
+	err := json.Unmarshal(parts[2], &value)
+	if err != nil {
+		log.Infoln("FieldKey Unmarshal Err: ", err)
+	}
+	return string(parts[1]), value, string(parts[3]), parts[4]
 }
 
 func NewRowTableAsocKey(id []byte) []byte {

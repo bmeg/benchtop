@@ -60,15 +60,17 @@ func (b *BSONTable) Close() {
 ////////////////////////////////////////////////////////////////
 Unary single effect operations
 */
-func (b *BSONTable) AddRow(elem benchtop.Row) error {
+func (b *BSONTable) AddRow(elem benchtop.Row, tx *pebblebulk.PebbleBulk) error {
 	mData, err := b.packData(elem.Data, string(elem.Id))
 	if err != nil {
 		return err
 	}
+
 	bData, err := bson.Marshal(mData)
 	if err != nil {
 		return err
 	}
+
 	//append to end of block file
 	b.handleLock.Lock()
 	defer b.handleLock.Unlock()
@@ -81,9 +83,9 @@ func (b *BSONTable) AddRow(elem benchtop.Row) error {
 	if err != nil {
 		log.Errorf("write handler err in Load: bulkSet: %s", err)
 	}
+	b.addTableDeleteEntryInfo(tx, elem.Id, elem.TableName)
+	b.addTableEntryInfo(tx, elem.Id, uint64(offset), uint64(writesize))
 
-	b.addTableDeleteEntryInfo(nil, elem.Id, elem.TableName)
-	b.addTableEntryInfo(nil, elem.Id, uint64(offset), uint64(writesize))
 	return nil
 }
 
@@ -315,7 +317,7 @@ func (b *BSONTable) Scan(keys bool, filter []benchtop.FieldFilter, fields ...str
 	b.handleLock.RLock()
 	defer b.handleLock.RUnlock()
 
-	out := make(chan map[string]any, 10)
+	out := make(chan map[string]any, 100)
 	_, err := b.handle.Seek(0, io.SeekStart)
 	if err != nil {
 		return nil, err
@@ -336,7 +338,6 @@ func (b *BSONTable) Scan(keys bool, filter []benchtop.FieldFilter, fields ...str
 				return
 			}
 			nextOffset := binary.LittleEndian.Uint64(offsetSizeData[:])
-
 			_, err = b.handle.Read(sizeBytes[:])
 			if err != nil {
 				return

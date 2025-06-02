@@ -3,11 +3,11 @@ package bsontable
 import (
 	"bytes"
 	"fmt"
+	"encoding/json"
 
 	"github.com/bmeg/benchtop"
 	"github.com/bmeg/benchtop/pebblebulk"
 	"github.com/bmeg/grip/log"
-	"go.mongodb.org/mongo-driver/bson"
 )
 
 func (dr *BSONDriver) AddIndex(field string, value any, label string, rowId []byte) error {
@@ -23,11 +23,15 @@ func (dr *BSONDriver) AddIndex(field string, value any, label string, rowId []by
 }
 
 func (dr *BSONDriver) AddField(label, field string) error {
-	if _, exists := dr.Fields[label][field]; exists == false {
-		dr.Fields[label][field] = struct{}{}
-	} else {
+	innerMap, existsLabel := dr.Fields[label]
+	if !existsLabel {
+		innerMap = make(map[string]struct{})
+		dr.Fields[label] = innerMap
+	}
+	if _, existsField := innerMap[field]; existsField {
 		return fmt.Errorf("index label '%s' field '%s' already exists", label, field)
 	}
+	innerMap[field] = struct{}{}
 	return dr.db.Set(
 		benchtop.FieldKey(label, field, nil, nil),
 		[]byte{},
@@ -57,10 +61,11 @@ func (dr *BSONDriver) LoadFields() {
 	fPrefix := benchtop.FieldPrefix
 	dr.Pb.View(func(it *pebblebulk.PebbleIterator) error {
 		for it.Seek(fPrefix); it.Valid() && bytes.HasPrefix(it.Key(), fPrefix); it.Next() {
-			label, field, _, _ := benchtop.FieldKeyParse(it.Key())
+			field, _, label, _ := benchtop.FieldKeyParse(it.Key())
 			dr.Fields[label] = make(map[string]struct{})
 			dr.Fields[label][field] = struct{}{}
 		}
+		log.Debugf("Loaded %d label-fields from Indices", len(dr.Fields))
 		return nil
 	})
 }
@@ -76,11 +81,12 @@ func (dr *BSONDriver) ListFields() []FieldInfo {
 	var out []FieldInfo
 	dr.Pb.View(func(it *pebblebulk.PebbleIterator) error {
 		for it.Seek(fPrefix); it.Valid() && bytes.HasPrefix(it.Key(), fPrefix); it.Next() {
-			label, field, _, _ := benchtop.FieldKeyParse(it.Key())
+			field, _, label, _ := benchtop.FieldKeyParse(it.Key())
 			if _, exists := seenFields[label]; !exists {
 				seenFields[label] = make(map[string]struct{})
 				if _, exists := seenFields[label][field]; !exists {
-					out = append(out, FieldInfo{Label: label, Field: field})
+					// going to have a prefix attached to it "v_" or "e_" but user doesn't want to see this
+					out = append(out, FieldInfo{Label: label[2:], Field: field})
 					seenFields[label][field] = struct{}{}
 				}
 			}
@@ -90,11 +96,8 @@ func (dr *BSONDriver) ListFields() []FieldInfo {
 	return out
 }
 
-func (dr *BSONDriver) RowIdsByFieldValue(field string, value any) (chan string, error) {
-	valueBytes, err := bson.Marshal(value)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal value: %v", err)
-	}
+func (dr *BSONDriver) RowIdsByFieldValue(field string, value any) chan string {
+	valueBytes, _ := json.Marshal(value)
 	prefix := bytes.Join([][]byte{
 		benchtop.FieldPrefix,
 		[]byte(field),
@@ -104,8 +107,10 @@ func (dr *BSONDriver) RowIdsByFieldValue(field string, value any) (chan string, 
 	out := make(chan string, 100)
 	go func() {
 		defer close(out)
-		dr.Pb.View(func(it *pebblebulk.PebbleIterator) error {
+		err := dr.Pb.View(func(it *pebblebulk.PebbleIterator) error {
 			for it.Seek(prefix); it.Valid() && bytes.HasPrefix(it.Key(), prefix); it.Next() {
+				field, value, label, row := benchtop.FieldKeyParse(it.Key())
+				log.Debugln("Lookup - Found Key (hex):", field, value, label, row)
 				parts := bytes.Split(it.Key(), benchtop.FieldSep)
 				rowID := make([]byte, len(parts[4]))
 				copy(rowID, parts[4])
@@ -113,22 +118,24 @@ func (dr *BSONDriver) RowIdsByFieldValue(field string, value any) (chan string, 
 			}
 			return nil
 		})
-		return
+		if err != nil {
+			log.Errorf("Error in View for field %s: %s", field, err)
+		}
 	}()
-	return out, nil
+	return out
 }
 
 func (dr *BSONDriver) RowIdsByLabelFieldValue(label string, field string, value any) (chan string, error) {
-	valueBytes, err := bson.Marshal(value)
+	valueBytes, err := json.Marshal(value)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal value: %v", err)
 	}
 
 	prefix := bytes.Join([][]byte{
 		benchtop.FieldPrefix,
-		[]byte(label),
 		[]byte(field),
 		valueBytes,
+		[]byte(label),
 	}, benchtop.FieldSep)
 
 	out := make(chan string, 100)
@@ -146,7 +153,7 @@ func (dr *BSONDriver) RowIdsByLabelFieldValue(label string, field string, value 
 }
 
 func (dr *BSONDriver) GetIDsForLabel(label string) chan string {
-	out := make(chan string, 10)
+	out := make(chan string, 100)
 	go func() {
 		defer close(out)
 		table, err := dr.Get(label)

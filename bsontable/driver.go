@@ -319,8 +319,9 @@ func (dr *BSONDriver) BulkLoad(inputs chan *benchtop.Row, tx *pebblebulk.PebbleB
 	var wg sync.WaitGroup
 	tableChannels := make(map[string]chan *benchtop.Row)
 	metadataChan := make(chan struct {
-		table    *BSONTable
-		metadata []struct {
+		table          *BSONTable
+		fieldIndexKeys [][]byte
+		metadata       []struct {
 			id           string
 			offset, size uint64
 		}
@@ -333,6 +334,7 @@ func (dr *BSONDriver) BulkLoad(inputs chan *benchtop.Row, tx *pebblebulk.PebbleB
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			var fieldIndexKeys [][]byte
 			var metadata []struct {
 				id           string
 				offset, size uint64
@@ -347,13 +349,14 @@ func (dr *BSONDriver) BulkLoad(inputs chan *benchtop.Row, tx *pebblebulk.PebbleB
 				if err != nil {
 					localErr = multierror.Append(localErr, fmt.Errorf("failed to create table %s: %v", tableName, err))
 					metadataChan <- struct {
-						table    *BSONTable
-						metadata []struct {
+						table          *BSONTable
+						fieldIndexKeys [][]byte
+						metadata       []struct {
 							id           string
 							offset, size uint64
 						}
 						err error
-					}{nil, nil, localErr.ErrorOrNil()}
+					}{nil, nil, nil, localErr.ErrorOrNil()}
 					return
 				}
 				table = newTable.(*BSONTable)
@@ -377,6 +380,17 @@ func (dr *BSONDriver) BulkLoad(inputs chan *benchtop.Row, tx *pebblebulk.PebbleB
 				bDatas := make([][]byte, 0, batchSize)
 				ids := make([]string, 0, batchSize)
 				for _, row := range batch {
+
+
+					_, fieldsExist := dr.Fields[tableName]
+					if fieldsExist {
+						for field := range dr.Fields[tableName] {
+							// only top level values supported for now
+							if val, ok := row.Data[field]; ok {
+								fieldIndexKeys = append(fieldIndexKeys, benchtop.FieldKey(tableName, field, val, row.Id))
+							}
+						}
+					}
 					mData, err := table.packData(row.Data, string(row.Id))
 					if err != nil {
 						localErr = multierror.Append(localErr, fmt.Errorf("pack data error for table %s: %v", tableName, err))
@@ -435,15 +449,16 @@ func (dr *BSONDriver) BulkLoad(inputs chan *benchtop.Row, tx *pebblebulk.PebbleB
 					}{id, offsets[i], uint64(len(bDatas[i]))})
 				}
 			}
+
 			metadataChan <- struct {
-				table    *BSONTable
-				metadata []struct {
+				table          *BSONTable
+				fieldIndexKeys [][]byte
+				metadata       []struct {
 					id           string
 					offset, size uint64
 				}
 				err error
-			}{table, metadata, localErr.ErrorOrNil()}
-
+			}{table, fieldIndexKeys, metadata, localErr.ErrorOrNil()}
 		}()
 	}
 
@@ -470,8 +485,11 @@ func (dr *BSONDriver) BulkLoad(inputs chan *benchtop.Row, tx *pebblebulk.PebbleB
 					errs = multierror.Append(errs, meta.err)
 					continue
 				}
-				if meta.table == nil || len(meta.metadata) == 0 {
+				if meta.table == nil {
 					continue
+				}
+				for _, key := range meta.fieldIndexKeys {
+					tx.Set(key, []byte{}, nil)
 				}
 				for _, m := range meta.metadata {
 					meta.table.addTableDeleteEntryInfo(tx, []byte(m.id), meta.table.Name)

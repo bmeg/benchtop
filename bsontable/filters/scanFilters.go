@@ -1,9 +1,8 @@
 package filters
 
 import (
-	"strings"
-
 	"github.com/bmeg/benchtop"
+	"strings"
 )
 
 func PassesFilters(fieldValue any, filters []benchtop.FieldFilter) bool {
@@ -22,7 +21,7 @@ func applyFilterCondition(fieldValue any, filter benchtop.FieldFilter) bool {
 		if !ok {
 			return false
 		}
-		return applyStringOperator(v, filter.Operator, filterStr)
+		return applyOperator(v, filter.Operator, filterStr)
 	case int, int32, int64, float32, float64:
 		return applyNumericOperator(v, filter.Operator, filter.Value)
 	case bool:
@@ -36,24 +35,24 @@ func applyFilterCondition(fieldValue any, filter benchtop.FieldFilter) bool {
 	}
 }
 
-func applyStringOperator(fieldValue string, operator string, filterValue string) bool {
+func applyOperator(fieldValue string, operator benchtop.OperatorType, filterValue string) bool {
 	switch operator {
-	case "==":
+	case benchtop.OP_EQ:
 		return fieldValue == filterValue
-	case "!=":
+	case benchtop.OP_NEQ:
 		return fieldValue != filterValue
-	case "contains":
+	case benchtop.OP_CONTAINS:
 		return strings.Contains(fieldValue, filterValue)
-	case "startswith":
+	case benchtop.OP_STARTSWITH:
 		return strings.HasPrefix(fieldValue, filterValue)
-	case "endswith":
+	case benchtop.OP_ENDSWITH:
 		return strings.HasSuffix(fieldValue, filterValue)
 	default:
 		return false
 	}
 }
 
-func applyNumericOperator(fieldValue any, operator string, filterValue any) bool {
+func applyNumericOperator(fieldValue any, operator benchtop.OperatorType, filterValue any) bool {
 	// Convert the field value to a float for comparison purposes
 	var fieldFloat float64
 	switch v := fieldValue.(type) {
@@ -90,28 +89,28 @@ func applyNumericOperator(fieldValue any, operator string, filterValue any) bool
 
 	// Compare using the operator
 	switch operator {
-	case "==":
+	case benchtop.OpEqual:
 		return fieldFloat == filterFloat
-	case "!=":
+	case benchtop.OpNotEqual:
 		return fieldFloat != filterFloat
-	case ">":
+	case benchtop.OpGreaterThan:
 		return fieldFloat > filterFloat
-	case "<":
+	case benchtop.OpLessThan:
 		return fieldFloat < filterFloat
-	case ">=":
+	case benchtop.OpGreaterThanOrEqual:
 		return fieldFloat >= filterFloat
-	case "<=":
+	case benchtop.OpLessThanOrEqual:
 		return fieldFloat <= filterFloat
 	default:
 		return false
 	}
 }
 
-func applyBooleanOperator(fieldValue bool, operator string, filterValue bool) bool {
+func applyBooleanOperator(fieldValue bool, operator benchtop.OperatorType, filterValue bool) bool {
 	switch operator {
-	case "==":
+	case benchtop.OpEqual:
 		return fieldValue == filterValue
-	case "!=":
+	case benchtop.OpNotEqual:
 		return fieldValue != filterValue
 	default:
 		return false
