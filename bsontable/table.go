@@ -328,7 +328,7 @@ func (b *BSONTable) Scan(keys bool, filter []benchtop.FieldFilter, fields ...str
 		var offsetSizeData [8]byte
 		var sizeBytes [4]byte
 		rowData := make([]byte, 0)
-
+		fmt.Println("ENTERING SCAN++++++++++++++++++++++++++++++++++++++")
 		for {
 			_, err := b.handle.Read(offsetSizeData[:])
 			if err != nil {
@@ -370,33 +370,62 @@ func (b *BSONTable) Scan(keys bool, filter []benchtop.FieldFilter, fields ...str
 			}
 			columns := bd.Index(0).Value().Array()
 
-			vOut := map[string]any{}
 			var key string
 			if keys {
 				key = bd.Index(2).Value().StringValue()
 			}
 
-			if len(fields) == 0 {
-				if keys {
-					vOut["_key"] = key
-				}
-			} else {
-				for _, colName := range fields {
-					if i, ok := b.columnMap[colName]; ok {
-						n := b.columns[i]
-						unpack, _ := b.colUnpack(columns.Index(uint(i)), n.Type)
-						if filters.PassesFilters(unpack, filter) {
-							vOut[n.Key] = unpack
-							if keys {
-								vOut["_key"] = key
-							}
-						}
-					}
-				}
-			}
-			if len(vOut) > 0 {
-				out <- vOut
-			}
+			rowMap := make(map[string]any)
+
+            // Unpack named columns
+            for i, c := range b.columns {
+                unpack, err := b.colUnpack(columns.Index(uint(i)), c.Type)
+                if err != nil {
+                    continue // Skip invalid column data
+                }
+                rowMap[c.Key] = unpack
+            }
+
+            // Unpack 'other data'
+            var otherMap map[string]any
+            err = bson.Unmarshal(bd.Index(1).Value().Document(), &otherMap)
+            if err != nil {
+                continue // Skip if 'other data' cannot be unmarshaled
+            }
+            for k, v := range otherMap {
+                rowMap[k] = v
+            }
+
+            // Add key to rowMap if requested
+            if keys {
+                rowMap["_key"] = key
+            }
+
+            // Step 2: Apply filters to the entire row
+            if len(filter) == 0 || filters.PassesFilters(rowMap, filter) {
+                // Step 3: Construct output based on fields
+                vOut := make(map[string]any)
+                if len(fields) == 0 {
+                    // Include all fields when fields is empty
+                    for k, v := range rowMap {
+                        vOut[k] = v
+                    }
+                } else {
+                    // Include only specified fields
+                    for _, colName := range fields {
+                        if val, ok := rowMap[colName]; ok {
+                            vOut[colName] = val
+                        }
+                    }
+                    if keys && vOut["_key"] == nil { // Ensure key is included if requested
+                        vOut["_key"] = key
+                    }
+                }
+                if len(vOut) > 0 {
+                	fmt.Println("PASSING VOUT+++++++++")
+                    out <- vOut
+                }
+            }
 
 			_, err = b.handle.Seek(int64(nextOffset), io.SeekStart)
 			if err == io.EOF {

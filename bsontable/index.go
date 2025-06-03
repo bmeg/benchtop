@@ -10,14 +10,17 @@ import (
 const bufferSize = 100
 
 // List all unique col names held by all tables
-func (b *BSONDriver) GetAllColNames() chan string {
+func (dr *BSONDriver) GetAllColNames() chan string {
+	dr.Lock.RLock()
+	defer dr.Lock.RUnlock()
+
 	out := make(chan string, bufferSize)
 	go func() {
 		defer close(out)
 		prefix := []byte{benchtop.TablePrefix}
-		b.Pb.View(func(it *pebblebulk.PebbleIterator) error {
+		dr.Pb.View(func(it *pebblebulk.PebbleIterator) error {
 			for it.Seek(prefix); it.Valid() && bytes.HasPrefix(it.Key(), prefix); it.Next() {
-				info, err := b.getTableInfo(string(it.Key()))
+				info, err := dr.getTableInfo(string(it.Key()))
 				if err != nil {
 					continue
 				}
@@ -31,12 +34,15 @@ func (b *BSONDriver) GetAllColNames() chan string {
 	return out
 }
 
-func (b *BSONDriver) GetLabels(edges bool) chan string {
+func (dr *BSONDriver) GetLabels(edges bool) chan string {
+	dr.Lock.RLock()
+	defer dr.Lock.RUnlock()
+
 	out := make(chan string, bufferSize)
 	go func() {
 		defer close(out)
 		prefix := []byte{benchtop.TablePrefix}
-		b.Pb.View(func(it *pebblebulk.PebbleIterator) error {
+		dr.Pb.View(func(it *pebblebulk.PebbleIterator) error {
 			for it.Seek(prefix); it.Valid() && bytes.HasPrefix(it.Key(), prefix); it.Next() {
 				strKey := string(benchtop.ParseTableKey(it.Key()))
 				if (edges && strKey[:2] == "e_") || (!edges && strKey[:2] == "v_") {

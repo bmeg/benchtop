@@ -2,27 +2,54 @@ package bsontable
 
 import (
 	"bytes"
-	"fmt"
 	"encoding/json"
+	"fmt"
 
 	"github.com/bmeg/benchtop"
 	"github.com/bmeg/benchtop/pebblebulk"
 	"github.com/bmeg/grip/log"
 )
 
-func (dr *BSONDriver) AddIndex(field string, value any, label string, rowId []byte) error {
-	/* Add Index expects that a field has been added already so if it doesn't exist it will err */
-	if _, exists := dr.Fields[label][field]; exists == false {
-		return fmt.Errorf("Index label '%s' and field '%s' does not exist", label, field)
-	}
-	return dr.db.Set(
-		benchtop.FieldKey(label, field, value, rowId),
-		[]byte{},
-		nil,
-	)
-}
-
 func (dr *BSONDriver) AddField(label, field string) error {
+	dr.Lock.RLock()
+	defer dr.Lock.RUnlock()
+	foundTable, ok := dr.Tables[label]
+	log.Debugf("Table with label '%s' not found when adding grids Field", label)
+	if !ok {
+		// If the table doesn't yet exist, write the index Key stub.
+		err := dr.db.Set(
+			benchtop.FieldKey(label, field, nil, nil),
+			[]byte{},
+			nil,
+		)
+		if err != nil {
+			return err
+		}
+	} else {
+		rowChan, err := foundTable.Scan(true, nil)
+		if err != nil {
+			return err
+		}
+		log.Infoln("HELLO WE HERE", rowChan)
+
+		err = dr.Pb.BulkWrite(func(tx *pebblebulk.PebbleBulk) error {
+			for r := range rowChan {
+				log.Infoln("R: ", r)
+				err := tx.Set(benchtop.FieldKey(label, field, r[field], []byte(r["_key"].(string))),
+					[]byte{},
+					nil,
+				)
+				if err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+	}
+
 	innerMap, existsLabel := dr.Fields[label]
 	if !existsLabel {
 		innerMap = make(map[string]struct{})
@@ -32,33 +59,31 @@ func (dr *BSONDriver) AddField(label, field string) error {
 		return fmt.Errorf("index label '%s' field '%s' already exists", label, field)
 	}
 	innerMap[field] = struct{}{}
-	return dr.db.Set(
-		benchtop.FieldKey(label, field, nil, nil),
-		[]byte{},
-		nil,
-	)
+
+	return nil
 }
 
-func (dr *BSONDriver) RemoveField(label, field string) error {
+func (dr *BSONDriver) RemoveField(label string, field string, value any, rowId []byte) error {
+	dr.Lock.Lock()
+	defer dr.Lock.Unlock()
 	delete(dr.Fields[label], field)
 	delete(dr.Fields, label)
-	return dr.db.Delete(
-		benchtop.FieldKey(label, field, nil, nil),
+	key := benchtop.FieldKey(label, field, value, rowId)
+	err := dr.db.DeleteRange(
+		key,
+		calculateUpperBound(key),
 		nil,
 	)
-}
-
-func (dr *BSONDriver) RemoveIndex(field string, value any, label string, rowId []byte) error {
-	delete(dr.Fields[label], field)
-	delete(dr.Fields, label)
-	return dr.db.Delete(
-		benchtop.FieldKey(label, field, value, rowId),
-		nil,
-	)
+	if err != nil {
+		return err
+	}
+	return nil
 }
 
 func (dr *BSONDriver) LoadFields() {
 	fPrefix := benchtop.FieldPrefix
+	dr.Lock.Lock()
+	defer dr.Lock.Unlock()
 	dr.Pb.View(func(it *pebblebulk.PebbleIterator) error {
 		for it.Seek(fPrefix); it.Valid() && bytes.HasPrefix(it.Key(), fPrefix); it.Next() {
 			field, _, label, _ := benchtop.FieldKeyParse(it.Key())
@@ -97,6 +122,9 @@ func (dr *BSONDriver) ListFields() []FieldInfo {
 }
 
 func (dr *BSONDriver) RowIdsByFieldValue(field string, value any) chan string {
+	dr.Lock.RLock()
+	defer dr.Lock.RUnlock()
+
 	valueBytes, _ := json.Marshal(value)
 	prefix := bytes.Join([][]byte{
 		benchtop.FieldPrefix,
@@ -126,6 +154,9 @@ func (dr *BSONDriver) RowIdsByFieldValue(field string, value any) chan string {
 }
 
 func (dr *BSONDriver) RowIdsByLabelFieldValue(label string, field string, value any) (chan string, error) {
+	dr.Lock.RLock()
+	defer dr.Lock.RUnlock()
+
 	valueBytes, err := json.Marshal(value)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal value: %v", err)
@@ -153,6 +184,9 @@ func (dr *BSONDriver) RowIdsByLabelFieldValue(label string, field string, value 
 }
 
 func (dr *BSONDriver) GetIDsForLabel(label string) chan string {
+	dr.Lock.RLock()
+	defer dr.Lock.RUnlock()
+
 	out := make(chan string, 100)
 	go func() {
 		defer close(out)
@@ -175,4 +209,21 @@ func (dr *BSONDriver) GetIDsForLabel(label string) chan string {
 		}
 	}()
 	return out
+}
+
+func calculateUpperBound(prefix []byte) []byte {
+	// Finds the last possible key that starts with the prefix specified
+	upperBound := make([]byte, len(prefix))
+	copy(upperBound, prefix)
+	for i := len(upperBound) - 1; i >= 0; i-- {
+		upperBound[i]++
+		if upperBound[i] != 0 {
+			return upperBound
+		}
+	}
+	allZeros := make([]byte, len(upperBound))
+	if bytes.Equal(upperBound, allZeros) && len(upperBound) > 0 {
+		return append(prefix, 0x00)
+	}
+	return upperBound
 }

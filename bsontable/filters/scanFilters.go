@@ -1,117 +1,234 @@
 package filters
 
 import (
+	"reflect"
+
 	"github.com/bmeg/benchtop"
-	"strings"
+	"github.com/bmeg/grip/log"
+	"github.com/spf13/cast"
 )
 
-func PassesFilters(fieldValue any, filters []benchtop.FieldFilter) bool {
+func PassesFilters(row any, filters []benchtop.FieldFilter) bool {
 	for _, filter := range filters {
-		if !applyFilterCondition(fieldValue, filter) {
+		if !applyFilterCondition(row, filter) {
 			return false
 		}
 	}
 	return true
 }
 
-func applyFilterCondition(fieldValue any, filter benchtop.FieldFilter) bool {
-	switch v := fieldValue.(type) {
-	case string:
-		filterStr, ok := filter.Value.(string)
-		if !ok {
-			return false
-		}
-		return applyOperator(v, filter.Operator, filterStr)
-	case int, int32, int64, float32, float64:
-		return applyNumericOperator(v, filter.Operator, filter.Value)
-	case bool:
-		filterBool, ok := filter.Value.(bool)
-		if !ok {
-			return false
-		}
-		return applyBooleanOperator(v, filter.Operator, filterBool)
-	default:
+// This function is largely the same and is adapted from bmeg/grip/engine/logic/match.go MatchesCondition function
+func applyFilterCondition(row any, cond benchtop.FieldFilter) bool {
+	val, ok := row.(map[string]any)[cond.Field]
+	condVal := cond.Value
+	// If the field does not exist then the filter does not pass
+	if !ok {
 		return false
 	}
-}
 
-func applyOperator(fieldValue string, operator benchtop.OperatorType, filterValue string) bool {
-	switch operator {
+	if (val == nil || cond.Value == nil) &&
+		cond.Operator != benchtop.OP_EQ &&
+		cond.Operator != benchtop.OP_NEQ &&
+		cond.Operator != benchtop.OP_WITHIN &&
+		cond.Operator != benchtop.OP_WITHOUT &&
+		cond.Operator != benchtop.OP_CONTAINS {
+		return false
+	}
+
+	//log.Debugf("scanFilters match: %s %s %s", val, condVal, cond.Field)
+
+	switch cond.Operator {
 	case benchtop.OP_EQ:
-		return fieldValue == filterValue
+		return reflect.DeepEqual(val, condVal)
+
 	case benchtop.OP_NEQ:
-		return fieldValue != filterValue
+		return !reflect.DeepEqual(val, condVal)
+
+	case benchtop.OP_GT:
+		valN, err := cast.ToFloat64E(val)
+		if err != nil {
+			return false
+		}
+		condN, err := cast.ToFloat64E(condVal)
+		if err != nil {
+			return false
+		}
+		return valN > condN
+
+	case benchtop.OP_GTE:
+		valN, err := cast.ToFloat64E(val)
+		if err != nil {
+			return false
+		}
+		condN, err := cast.ToFloat64E(condVal)
+		if err != nil {
+			return false
+		}
+		return valN >= condN
+
+	case benchtop.OP_LT:
+		//log.Debugf("match: %#v %#v %s", condVal, val, cond.Key)
+		valN, err := cast.ToFloat64E(val)
+		//log.Debugf("CAST: ", valN, "ERROR: ", err)
+		if err != nil {
+			return false
+		}
+		condN, err := cast.ToFloat64E(condVal)
+		if err != nil {
+			return false
+		}
+		return valN < condN
+
+	case benchtop.OP_LTE:
+		valN, err := cast.ToFloat64E(val)
+		if err != nil {
+			return false
+		}
+		condN, err := cast.ToFloat64E(condVal)
+		if err != nil {
+			return false
+		}
+		return valN <= condN
+
+	case benchtop.OP_INSIDE:
+		vals, err := cast.ToSliceE(condVal)
+		if err != nil {
+			log.Debugf("UserError: could not cast INSIDE condition value: %v", err)
+			return false
+		}
+		if len(vals) != 2 {
+			log.Debugf("UserError: expected slice of length 2 not %v for INSIDE condition value", len(vals))
+			return false
+		}
+		lower, err := cast.ToFloat64E(vals[0])
+		if err != nil {
+			log.Debugf("UserError: could not cast lower INSIDE condition value: %v", err)
+			return false
+		}
+		upper, err := cast.ToFloat64E(vals[1])
+		if err != nil {
+			log.Debugf("UserError: could not cast upper INSIDE condition value: %v", err)
+			return false
+		}
+		valF, err := cast.ToFloat64E(val)
+		if err != nil {
+			log.Debugf("UserError: could not cast INSIDE value: %v", err)
+			return false
+		}
+		return valF > lower && valF < upper
+
+	case benchtop.OP_OUTSIDE:
+		vals, err := cast.ToSliceE(condVal)
+		if err != nil {
+			log.Debugf("UserError: could not cast OUTSIDE condition value: %v", err)
+			return false
+		}
+		if len(vals) != 2 {
+			log.Debugf("UserError: expected slice of length 2 not %v for OUTSIDE condition value", len(vals))
+			return false
+		}
+		lower, err := cast.ToFloat64E(vals[0])
+		if err != nil {
+			log.Debugf("UserError: could not cast lower OUTSIDE condition value: %v", err)
+			return false
+		}
+		upper, err := cast.ToFloat64E(vals[1])
+		if err != nil {
+			log.Debugf("UserError: could not cast upper OUTSIDE condition value: %v", err)
+			return false
+		}
+		valF, err := cast.ToFloat64E(val)
+		if err != nil {
+			log.Debugf("UserError: could not cast OUTSIDE value: %v", err)
+			return false
+		}
+		return valF < lower || valF > upper
+
+	case benchtop.OP_BETWEEN:
+		vals, err := cast.ToSliceE(condVal)
+		if err != nil {
+			log.Debugf("UserError: could not cast BETWEEN condition value: %v", err)
+			return false
+		}
+		if len(vals) != 2 {
+			log.Debugf("UserError: expected slice of length 2 not %v for BETWEEN condition value", len(vals))
+			return false
+		}
+		lower, err := cast.ToFloat64E(vals[0])
+		if err != nil {
+			log.Debugf("UserError: could not cast lower BETWEEN condition value: %v", err)
+			return false
+		}
+		upper, err := cast.ToFloat64E(vals[1])
+		if err != nil {
+			log.Debugf("UserError: could not cast upper BETWEEN condition value: %v", err)
+			return false
+		}
+		valF, err := cast.ToFloat64E(val)
+		if err != nil {
+			log.Debugf("UserError: could not cast BETWEEN value: %v", err)
+			return false
+		}
+		return valF >= lower && valF < upper
+
+	case benchtop.OP_WITHIN:
+		found := false
+		switch condVal := condVal.(type) {
+		case []interface{}:
+			for _, v := range condVal {
+				if reflect.DeepEqual(val, v) {
+					found = true
+				}
+			}
+
+		case nil:
+			found = false
+
+		default:
+			log.Debugf("UserError: expected slice not %T for WITHIN condition value", condVal)
+		}
+
+		return found
+
+	case benchtop.OP_WITHOUT:
+		found := false
+		switch condVal := condVal.(type) {
+		case []interface{}:
+			for _, v := range condVal {
+				if reflect.DeepEqual(val, v) {
+					found = true
+				}
+			}
+
+		case nil:
+			found = false
+
+		default:
+			log.Debugf("UserError: expected slice not %T for WITHOUT condition value", condVal)
+
+		}
+
+		return !found
+
 	case benchtop.OP_CONTAINS:
-		return strings.Contains(fieldValue, filterValue)
-	case benchtop.OP_STARTSWITH:
-		return strings.HasPrefix(fieldValue, filterValue)
-	case benchtop.OP_ENDSWITH:
-		return strings.HasSuffix(fieldValue, filterValue)
-	default:
-		return false
-	}
-}
+		found := false
+		switch val := val.(type) {
+		case []interface{}:
+			for _, v := range val {
+				if reflect.DeepEqual(v, condVal) {
+					found = true
+				}
+			}
 
-func applyNumericOperator(fieldValue any, operator benchtop.OperatorType, filterValue any) bool {
-	// Convert the field value to a float for comparison purposes
-	var fieldFloat float64
-	switch v := fieldValue.(type) {
-	case int:
-		fieldFloat = float64(v)
-	case int32:
-		fieldFloat = float64(v)
-	case int64:
-		fieldFloat = float64(v)
-	case float32:
-		fieldFloat = float64(v)
-	case float64:
-		fieldFloat = v
-	default:
-		return false
-	}
+		case nil:
+			found = false
 
-	// Convert filterValue to float
-	var filterFloat float64
-	switch v := filterValue.(type) {
-	case int:
-		filterFloat = float64(v)
-	case int32:
-		filterFloat = float64(v)
-	case int64:
-		filterFloat = float64(v)
-	case float32:
-		filterFloat = float64(v)
-	case float64:
-		filterFloat = v
-	default:
-		return false
-	}
+		default:
+			log.Debugf("UserError: unknown condition value type %T for CONTAINS condition", val)
+		}
 
-	// Compare using the operator
-	switch operator {
-	case benchtop.OpEqual:
-		return fieldFloat == filterFloat
-	case benchtop.OpNotEqual:
-		return fieldFloat != filterFloat
-	case benchtop.OpGreaterThan:
-		return fieldFloat > filterFloat
-	case benchtop.OpLessThan:
-		return fieldFloat < filterFloat
-	case benchtop.OpGreaterThanOrEqual:
-		return fieldFloat >= filterFloat
-	case benchtop.OpLessThanOrEqual:
-		return fieldFloat <= filterFloat
-	default:
-		return false
-	}
-}
+		return found
 
-func applyBooleanOperator(fieldValue bool, operator benchtop.OperatorType, filterValue bool) bool {
-	switch operator {
-	case benchtop.OpEqual:
-		return fieldValue == filterValue
-	case benchtop.OpNotEqual:
-		return fieldValue != filterValue
 	default:
 		return false
 	}

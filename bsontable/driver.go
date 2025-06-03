@@ -298,8 +298,8 @@ func (dr *BSONDriver) Delete(name string) error {
 func (dr *BSONDriver) DeleteAnyRow(name []byte) error {
 	rtasockey := benchtop.NewRowTableAsocKey(name)
 	dr.Lock.Lock()
+	defer dr.Lock.Unlock()
 	rtasocval, closer, err := dr.db.Get(rtasockey)
-	dr.Lock.Unlock()
 	if err != nil {
 		return err
 	}
@@ -328,7 +328,10 @@ func (dr *BSONDriver) BulkLoad(inputs chan *benchtop.Row, tx *pebblebulk.PebbleB
 		err error
 	}, 100)
 
-	startTableGoroutine := func(tableName string) {
+	snap := dr.Pb.Db.NewSnapshot()
+	defer snap.Close()
+
+	startTableGoroutine := func(tableName string, snapshot *pebble.Snapshot) {
 		ch := make(chan *benchtop.Row, 100)
 		tableChannels[tableName] = ch
 		wg.Add(1)
@@ -380,8 +383,6 @@ func (dr *BSONDriver) BulkLoad(inputs chan *benchtop.Row, tx *pebblebulk.PebbleB
 				bDatas := make([][]byte, 0, batchSize)
 				ids := make([]string, 0, batchSize)
 				for _, row := range batch {
-
-
 					_, fieldsExist := dr.Fields[tableName]
 					if fieldsExist {
 						for field := range dr.Fields[tableName] {
@@ -401,8 +402,17 @@ func (dr *BSONDriver) BulkLoad(inputs chan *benchtop.Row, tx *pebblebulk.PebbleB
 						localErr = multierror.Append(localErr, fmt.Errorf("marshal data error for table %s: %v", tableName, err))
 						continue
 					}
-					bDatas = append(bDatas, bData)
-					ids = append(ids, string(row.Id))
+
+					info, err := table.getTableEntryInfo(snapshot, row.Id)
+					if err != nil {
+						localErr = multierror.Append(localErr, fmt.Errorf("error getting entry info for %s: %v", row.Id, err))
+						continue
+					}
+
+					if info == nil {
+						bDatas = append(bDatas, bData)
+						ids = append(ids, string(row.Id))
+					}
 				}
 				if len(bDatas) == 0 {
 					continue
@@ -465,7 +475,7 @@ func (dr *BSONDriver) BulkLoad(inputs chan *benchtop.Row, tx *pebblebulk.PebbleB
 	for row := range inputs {
 		tableName := row.TableName
 		if _, exists := tableChannels[tableName]; !exists {
-			startTableGoroutine(tableName)
+			startTableGoroutine(tableName, snap)
 		}
 		tableChannels[tableName] <- row
 	}
