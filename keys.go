@@ -3,6 +3,9 @@ package benchtop
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/json"
+
+	"github.com/bmeg/grip/log"
 )
 
 // Vertex TableId
@@ -24,15 +27,30 @@ var PosPrefix = byte('P')
 // key: F
 // used for indexing specific field values in kvgraph
 var FieldPrefix = []byte("F")
+var FieldSep = []byte(":")
 
-func FieldKey(field string) []byte {
-	return bytes.Join([][]byte{FieldPrefix, []byte(field)}, []byte{0})
+func FieldKey(label, field string, value any, rowID []byte) []byte {
+	valueBytes, err := json.Marshal(value)
+	if err != nil {
+		log.Infoln("FieldKey Marshal Err: ", err)
+	}
+	parts := [][]byte{
+		FieldPrefix,   // Static prefix
+		[]byte(field), // table field
+		valueBytes,    // BSON-encoded value
+		[]byte(label), // label
+		rowID,         // Row ID
+	}
+	return bytes.Join(parts, FieldSep)
 }
 
-func FieldKeyParse(key []byte) string {
-	tmp := bytes.Split(key, []byte{0})
-	field := string(tmp[1])
-	return field
+func FieldKeyParse(fieldKey []byte) (field string, value any, label string, rowID []byte) {
+	parts := bytes.Split(fieldKey, FieldSep)
+	err := json.Unmarshal(parts[2], &value)
+	if err != nil {
+		log.Infoln("FieldKey Unmarshal Err: ", err)
+	}
+	return string(parts[1]), value, string(parts[3]), parts[4]
 }
 
 func NewRowTableAsocKey(id []byte) []byte {
@@ -80,17 +98,17 @@ func ParsePosKey(key []byte) (uint32, []byte) {
 }
 
 func NewPosKeyPrefix(table uint32) []byte {
-	out := make([]byte, 5)
+	var out [5]byte
 	out[0] = PosPrefix
 	binary.LittleEndian.PutUint32(out[1:], table)
-	return out
+	return out[:]
 }
 
 func NewPosValue(offset uint64, size uint64) []byte {
-	out := make([]byte, 64)
-	binary.LittleEndian.PutUint64(out, offset)
+	var out [64]byte
+	binary.LittleEndian.PutUint64(out[:], offset)
 	binary.LittleEndian.PutUint64(out[8:], size)
-	return out
+	return out[:]
 }
 
 func ParsePosValue(v []byte) (uint64, uint64) {

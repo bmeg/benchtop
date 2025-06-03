@@ -2,40 +2,192 @@ package bsontable
 
 import (
 	"bytes"
-	"strings"
+	"encoding/json"
+	"fmt"
 
 	"github.com/bmeg/benchtop"
 	"github.com/bmeg/benchtop/pebblebulk"
 	"github.com/bmeg/grip/log"
 )
 
-func (dr *BSONDriver) AddField(path string) error {
-	fk := benchtop.FieldKey(path)
-	dr.Fields[path] = strings.Split(path, ".")
-	return dr.db.Set(fk, []byte{}, nil)
+func (dr *BSONDriver) AddField(label, field string) error {
+	dr.Lock.RLock()
+	defer dr.Lock.RUnlock()
+	foundTable, ok := dr.Tables[label]
+	log.Debugf("Table with label '%s' not found when adding grids Field", label)
+	if !ok {
+		// If the table doesn't yet exist, write the index Key stub.
+		err := dr.db.Set(
+			benchtop.FieldKey(label, field, nil, nil),
+			[]byte{},
+			nil,
+		)
+		if err != nil {
+			return err
+		}
+	} else {
+		rowChan, err := foundTable.Scan(true, nil)
+		if err != nil {
+			return err
+		}
+		log.Infoln("HELLO WE HERE", rowChan)
+
+		err = dr.Pb.BulkWrite(func(tx *pebblebulk.PebbleBulk) error {
+			for r := range rowChan {
+				log.Infoln("R: ", r)
+				err := tx.Set(benchtop.FieldKey(label, field, r[field], []byte(r["_key"].(string))),
+					[]byte{},
+					nil,
+				)
+				if err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+	}
+
+	innerMap, existsLabel := dr.Fields[label]
+	if !existsLabel {
+		innerMap = make(map[string]struct{})
+		dr.Fields[label] = innerMap
+	}
+	if _, existsField := innerMap[field]; existsField {
+		return fmt.Errorf("index label '%s' field '%s' already exists", label, field)
+	}
+	innerMap[field] = struct{}{}
+
+	return nil
 }
 
-func (dr *BSONDriver) RemoveField(path string) error {
-	fk := benchtop.FieldKey(path)
-	delete(dr.Fields, path)
-	return dr.db.Delete(fk, nil)
+func (dr *BSONDriver) RemoveField(label string, field string, value any, rowId []byte) error {
+	dr.Lock.Lock()
+	defer dr.Lock.Unlock()
+	delete(dr.Fields[label], field)
+	delete(dr.Fields, label)
+	key := benchtop.FieldKey(label, field, value, rowId)
+	err := dr.db.DeleteRange(
+		key,
+		calculateUpperBound(key),
+		nil,
+	)
+	if err != nil {
+		return err
+	}
+	return nil
 }
 
-func (dr *BSONDriver) ListFields() []string {
-	out := make([]string, 0, 10)
+func (dr *BSONDriver) LoadFields() {
 	fPrefix := benchtop.FieldPrefix
+	dr.Lock.Lock()
+	defer dr.Lock.Unlock()
 	dr.Pb.View(func(it *pebblebulk.PebbleIterator) error {
 		for it.Seek(fPrefix); it.Valid() && bytes.HasPrefix(it.Key(), fPrefix); it.Next() {
-			field := benchtop.FieldKeyParse(it.Key())
-			out = append(out, field)
+			field, _, label, _ := benchtop.FieldKeyParse(it.Key())
+			dr.Fields[label] = make(map[string]struct{})
+			dr.Fields[label][field] = struct{}{}
+		}
+		log.Debugf("Loaded %d label-fields from Indices", len(dr.Fields))
+		return nil
+	})
+}
+
+type FieldInfo struct {
+	Label string
+	Field string
+}
+
+func (dr *BSONDriver) ListFields() []FieldInfo {
+	seenFields := make(map[string]map[string]struct{})
+	fPrefix := benchtop.FieldPrefix
+	var out []FieldInfo
+	dr.Pb.View(func(it *pebblebulk.PebbleIterator) error {
+		for it.Seek(fPrefix); it.Valid() && bytes.HasPrefix(it.Key(), fPrefix); it.Next() {
+			field, _, label, _ := benchtop.FieldKeyParse(it.Key())
+			if _, exists := seenFields[label]; !exists {
+				seenFields[label] = make(map[string]struct{})
+				if _, exists := seenFields[label][field]; !exists {
+					// going to have a prefix attached to it "v_" or "e_" but user doesn't want to see this
+					out = append(out, FieldInfo{Label: label[2:], Field: field})
+					seenFields[label][field] = struct{}{}
+				}
+			}
 		}
 		return nil
 	})
 	return out
 }
 
+func (dr *BSONDriver) RowIdsByFieldValue(field string, value any) chan string {
+	dr.Lock.RLock()
+	defer dr.Lock.RUnlock()
+
+	valueBytes, _ := json.Marshal(value)
+	prefix := bytes.Join([][]byte{
+		benchtop.FieldPrefix,
+		[]byte(field),
+		valueBytes,
+	}, benchtop.FieldSep)
+
+	out := make(chan string, 100)
+	go func() {
+		defer close(out)
+		err := dr.Pb.View(func(it *pebblebulk.PebbleIterator) error {
+			for it.Seek(prefix); it.Valid() && bytes.HasPrefix(it.Key(), prefix); it.Next() {
+				field, value, label, row := benchtop.FieldKeyParse(it.Key())
+				log.Debugln("Lookup - Found Key (hex):", field, value, label, row)
+				parts := bytes.Split(it.Key(), benchtop.FieldSep)
+				rowID := make([]byte, len(parts[4]))
+				copy(rowID, parts[4])
+				out <- string(rowID)
+			}
+			return nil
+		})
+		if err != nil {
+			log.Errorf("Error in View for field %s: %s", field, err)
+		}
+	}()
+	return out
+}
+
+func (dr *BSONDriver) RowIdsByLabelFieldValue(label string, field string, value any) (chan string, error) {
+	dr.Lock.RLock()
+	defer dr.Lock.RUnlock()
+
+	valueBytes, err := json.Marshal(value)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal value: %v", err)
+	}
+
+	prefix := bytes.Join([][]byte{
+		benchtop.FieldPrefix,
+		[]byte(field),
+		valueBytes,
+		[]byte(label),
+	}, benchtop.FieldSep)
+
+	out := make(chan string, 100)
+	go func() {
+		defer close(out)
+		dr.Pb.View(func(it *pebblebulk.PebbleIterator) error {
+			for it.Seek(prefix); it.Valid() && bytes.HasPrefix(it.Key(), prefix); it.Next() {
+				out <- string(bytes.Split(it.Key(), benchtop.FieldSep)[4])
+			}
+			return nil
+		})
+		return
+	}()
+	return out, nil
+}
+
 func (dr *BSONDriver) GetIDsForLabel(label string) chan string {
-	out := make(chan string, 10)
+	dr.Lock.RLock()
+	defer dr.Lock.RUnlock()
+
+	out := make(chan string, 100)
 	go func() {
 		defer close(out)
 		table, err := dr.Get(label)
@@ -57,4 +209,21 @@ func (dr *BSONDriver) GetIDsForLabel(label string) chan string {
 		}
 	}()
 	return out
+}
+
+func calculateUpperBound(prefix []byte) []byte {
+	// Finds the last possible key that starts with the prefix specified
+	upperBound := make([]byte, len(prefix))
+	copy(upperBound, prefix)
+	for i := len(upperBound) - 1; i >= 0; i-- {
+		upperBound[i]++
+		if upperBound[i] != 0 {
+			return upperBound
+		}
+	}
+	allZeros := make([]byte, len(upperBound))
+	if bytes.Equal(upperBound, allZeros) && len(upperBound) > 0 {
+		return append(prefix, 0x00)
+	}
+	return upperBound
 }

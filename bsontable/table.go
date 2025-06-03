@@ -32,7 +32,6 @@ type BSONTable struct {
 	handleLock sync.RWMutex
 	Path       string
 	Name       string
-	tType      byte
 	filePool   chan *os.File
 	FileName   string
 }
@@ -61,15 +60,17 @@ func (b *BSONTable) Close() {
 ////////////////////////////////////////////////////////////////
 Unary single effect operations
 */
-func (b *BSONTable) AddRow(elem benchtop.Row) error {
+func (b *BSONTable) AddRow(elem benchtop.Row, tx *pebblebulk.PebbleBulk) error {
 	mData, err := b.packData(elem.Data, string(elem.Id))
 	if err != nil {
 		return err
 	}
+
 	bData, err := bson.Marshal(mData)
 	if err != nil {
 		return err
 	}
+
 	//append to end of block file
 	b.handleLock.Lock()
 	defer b.handleLock.Unlock()
@@ -82,11 +83,10 @@ func (b *BSONTable) AddRow(elem benchtop.Row) error {
 	if err != nil {
 		log.Errorf("write handler err in Load: bulkSet: %s", err)
 	}
+	b.addTableDeleteEntryInfo(tx, elem.Id, elem.TableName)
+	b.addTableEntryInfo(tx, elem.Id, uint64(offset), uint64(writesize))
 
-	b.addTableDeleteEntryInfo(nil, elem.Id, elem.TableName)
-	b.addTableEntryInfo(nil, elem.Id, uint64(offset), uint64(writesize))
 	return nil
-
 }
 
 func (b *BSONTable) GetRow(id []byte, fields ...string) (map[string]any, error) {
@@ -128,15 +128,12 @@ func (b *BSONTable) DeleteRow(name []byte) error {
 	if err != nil {
 		return err
 	}
-	b.handle.Seek(int64(offset+8), io.SeekStart)
-	_, err = b.handle.Write([]byte{0x00, 0x00, 0x00, 0x00})
-	if err != nil {
-		return err
+	b.handleLock.Lock()
+	if _, err := b.handle.WriteAt([]byte{0x00, 0x00, 0x00, 0x00}, int64(offset+8)); err != nil {
+		return fmt.Errorf("writeAt failed: %w", err)
 	}
-
-	posKey := benchtop.NewPosKey(b.tableId, name)
-	b.db.Delete(posKey, nil)
-
+	b.handleLock.Unlock()
+	b.db.Delete(benchtop.NewPosKey(b.tableId, name), nil)
 	return nil
 }
 
@@ -179,7 +176,7 @@ func (b *BSONTable) Compact() error {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		b.setIndices(inputChan)
+		b.setDataIndices(inputChan)
 	}()
 
 	for {
@@ -320,7 +317,7 @@ func (b *BSONTable) Scan(keys bool, filter []benchtop.FieldFilter, fields ...str
 	b.handleLock.RLock()
 	defer b.handleLock.RUnlock()
 
-	out := make(chan map[string]any, 10)
+	out := make(chan map[string]any, 100)
 	_, err := b.handle.Seek(0, io.SeekStart)
 	if err != nil {
 		return nil, err
@@ -328,36 +325,39 @@ func (b *BSONTable) Scan(keys bool, filter []benchtop.FieldFilter, fields ...str
 
 	go func() {
 		defer close(out)
+		var offsetSizeData [8]byte
+		var sizeBytes [4]byte
+		rowData := make([]byte, 0)
+		fmt.Println("ENTERING SCAN++++++++++++++++++++++++++++++++++++++")
 		for {
-			offsetSizeData := make([]byte, 8)
-			_, err := b.handle.Read(offsetSizeData)
-			if err == io.EOF {
-				break
+			_, err := b.handle.Read(offsetSizeData[:])
+			if err != nil {
+				if err == io.EOF {
+					break
+				}
+				return
 			}
+			nextOffset := binary.LittleEndian.Uint64(offsetSizeData[:])
+			_, err = b.handle.Read(sizeBytes[:])
 			if err != nil {
 				return
 			}
-
-			NextOffset := binary.LittleEndian.Uint64(offsetSizeData)
-
-			sizeBytes := make([]byte, 4)
-			_, err = b.handle.Read(sizeBytes)
-			if err != nil {
-				return
-			}
-
-			bSize := int32(binary.LittleEndian.Uint32(sizeBytes))
+			bSize := int32(binary.LittleEndian.Uint32(sizeBytes[:]))
 
 			// Elem has been deleted or at the table header in the begginning of the file skip it.
-			if bSize == 0 || int64(bSize) == int64(NextOffset)-8 {
-				_, err = b.handle.Seek(int64(NextOffset), io.SeekStart)
+			if bSize == 0 || int64(bSize) == int64(nextOffset)-8 {
+				_, err = b.handle.Seek(int64(nextOffset), io.SeekStart)
 				if err == io.EOF {
 					break
 				}
 				continue
 			}
-			rowData := make([]byte, bSize)
-			copy(rowData, sizeBytes)
+			if cap(rowData) < int(bSize) {
+				rowData = make([]byte, bSize)
+			} else {
+				rowData = rowData[:bSize]
+			}
+			copy(rowData, sizeBytes[:])
 
 			_, err = b.handle.Read(rowData[4:])
 			if err != nil {
@@ -370,31 +370,64 @@ func (b *BSONTable) Scan(keys bool, filter []benchtop.FieldFilter, fields ...str
 			}
 			columns := bd.Index(0).Value().Array()
 
-			vOut := map[string]any{}
-
-			if len(fields) == 0 {
-				if keys {
-					vOut["_key"] = bd.Index(2).Value().StringValue()
-				}
-			} else {
-				for _, colName := range fields {
-					if i, ok := b.columnMap[colName]; ok {
-						n := b.columns[i]
-						unpack, _ := b.colUnpack(columns.Index(uint(i)), n.Type)
-						if filters.PassesFilters(unpack, filter) {
-							vOut[n.Key] = unpack
-							if keys {
-								vOut["_key"] = bd.Index(2).Value().StringValue()
-							}
-						}
-					}
-				}
-			}
-			if len(vOut) > 0 {
-				out <- vOut
+			var key string
+			if keys {
+				key = bd.Index(2).Value().StringValue()
 			}
 
-			_, err = b.handle.Seek(int64(NextOffset), io.SeekStart)
+			rowMap := make(map[string]any)
+
+            // Unpack named columns
+            for i, c := range b.columns {
+                unpack, err := b.colUnpack(columns.Index(uint(i)), c.Type)
+                if err != nil {
+                    continue // Skip invalid column data
+                }
+                rowMap[c.Key] = unpack
+            }
+
+            // Unpack 'other data'
+            var otherMap map[string]any
+            err = bson.Unmarshal(bd.Index(1).Value().Document(), &otherMap)
+            if err != nil {
+                continue // Skip if 'other data' cannot be unmarshaled
+            }
+            for k, v := range otherMap {
+                rowMap[k] = v
+            }
+
+            // Add key to rowMap if requested
+            if keys {
+                rowMap["_key"] = key
+            }
+
+            // Step 2: Apply filters to the entire row
+            if len(filter) == 0 || filters.PassesFilters(rowMap, filter) {
+                // Step 3: Construct output based on fields
+                vOut := make(map[string]any)
+                if len(fields) == 0 {
+                    // Include all fields when fields is empty
+                    for k, v := range rowMap {
+                        vOut[k] = v
+                    }
+                } else {
+                    // Include only specified fields
+                    for _, colName := range fields {
+                        if val, ok := rowMap[colName]; ok {
+                            vOut[colName] = val
+                        }
+                    }
+                    if keys && vOut["_key"] == nil { // Ensure key is included if requested
+                        vOut["_key"] = key
+                    }
+                }
+                if len(vOut) > 0 {
+                	fmt.Println("PASSING VOUT+++++++++")
+                    out <- vOut
+                }
+            }
+
+			_, err = b.handle.Seek(int64(nextOffset), io.SeekStart)
 			if err == io.EOF {
 				break
 			}

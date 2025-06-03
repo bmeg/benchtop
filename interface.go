@@ -1,13 +1,33 @@
 package benchtop
 
 import (
+	"github.com/bmeg/benchtop/pebblebulk"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/bsontype"
 )
 
+type OperatorType string
+
+const (
+	OP_EQ         OperatorType = "=="
+	OP_NEQ        OperatorType = "!="
+	OP_GT         OperatorType = ">"
+	OP_LT         OperatorType = "<"
+	OP_GTE        OperatorType = ">="
+	OP_LTE        OperatorType = "<="
+	OP_INSIDE     OperatorType = "INSIDE"
+	OP_OUTSIDE    OperatorType = "OUTSIDE"
+	OP_BETWEEN    OperatorType = "BETWEEN"
+	OP_WITHIN     OperatorType = "WITHIN"
+	OP_WITHOUT    OperatorType = "WITHOUT"
+	OP_CONTAINS   OperatorType = "CONTAINS"
+	OP_STARTSWITH OperatorType = "STARTSWITH"
+	OP_ENDSWITH   OperatorType = "ENDSWITH"
+)
+
 type FieldFilter struct {
 	Field    string
-	Operator string // supported operators "==", "!=", ">", "<", ">=", "<=", "contains", "startswith", "endswith"
+	Operator OperatorType
 	Value    any
 }
 
@@ -52,7 +72,7 @@ type BulkResponse struct {
 
 type TableStore interface {
 	GetColumnDefs() []ColumnDef
-	AddRow(elem Row) error
+	AddRow(elem Row, tx *pebblebulk.PebbleBulk) error
 	GetRow(key []byte, fields ...string) (map[string]any, error)
 	DeleteRow(key []byte) error
 
