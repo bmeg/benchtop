@@ -8,24 +8,10 @@ import (
 	"github.com/spf13/cast"
 )
 
-func PassesFilters(row any, filters []benchtop.FieldFilter) bool {
-	for _, filter := range filters {
-		if !applyFilterCondition(row, filter) {
-			return false
-		}
-	}
-	return true
-}
 
 // This function is largely the same and is adapted from bmeg/grip/engine/logic/match.go MatchesCondition function
-func applyFilterCondition(row any, cond benchtop.FieldFilter) bool {
-	val, ok := row.(map[string]any)[cond.Field]
+func ApplyFilterCondition(val any, cond benchtop.FieldFilter) bool {
 	condVal := cond.Value
-	// If the field does not exist then the filter does not pass
-	if !ok {
-		return false
-	}
-
 	if (val == nil || cond.Value == nil) &&
 		cond.Operator != benchtop.OP_EQ &&
 		cond.Operator != benchtop.OP_NEQ &&
@@ -35,7 +21,7 @@ func applyFilterCondition(row any, cond benchtop.FieldFilter) bool {
 		return false
 	}
 
-	//log.Debugf("scanFilters match: %s %s %s", val, condVal, cond.Field)
+	//log.Debugf("scanFilters match: %s %s %s", val, condVal)
 
 	switch cond.Operator {
 	case benchtop.OP_EQ:

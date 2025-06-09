@@ -10,9 +10,12 @@ import (
 
 	"github.com/bmeg/benchtop"
 	"github.com/bmeg/benchtop/pebblebulk"
+	"github.com/bmeg/benchtop/bsontable/tpath"
 	"github.com/cockroachdb/pebble"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
+	"github.com/bmeg/jsonpath"
+	"github.com/bmeg/grip/log"
 )
 
 func (b *BSONTable) packData(entry map[string]any, key string) (bson.M, error) {
@@ -61,6 +64,22 @@ type EntryInfo struct {
 	Offset uint64
 	Size   uint64
 }
+
+func PathLookup(v map[string]any, path string) any {
+	/* Expects that special fields like '_id' and '_label'
+	   are added to the map before reaching this function
+	*/
+	field := tpath.NormalizePath(path)
+	jpath := tpath.ToLocalPath(field)
+	namespace := tpath.GetNamespace(field)
+	res, err := jsonpath.JsonPathLookup(v, jpath)
+	if err != nil {
+		return nil
+	}
+	log.Debug("field: ", field, "    jpath: ", jpath, "    namespace: ", namespace, "    res: ", res)
+	return res
+}
+
 
 func (b *BSONTable) getTableEntryInfo(snap *pebble.Snapshot, id []byte) (*EntryInfo, error) {
 	// Really only want to see if anything was returned or not

@@ -11,12 +11,12 @@ import (
 	"sync"
 
 	"github.com/bmeg/benchtop"
-	"github.com/bmeg/benchtop/bsontable/filters"
 	"github.com/bmeg/benchtop/pebblebulk"
 	"github.com/bmeg/grip/log"
 	multierror "github.com/hashicorp/go-multierror"
 
 	"github.com/cockroachdb/pebble"
+	tableFilters "github.com/bmeg/benchtop/bsontable/filters"
 
 	"go.mongodb.org/mongo-driver/bson"
 	//NOTE: try github.com/dgraph-io/ristretto for cache
@@ -313,6 +313,7 @@ func (b *BSONTable) Keys() (chan benchtop.Index, error) {
 	return out, nil
 }
 
+
 func (b *BSONTable) Scan(keys bool, filter []benchtop.FieldFilter, fields ...string) (chan map[string]any, error) {
 	b.handleLock.RLock()
 	defer b.handleLock.RUnlock()
@@ -328,7 +329,6 @@ func (b *BSONTable) Scan(keys bool, filter []benchtop.FieldFilter, fields ...str
 		var offsetSizeData [8]byte
 		var sizeBytes [4]byte
 		rowData := make([]byte, 0)
-		fmt.Println("ENTERING SCAN++++++++++++++++++++++++++++++++++++++")
 		for {
 			_, err := b.handle.Read(offsetSizeData[:])
 			if err != nil {
@@ -377,55 +377,56 @@ func (b *BSONTable) Scan(keys bool, filter []benchtop.FieldFilter, fields ...str
 
 			rowMap := make(map[string]any)
 
-            // Unpack named columns
-            for i, c := range b.columns {
-                unpack, err := b.colUnpack(columns.Index(uint(i)), c.Type)
-                if err != nil {
-                    continue // Skip invalid column data
-                }
-                rowMap[c.Key] = unpack
-            }
+			// Unpack named columns
+			for i, c := range b.columns {
+				unpack, err := b.colUnpack(columns.Index(uint(i)), c.Type)
+				if err != nil {
+					continue // Skip invalid column data
+				}
+				rowMap[c.Key] = unpack
+			}
 
-            // Unpack 'other data'
-            var otherMap map[string]any
-            err = bson.Unmarshal(bd.Index(1).Value().Document(), &otherMap)
-            if err != nil {
-                continue // Skip if 'other data' cannot be unmarshaled
-            }
-            for k, v := range otherMap {
-                rowMap[k] = v
-            }
+			// Unpack 'other data'
+			var otherMap map[string]any
+			err = bson.Unmarshal(bd.Index(1).Value().Document(), &otherMap)
+			if err != nil {
+				continue // Skip if 'other data' cannot be unmarshaled
+			}
+			for k, v := range otherMap {
+				rowMap[k] = v
+			}
 
-            // Add key to rowMap if requested
-            if keys {
-                rowMap["_key"] = key
-            }
+			// Add key to rowMap if requested
+			if keys {
+				rowMap["_key"] = key
+				rowMap["_id"] = key
+			}
 
-            // Step 2: Apply filters to the entire row
-            if len(filter) == 0 || filters.PassesFilters(rowMap, filter) {
-                // Step 3: Construct output based on fields
-                vOut := make(map[string]any)
-                if len(fields) == 0 {
-                    // Include all fields when fields is empty
-                    for k, v := range rowMap {
-                        vOut[k] = v
-                    }
-                } else {
-                    // Include only specified fields
-                    for _, colName := range fields {
-                        if val, ok := rowMap[colName]; ok {
-                            vOut[colName] = val
-                        }
-                    }
-                    if keys && vOut["_key"] == nil { // Ensure key is included if requested
-                        vOut["_key"] = key
-                    }
-                }
-                if len(vOut) > 0 {
-                	fmt.Println("PASSING VOUT+++++++++")
-                    out <- vOut
-                }
-            }
+			// Step 2: Apply filters to the entire row
+			log.Debugln("FILTERS: ", rowMap, filter, PassesFilters(rowMap, filter))
+			if PassesFilters(rowMap, filter) { //  len(filter) == 0 ||
+				// Step 3: Construct output based on fields
+				vOut := make(map[string]any)
+				if len(fields) == 0 {
+					// Include all fields when fields is empty
+					for k, v := range rowMap {
+						vOut[k] = v
+					}
+				} else {
+					// Include only specified fields
+					for _, colName := range fields {
+						if val, ok := rowMap[colName]; ok {
+							vOut[colName] = val
+						}
+					}
+					if keys && vOut["_key"] == nil { // Ensure key is included if requested
+						vOut["_key"] = key
+					}
+				}
+				if len(vOut) > 0 {
+					out <- vOut
+				}
+			}
 
 			_, err = b.handle.Seek(int64(nextOffset), io.SeekStart)
 			if err == io.EOF {
@@ -434,6 +435,15 @@ func (b *BSONTable) Scan(keys bool, filter []benchtop.FieldFilter, fields ...str
 		}
 	}()
 	return out, nil
+}
+
+func PassesFilters(val any, filters []benchtop.FieldFilter) bool {
+	for _, filter := range filters {
+		if !tableFilters.ApplyFilterCondition(PathLookup(val.(map[string]any), filter.Field), filter) {
+			return false
+		}
+	}
+	return true
 }
 
 func (b *BSONTable) Fetch(inputs chan benchtop.Index, workers int) <-chan benchtop.BulkResponse {

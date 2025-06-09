@@ -6,7 +6,9 @@ import (
 	"fmt"
 
 	"github.com/bmeg/benchtop"
+
 	"github.com/bmeg/benchtop/pebblebulk"
+	tableFilters "github.com/bmeg/benchtop/bsontable/filters"
 	"github.com/bmeg/grip/log"
 )
 
@@ -121,52 +123,57 @@ func (dr *BSONDriver) ListFields() []FieldInfo {
 	return out
 }
 
-func (dr *BSONDriver) RowIdsByFieldValue(field string, value any) chan string {
+func (dr *BSONDriver) RowIdsByHas(fltField string, fltValue any, fltOp benchtop.OperatorType) chan string {
 	dr.Lock.RLock()
 	defer dr.Lock.RUnlock()
 
-	valueBytes, _ := json.Marshal(value)
+	//prefix := benchtop.FieldKey(fltField, "", nil, nil)
 	prefix := bytes.Join([][]byte{
 		benchtop.FieldPrefix,
-		[]byte(field),
-		valueBytes,
+		[]byte(fltField),
 	}, benchtop.FieldSep)
-
 	out := make(chan string, 100)
 	go func() {
 		defer close(out)
 		err := dr.Pb.View(func(it *pebblebulk.PebbleIterator) error {
 			for it.Seek(prefix); it.Valid() && bytes.HasPrefix(it.Key(), prefix); it.Next() {
-				field, value, label, row := benchtop.FieldKeyParse(it.Key())
-				log.Debugln("Lookup - Found Key (hex):", field, value, label, row)
-				parts := bytes.Split(it.Key(), benchtop.FieldSep)
-				rowID := make([]byte, len(parts[4]))
-				copy(rowID, parts[4])
-				out <- string(rowID)
+				_, value, _, rowID := benchtop.FieldKeyParse(it.Key())
+				if tableFilters.ApplyFilterCondition(
+					value,
+					benchtop.FieldFilter{
+						Field: fltField, Value: fltValue, Operator: fltOp,
+					},
+				) {
+					log.Debugln("Lookup - Found Key (hex):", fltField, fltValue, fltOp, value, rowID)
+					out <- string(rowID)
+				}
 			}
 			return nil
 		})
 		if err != nil {
-			log.Errorf("Error in View for field %s: %s", field, err)
+			log.Errorf("Error in View for field %s: %s", fltField, err)
 		}
 	}()
 	return out
 }
 
-func (dr *BSONDriver) RowIdsByLabelFieldValue(label string, field string, value any) (chan string, error) {
+func (dr *BSONDriver) RowIdsByLabelFieldValue(fltLabel string, fltField string, fltValue any, fltOp benchtop.OperatorType) (chan string, error) {
+	log.WithFields(log.Fields{"label": fltLabel, "field": fltField, "value": fltValue}).Info("Running RowIdsByLabelFieldValue")
 	dr.Lock.RLock()
 	defer dr.Lock.RUnlock()
 
-	valueBytes, err := json.Marshal(value)
+	valueBytes, err := json.Marshal(fltValue)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal value: %v", err)
 	}
 
+	log.Debugln("LABEL: ", fltLabel, "FIELD: ", fltField, "VALUE: ", fltValue, "OP: ", fltOp)
+
 	prefix := bytes.Join([][]byte{
 		benchtop.FieldPrefix,
-		[]byte(field),
+		[]byte(fltField),
 		valueBytes,
-		[]byte(label),
+		[]byte(fltLabel),
 	}, benchtop.FieldSep)
 
 	out := make(chan string, 100)
@@ -174,7 +181,16 @@ func (dr *BSONDriver) RowIdsByLabelFieldValue(label string, field string, value 
 		defer close(out)
 		dr.Pb.View(func(it *pebblebulk.PebbleIterator) error {
 			for it.Seek(prefix); it.Valid() && bytes.HasPrefix(it.Key(), prefix); it.Next() {
-				out <- string(bytes.Split(it.Key(), benchtop.FieldSep)[4])
+				_, value, _, rowID := benchtop.FieldKeyParse(it.Key())
+				if tableFilters.ApplyFilterCondition(
+					value,
+					benchtop.FieldFilter{
+						Field: fltField, Value: fltValue, Operator: fltOp,
+					},
+				) {
+					log.Debugln("Lookup - Found Key (hex):", fltField, fltValue, fltOp, value, rowID)
+					out <- string(rowID)
+				}
 			}
 			return nil
 		})
