@@ -388,7 +388,7 @@ func (dr *BSONDriver) BulkLoad(inputs chan *benchtop.Row, tx *pebblebulk.PebbleB
 						for field := range dr.Fields[tableName] {
 							// only top level values supported for now
 							if val, ok := row.Data[field]; ok {
-								fieldIndexKeys = append(fieldIndexKeys, benchtop.FieldKey(tableName, field, val, row.Id))
+								fieldIndexKeys = append(fieldIndexKeys, benchtop.FieldKey(field, tableName, val, row.Id))
 							}
 						}
 					}

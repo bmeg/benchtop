@@ -27,30 +27,46 @@ var PosPrefix = byte('P')
 // key: F
 // used for indexing specific field values in kvgraph
 var FieldPrefix = []byte("F")
-var FieldSep = []byte(":")
 
-func FieldKey(label, field string, value any, rowID []byte) []byte {
+// The '0x1F' invisible character unit seperator not supposed to appear in ASCII text
+var FieldSep = []byte{0x1F}
+
+func FieldKey(field string, label string, value any, rowID []byte) []byte {
+	/* creates a full field key for optimizing the beginning of a query */
 	valueBytes, err := json.Marshal(value)
 	if err != nil {
 		log.Infoln("FieldKey Marshal Err: ", err)
 	}
-	parts := [][]byte{
-		FieldPrefix,   // Static prefix
-		[]byte(field), // table field
-		valueBytes,    // BSON-encoded value
-		[]byte(label), // label
-		rowID,         // Row ID
-	}
-	return bytes.Join(parts, FieldSep)
+	return bytes.Join(
+		[][]byte{
+			FieldPrefix,   // Static prefix
+			[]byte(field), // table field
+			[]byte(label), // label
+			valueBytes,    // BSON-encoded value
+			rowID,
+		},
+		FieldSep,
+	)
 }
 
-func FieldKeyParse(fieldKey []byte) (field string, value any, label string, rowID []byte) {
+func FieldKeyParse(fieldKey []byte) (field, label string, value any, rowID []byte) {
 	parts := bytes.Split(fieldKey, FieldSep)
-	err := json.Unmarshal(parts[2], &value)
+	err := json.Unmarshal(parts[3], &value)
 	if err != nil {
 		log.Infoln("FieldKey Unmarshal Err: ", err)
 	}
-	return string(parts[1]), value, string(parts[3]), parts[4]
+	return string(parts[1]), string(parts[2]), value, parts[4]
+}
+
+func FieldLabelKey(field, label string) []byte {
+	return bytes.Join(
+		[][]byte{
+			FieldPrefix,   // Static prefix
+			[]byte(field), // table field
+			[]byte(label), // label
+		},
+		FieldSep,
+	)
 }
 
 func NewRowTableAsocKey(id []byte) []byte {

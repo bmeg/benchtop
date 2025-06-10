@@ -403,7 +403,6 @@ func (b *BSONTable) Scan(keys bool, filter []benchtop.FieldFilter, fields ...str
 			}
 
 			// Step 2: Apply filters to the entire row
-			log.Debugln("FILTERS: ", rowMap, filter, PassesFilters(rowMap, filter))
 			if PassesFilters(rowMap, filter) { //  len(filter) == 0 ||
 				// Step 3: Construct output based on fields
 				vOut := make(map[string]any)
