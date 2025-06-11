@@ -8,7 +8,6 @@ import (
 	"github.com/spf13/cast"
 )
 
-
 // This function is largely the same and is adapted from bmeg/grip/engine/logic/match.go MatchesCondition function
 func ApplyFilterCondition(val any, cond benchtop.FieldFilter) bool {
 	condVal := cond.Value
@@ -20,8 +19,6 @@ func ApplyFilterCondition(val any, cond benchtop.FieldFilter) bool {
 		cond.Operator != benchtop.OP_CONTAINS {
 		return false
 	}
-
-	//log.Debugf("scanFilters match: %s %s %s", val, condVal)
 
 	switch cond.Operator {
 	case benchtop.OP_EQ:

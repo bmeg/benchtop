@@ -78,7 +78,7 @@ type TableStore interface {
 
 	Fetch(inputs chan Index, workers int) <-chan BulkResponse
 	Remove(inputs chan Index, workers int) <-chan BulkResponse
-	Scan(key bool, filter []FieldFilter, fields ...string) (chan map[string]any, error)
+	Scan(key bool, filter []FieldFilter, fields ...string) chan any
 	Load(chan Row) error
 	Keys() (chan Index, error)
 

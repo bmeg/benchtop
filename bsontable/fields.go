@@ -6,10 +6,10 @@ import (
 
 	"github.com/bmeg/benchtop"
 
-	"github.com/bmeg/benchtop/pebblebulk"
-	"github.com/cockroachdb/pebble"
 	tableFilters "github.com/bmeg/benchtop/bsontable/filters"
+	"github.com/bmeg/benchtop/pebblebulk"
 	"github.com/bmeg/grip/log"
+	"github.com/cockroachdb/pebble"
 )
 
 func (dr *BSONDriver) AddField(label, field string) error {
@@ -29,13 +29,16 @@ func (dr *BSONDriver) AddField(label, field string) error {
 		}
 	} else {
 		log.Debugf("Found table %s writing indices for field %s", label, field)
-		rowChan, err := foundTable.Scan(true, nil)
-		if err != nil {
-			return err
-		}
-		err = dr.Pb.BulkWrite(func(tx *pebblebulk.PebbleBulk) error {
-			for r := range rowChan {
-				err := tx.Set(benchtop.FieldKey(field, label, PathLookup(r, field), []byte(r["_key"].(string))),
+		err := dr.Pb.BulkWrite(func(tx *pebblebulk.PebbleBulk) error {
+			for r := range foundTable.Scan(false, nil) {
+				err := tx.Set(
+					benchtop.FieldKey(
+						field,
+						label,
+						PathLookup(
+							r.(map[string]any), field),
+						[]byte(r.(map[string]any)["_key"].(string)),
+					),
 					[]byte{},
 					nil,
 				)
@@ -91,11 +94,11 @@ func (dr *BSONDriver) RemoveField(label string, field string) error {
 	return nil
 }
 
-func calculate_upper_bound(key []byte) ([]byte, error){
+func calculate_upper_bound(key []byte) ([]byte, error) {
 	uBound := make([]byte, len(key))
 	copy(uBound, key)
 	for i := len(uBound) - 1; i >= 0; i-- {
-	    uBound[i]++
+		uBound[i]++
 		if uBound[i] != 0 {
 			return uBound, nil
 		}
@@ -124,7 +127,7 @@ type FieldInfo struct {
 	Field string
 }
 
-func (dr *BSONDriver) ListFields() ([]FieldInfo) {
+func (dr *BSONDriver) ListFields() []FieldInfo {
 	seenFields := make(map[string]map[string]struct{})
 	fPrefix := benchtop.FieldPrefix
 	var out []FieldInfo
@@ -156,7 +159,7 @@ func (dr *BSONDriver) RowIdsByHas(fltField string, fltValue any, fltOp benchtop.
 	prefix := bytes.Join([][]byte{
 		benchtop.FieldPrefix,
 		[]byte(fltField),
-		}, benchtop.FieldSep)
+	}, benchtop.FieldSep)
 
 	out := make(chan string, 100)
 	go func() {
@@ -193,7 +196,7 @@ func (dr *BSONDriver) RowIdsByLabelFieldValue(fltLabel string, fltField string, 
 		defer close(out)
 		err := dr.Pb.View(func(it *pebblebulk.PebbleIterator) error {
 			for it.Seek(prefix); it.Valid() && bytes.HasPrefix(it.Key(), prefix); it.Next() {
-					_, _, value, rowID := benchtop.FieldKeyParse(it.Key())
+				_, _, value, rowID := benchtop.FieldKeyParse(it.Key())
 				if tableFilters.ApplyFilterCondition(
 					value,
 					benchtop.FieldFilter{
@@ -220,32 +223,16 @@ func (dr *BSONDriver) GetIDsForLabel(label string) chan string {
 	out := make(chan string, 100)
 	go func() {
 		defer close(out)
+
 		table, err := dr.Get(label)
 		if err != nil {
 			log.Errorf("GetIdsForLabel: %s on table: %s", err, label)
 			return
 		}
 
-		rowsChan, err := table.Scan(true, nil)
-		if err != nil {
-			log.Errorf("Error scanning field %s: %s", label, err)
-			return
-		}
-
-		for row := range rowsChan {
-			if id, ok := row["_key"].(string); ok {
-				out <- id
-			}
+		for id := range table.Scan(true, nil) {
+			out <- id.(string)
 		}
 	}()
 	return out
-}
-
-func calculateUpperBound(prefix []byte) []byte {
-	// Returns the upper bound for a range query to include all keys starting with prefix.
-	// Appends 0x00 to prefix to ensure all keys with prefix are less than the bound.
-	upperBound := make([]byte, len(prefix)+1)
-	copy(upperBound, prefix)
-	upperBound[len(prefix)] = 0x00
-	return upperBound
 }

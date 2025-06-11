@@ -6,8 +6,10 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 
 	"github.com/bmeg/benchtop"
@@ -15,11 +17,11 @@ import (
 	"github.com/bmeg/grip/log"
 	multierror "github.com/hashicorp/go-multierror"
 
-	"github.com/cockroachdb/pebble"
 	tableFilters "github.com/bmeg/benchtop/bsontable/filters"
+	"github.com/cockroachdb/pebble"
 
 	"go.mongodb.org/mongo-driver/bson"
-	//NOTE: try github.com/dgraph-io/ristretto for cache
+	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
 type BSONTable struct {
@@ -313,117 +315,131 @@ func (b *BSONTable) Keys() (chan benchtop.Index, error) {
 	return out, nil
 }
 
-
-func (b *BSONTable) Scan(keys bool, filter []benchtop.FieldFilter, fields ...string) (chan map[string]any, error) {
+func (b *BSONTable) Scan(keys bool, filter []benchtop.FieldFilter, fields ...string) chan any {
 	b.handleLock.RLock()
 	defer b.handleLock.RUnlock()
 
-	out := make(chan map[string]any, 100)
+	// Create a single channel of type chan any
+	outChan := make(chan any, 100)
+
 	_, err := b.handle.Seek(0, io.SeekStart)
 	if err != nil {
-		return nil, err
+		close(outChan) // Close the channel if an error occurs before the goroutine starts
+		log.Errorln("Error in bsontable scan func", err)
+		return nil
 	}
 
-	go func() {
-		defer close(out)
-		var offsetSizeData [8]byte
-		var sizeBytes [4]byte
-		rowData := make([]byte, 0)
-		for {
-			_, err := b.handle.Read(offsetSizeData[:])
-			if err != nil {
-				if err == io.EOF {
-					break
-				}
-				return
-			}
-			nextOffset := binary.LittleEndian.Uint64(offsetSizeData[:])
-			_, err = b.handle.Read(sizeBytes[:])
-			if err != nil {
-				return
-			}
-			bSize := int32(binary.LittleEndian.Uint32(sizeBytes[:]))
+	filterFields := extractFilterFields(filter)
+	allFields := len(fields) == 0
+	selectedFields := fields
+	if allFields && !keys {
+		selectedFields = make([]string, len(b.columns))
+		for i, col := range b.columns {
+			selectedFields[i] = col.Key
+		}
+	}
+	requiredFields := union(filterFields, selectedFields)
 
-			// Elem has been deleted or at the table header in the begginning of the file skip it.
+	go func() {
+		defer close(outChan) // Always close the channel when the goroutine exits
+
+		var header [12]byte // 8 bytes offset + 4 bytes size
+		rowData := make([]byte, 0, 1024)
+
+		for {
+			// Single read for offset and size
+			_, err := b.handle.Read(header[:])
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				log.Errorln("Err in bsontable read", err)
+				return
+			}
+			nextOffset := binary.LittleEndian.Uint64(header[:8])
+			bSize := int32(binary.LittleEndian.Uint32(header[8:12]))
+
+			// Skip deleted rows or headers
 			if bSize == 0 || int64(bSize) == int64(nextOffset)-8 {
 				_, err = b.handle.Seek(int64(nextOffset), io.SeekStart)
 				if err == io.EOF {
 					break
 				}
+				if err != nil {
+					log.Errorln("Err in bsontable seek", err)
+					return
+				}
 				continue
 			}
+
+			// Resize buffer and read row data
 			if cap(rowData) < int(bSize) {
 				rowData = make([]byte, bSize)
 			} else {
 				rowData = rowData[:bSize]
 			}
-			copy(rowData, sizeBytes[:])
-
+			copy(rowData[:4], header[8:12])
 			_, err = b.handle.Read(rowData[4:])
 			if err != nil {
+				log.Errorln("Err in bsontable read", err)
 				return
 			}
 
+			// Parse BSON row
 			bd, ok := bson.Raw(rowData).Lookup("R").ArrayOK()
 			if !ok {
-				return
+				continue
 			}
 			columns := bd.Index(0).Value().Array()
+			key := bd.Index(2).Value().StringValue()
 
-			var key string
-			if keys {
-				key = bd.Index(2).Value().StringValue()
-			}
-
-			rowMap := make(map[string]any)
-
-			// Unpack named columns
-			for i, c := range b.columns {
-				unpack, err := b.colUnpack(columns.Index(uint(i)), c.Type)
-				if err != nil {
-					continue // Skip invalid column data
-				}
-				rowMap[c.Key] = unpack
-			}
-
-			// Unpack 'other data'
-			var otherMap map[string]any
-			err = bson.Unmarshal(bd.Index(1).Value().Document(), &otherMap)
-			if err != nil {
-				continue // Skip if 'other data' cannot be unmarshaled
-			}
-			for k, v := range otherMap {
-				rowMap[k] = v
-			}
-
-			// Add key to rowMap if requested
-			if keys {
-				rowMap["_key"] = key
-				rowMap["_id"] = key
-			}
-
-			// Step 2: Apply filters to the entire row
-			if PassesFilters(rowMap, filter) { //  len(filter) == 0 ||
-				// Step 3: Construct output based on fields
-				vOut := make(map[string]any)
-				if len(fields) == 0 {
-					// Include all fields when fields is empty
-					for k, v := range rowMap {
-						vOut[k] = v
+			// Build row map for filtering and output
+			rowMap := make(map[string]any, len(requiredFields))
+			for i, col := range b.columns {
+				if allFields || slices.Contains(requiredFields, col.Key) {
+					if unpack, err := b.colUnpack(columns.Index(uint(i)), col.Type); err == nil {
+						rowMap[col.Key] = unpack
 					}
+				}
+			}
+
+			otherData := bd.Index(1).Value().Document()
+			if allFields {
+				var otherMap map[string]any
+				if err := bson.Unmarshal(otherData, &otherMap); err == nil {
+					for k, v := range otherMap {
+						rowMap[k] = convertBSONValue(v)
+					}
+				}
+			} else {
+				for _, field := range requiredFields {
+					if !isNamedColumn(field, b.columns) {
+						if val, err := otherData.LookupErr(field); err == nil {
+							rowMap[field] = convertBSONValue(val)
+						}
+					}
+				}
+			}
+
+			if PassesFilters(rowMap, filter) {
+				if keys {
+					outChan <- key
+					continue
+				}
+				vOut := make(map[string]any)
+				if allFields {
+					maps.Copy(vOut, rowMap)
+					vOut["_key"] = key
+					vOut["_id"] = key
 				} else {
-					// Include only specified fields
-					for _, colName := range fields {
+					for _, colName := range selectedFields {
 						if val, ok := rowMap[colName]; ok {
 							vOut[colName] = val
 						}
 					}
-					if keys && vOut["_key"] == nil { // Ensure key is included if requested
-						vOut["_key"] = key
-					}
 				}
 				if len(vOut) > 0 {
-					out <- vOut
+					outChan <- vOut
 				}
 			}
 
@@ -431,9 +447,47 @@ func (b *BSONTable) Scan(keys bool, filter []benchtop.FieldFilter, fields ...str
 			if err == io.EOF {
 				break
 			}
+			if err != nil {
+				log.Errorln("Err in bsontable seek", err)
+				return
+			}
 		}
 	}()
-	return out, nil
+
+	return outChan
+}
+
+func convertBSONValue(val any) any {
+	switch v := val.(type) {
+	case primitive.D: // Ordered BSON document
+		m := make(map[string]any)
+		for _, elem := range v {
+			m[elem.Key] = convertBSONValue(elem.Value) // Recurse for nested values
+		}
+		return m
+	case primitive.M: // Unordered BSON document
+		m := make(map[string]any)
+		for key, value := range v {
+			m[key] = convertBSONValue(value) // Recurse for nested values
+		}
+		return m
+	case primitive.A: // BSON array
+		arr := make([]any, len(v))
+		for i, elem := range v {
+			arr[i] = convertBSONValue(elem) // Recurse for array elements
+		}
+		return arr
+	case primitive.ObjectID: // Convert ObjectID to its string representation
+		return v.Hex()
+	case primitive.DateTime: // Convert BSON DateTime to Go's time.Time
+		return v.Time()
+	// Add other specific primitive types if you need custom conversions, e.g.,
+	// case primitive.Decimal128:
+	//    return v.String() // Convert Decimal128 to string
+	default:
+		// For all other types (string, int, float, bool, nil, etc.), return as is
+		return val
+	}
 }
 
 func PassesFilters(val any, filters []benchtop.FieldFilter) bool {
@@ -586,4 +640,36 @@ func (b *BSONTable) Remove(inputs chan benchtop.Index, workers int) <-chan bench
 	}()
 
 	return results
+}
+
+func union(a, b []string) []string {
+	set := make(map[string]struct{})
+	for _, v := range a {
+		set[v] = struct{}{}
+	}
+	for _, v := range b {
+		set[v] = struct{}{}
+	}
+	result := make([]string, 0, len(set))
+	for k := range set {
+		result = append(result, k)
+	}
+	return result
+}
+
+func extractFilterFields(filter []benchtop.FieldFilter) []string {
+	fields := make([]string, 0, len(filter))
+	for _, f := range filter {
+		fields = append(fields, f.Field)
+	}
+	return fields
+}
+
+func isNamedColumn(field string, columns []benchtop.ColumnDef) bool {
+	for _, col := range columns {
+		if col.Key == field {
+			return true
+		}
+	}
+	return false
 }
