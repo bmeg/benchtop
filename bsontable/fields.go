@@ -15,6 +15,7 @@ import (
 func (dr *BSONDriver) AddField(label, field string) error {
 	dr.Lock.Lock()
 	defer dr.Lock.Unlock()
+
 	foundTable, ok := dr.Tables[label]
 	if !ok {
 		log.Debugf("Creating index for table '%s' that has not been written yet", label)
@@ -25,6 +26,7 @@ func (dr *BSONDriver) AddField(label, field string) error {
 			nil,
 		)
 		if err != nil {
+			log.Errorf("Err attempting to add field %v", err)
 			return err
 		}
 	} else {
@@ -146,7 +148,11 @@ func (dr *BSONDriver) ListFields() []FieldInfo {
 	var out []FieldInfo
 	for label, fieldsMap := range dr.Fields {
 		for fieldName := range fieldsMap {
-			out = append(out, FieldInfo{Label: label, Field: fieldName})
+			if label[:2] == "v_" {
+				out = append(out, FieldInfo{Label: label[2:], Field: fieldName})
+			} else {
+				out = append(out, FieldInfo{Label: label, Field: fieldName})
+			}
 		}
 	}
 	return out

@@ -22,11 +22,12 @@ import (
 const batchSize = 1000
 
 type BSONDriver struct {
-	base   string
-	Lock   sync.RWMutex
-	db     *pebble.DB
-	Pb     *pebblebulk.PebbleKV
-	Tables map[string]*BSONTable
+	base       string
+	Lock       sync.RWMutex
+	PebbleLock sync.Mutex
+	db         *pebble.DB
+	Pb         *pebblebulk.PebbleKV
+	Tables     map[string]*BSONTable
 	// Fields is defined like label, field
 	Fields map[string]map[string]struct{}
 }
@@ -49,7 +50,9 @@ func NewBSONDriver(path string) (benchtop.TableDriver, error) {
 			InsertCount:  0,
 			CompactLimit: uint32(1000),
 		},
-		Fields: map[string]map[string]struct{}{},
+		Fields:     map[string]map[string]struct{}{},
+		Lock:       sync.RWMutex{},
+		PebbleLock: sync.Mutex{},
 	}, nil
 }
 
@@ -73,8 +76,9 @@ func LoadBSONDriver(path string) (benchtop.TableDriver, error) {
 			InsertCount:  0,
 			CompactLimit: uint32(1000),
 		},
-		Fields: map[string]map[string]struct{}{},
-		Lock:   sync.RWMutex{},
+		Fields:     map[string]map[string]struct{}{},
+		Lock:       sync.RWMutex{},
+		PebbleLock: sync.Mutex{},
 	}
 
 	// load Field indices from disk
@@ -529,9 +533,9 @@ func (dr *BSONDriver) BulkLoad(inputs chan *benchtop.Row, tx *pebblebulk.PebbleB
 		if tx == nil {
 			errs = multierror.Append(errs, fmt.Errorf("pebble bulk instance passed into BulkLoad function is nil"))
 		} else {
-			dr.Lock.Lock()
+			dr.PebbleLock.Lock()
 			err = writeFunc(tx)
-			dr.Lock.Unlock()
+			dr.PebbleLock.Unlock()
 		}
 		if err != nil {
 			errs = multierror.Append(errs, err)
