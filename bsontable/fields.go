@@ -13,8 +13,8 @@ import (
 )
 
 func (dr *BSONDriver) AddField(label, field string) error {
-	dr.Lock.RLock()
-	defer dr.Lock.RUnlock()
+	dr.Lock.Lock()
+	defer dr.Lock.Unlock()
 	foundTable, ok := dr.Tables[label]
 	if !ok {
 		log.Debugf("Creating index for table '%s' that has not been written yet", label)
@@ -107,19 +107,28 @@ func calculate_upper_bound(key []byte) ([]byte, error) {
 	return nil, fmt.Errorf("failed to calculate upper bound")
 }
 
-func (dr *BSONDriver) LoadFields() {
+func (dr *BSONDriver) LoadFields() error {
 	fPrefix := benchtop.FieldPrefix
 	dr.Lock.Lock()
 	defer dr.Lock.Unlock()
-	dr.Pb.View(func(it *pebblebulk.PebbleIterator) error {
+	err := dr.Pb.View(func(it *pebblebulk.PebbleIterator) error {
 		for it.Seek(fPrefix); it.Valid() && bytes.HasPrefix(it.Key(), fPrefix); it.Next() {
 			field, label, _, _ := benchtop.FieldKeyParse(it.Key())
-			dr.Fields[label] = make(map[string]struct{})
-			dr.Fields[label][field] = struct{}{}
+			if _, exists := dr.Fields[label]; !exists {
+				dr.Fields[label] = make(map[string]struct{})
+			}
+			if _, exists := dr.Fields[label][field]; !exists {
+				dr.Fields[label][field] = struct{}{}
+			}
 		}
-		log.Debugf("Loaded %d label-fields from Indices", len(dr.Fields))
+		log.Infof("Loaded %d label-fields from Indices", len(dr.Fields))
 		return nil
 	})
+	if err != nil {
+		log.Errorf("Err loading fields: %v", err)
+		return err
+	}
+	return nil
 }
 
 type FieldInfo struct {
@@ -128,26 +137,17 @@ type FieldInfo struct {
 }
 
 func (dr *BSONDriver) ListFields() []FieldInfo {
-	seenFields := make(map[string]map[string]struct{})
-	fPrefix := benchtop.FieldPrefix
+	/* Lists cached fields.
+	 * Since fields on disk are loaded on startup this should be all that is needed */
+
+	dr.Lock.RLock()
+	defer dr.Lock.RUnlock()
+
 	var out []FieldInfo
-	err := dr.Pb.View(func(it *pebblebulk.PebbleIterator) error {
-		for it.Seek(fPrefix); it.Valid() && bytes.HasPrefix(it.Key(), fPrefix); it.Next() {
-			field, label, _, _ := benchtop.FieldKeyParse(it.Key())
-			// Initialize inner map if label not seen
-			if _, exists := seenFields[label]; !exists {
-				seenFields[label] = make(map[string]struct{})
-			}
-			// Add field if not seen for this label
-			if _, exists := seenFields[label][field]; !exists {
-				out = append(out, FieldInfo{Label: label[2:], Field: field})
-				seenFields[label][field] = struct{}{}
-			}
+	for label, fieldsMap := range dr.Fields {
+		for fieldName := range fieldsMap {
+			out = append(out, FieldInfo{Label: label, Field: fieldName})
 		}
-		return nil
-	})
-	if err != nil {
-		log.Errorln("bsontable ListFields: ", err)
 	}
 	return out
 }

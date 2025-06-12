@@ -79,8 +79,7 @@ func PathLookup(v map[string]any, path string) any {
 
 func (b *BSONTable) getTableEntryInfo(snap *pebble.Snapshot, id []byte) (*EntryInfo, error) {
 	// Really only want to see if anything was returned or not
-	posKey := benchtop.NewPosKey(b.tableId, id)
-	_, closer, err := snap.Get(posKey)
+	_, closer, err := snap.Get(benchtop.NewPosKey(b.tableId, id))
 	if err == pebble.ErrNotFound {
 		return nil, nil
 	}

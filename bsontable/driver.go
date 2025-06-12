@@ -27,7 +27,7 @@ type BSONDriver struct {
 	db     *pebble.DB
 	Pb     *pebblebulk.PebbleKV
 	Tables map[string]*BSONTable
-	// Fields is defined like tableId, field
+	// Fields is defined like label, field
 	Fields map[string]map[string]struct{}
 }
 
@@ -78,7 +78,10 @@ func LoadBSONDriver(path string) (benchtop.TableDriver, error) {
 	}
 
 	// load Field indices from disk
-	driver.LoadFields()
+	err = driver.LoadFields()
+	if err != nil {
+		return nil, err
+	}
 
 	tableNames := driver.List()
 	for _, tableName := range tableNames {
@@ -223,9 +226,19 @@ func (dr *BSONDriver) Close() {
 }
 
 func (dr *BSONDriver) Get(name string) (benchtop.TableStore, error) {
+
+	dr.Lock.RLock()
+	if x, ok := dr.Tables[name]; ok {
+		dr.Lock.RUnlock()
+		return x, nil
+	}
+	dr.Lock.RUnlock()
+
 	dr.Lock.Lock()
 	defer dr.Lock.Unlock()
 
+	// To avoid the race condition of creating a table when it has already been created,
+	// double check if the table was loaded by another goroutine
 	if x, ok := dr.Tables[name]; ok {
 		return x, nil
 	}
@@ -499,7 +512,10 @@ func (dr *BSONDriver) BulkLoad(inputs chan *benchtop.Row, tx *pebblebulk.PebbleB
 					continue
 				}
 				for _, key := range meta.fieldIndexKeys {
-					tx.Set(key, []byte{}, nil)
+					err := tx.Set(key, []byte{}, nil)
+					if err != nil {
+						errs = multierror.Append(errs, err)
+					}
 				}
 				for _, m := range meta.metadata {
 					meta.table.addTableDeleteEntryInfo(tx, []byte(m.id), meta.table.Name)
@@ -511,9 +527,11 @@ func (dr *BSONDriver) BulkLoad(inputs chan *benchtop.Row, tx *pebblebulk.PebbleB
 
 		var err error
 		if tx == nil {
-			err = dr.Pb.BulkWrite(writeFunc)
+			errs = multierror.Append(errs, fmt.Errorf("pebble bulk instance passed into BulkLoad function is nil"))
 		} else {
-			writeFunc(tx)
+			dr.Lock.Lock()
+			err = writeFunc(tx)
+			dr.Lock.Unlock()
 		}
 		if err != nil {
 			errs = multierror.Append(errs, err)
