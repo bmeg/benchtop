@@ -1,7 +1,6 @@
 package benchtop
 
 import (
-	"github.com/bmeg/benchtop/pebblebulk"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/bsontype"
 )
@@ -72,7 +71,7 @@ type BulkResponse struct {
 
 type TableStore interface {
 	GetColumnDefs() []ColumnDef
-	AddRow(elem Row, tx *pebblebulk.PebbleBulk) error
+	//AddRow(elem Row, tx *pebblebulk.PebbleBulk) error
 	GetRow(key []byte, fields ...string) (map[string]any, error)
 	DeleteRow(key []byte) error
 

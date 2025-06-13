@@ -77,12 +77,14 @@ func TestInsert(t *testing.T) {
 		t.Error(err)
 	}
 
-	for k, r := range data {
-		err := ts.AddRow(benchtop.Row{Id: []byte(k), Data: r})
-		if err != nil {
-			t.Error(err)
+	loadChan := make(chan benchtop.Row)
+	go func() {
+		for k, r := range data {
+			loadChan <- benchtop.Row{Id: []byte(k), Data: r}
 		}
-	}
+		close(loadChan)
+	}()
+	ts.Load(loadChan)
 
 	for k := range data {
 		post, err := ts.GetRow([]byte(k))

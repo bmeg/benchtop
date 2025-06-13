@@ -28,17 +28,19 @@ func TestDelete(t *testing.T) {
 		t.Error(err)
 	}
 
+	loadData := make(chan benchtop.Row)
 	totalCount := 100
-	for i := 0; i < totalCount; i++ {
-		key := fmt.Sprintf("key_%d", i)
-		err := ts.AddRow(benchtop.Row{Id: []byte(key), Data: map[string]any{
-			"id":   key,
-			"data": i,
-		}})
-		if err != nil {
-			t.Error(err)
+	go func() {
+		for i := 0; i < totalCount; i++ {
+			key := fmt.Sprintf("key_%d", i)
+			loadData <- benchtop.Row{Id: []byte(key), Data: map[string]any{
+				"id":   key,
+				"data": i,
+			}}
 		}
-	}
+		close(loadData)
+	}()
+	ts.Load(loadData)
 
 	count := 0
 	r, err := ts.Keys()
