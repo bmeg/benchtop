@@ -9,7 +9,10 @@ import (
 	"time"
 
 	"github.com/bmeg/benchtop"
+	"github.com/bmeg/benchtop/bsontable/tpath"
 	"github.com/bmeg/benchtop/pebblebulk"
+	"github.com/bmeg/jsonpath"
+	"github.com/cockroachdb/pebble"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 )
@@ -54,6 +57,37 @@ func (b *BSONTable) addTableEntryInfo(tx *pebblebulk.PebbleBulk, rowId []byte, o
 	} else {
 		b.db.Set(posKey, value, nil)
 	}
+}
+
+type EntryInfo struct {
+	Offset uint64
+	Size   uint64
+}
+
+func PathLookup(v map[string]any, path string) any {
+	/* Expects that special fields like '_id' and '_label'
+	   are added to the map before reaching this function
+	*/
+	field := tpath.NormalizePath(path)
+	jpath := tpath.ToLocalPath(field)
+	res, err := jsonpath.JsonPathLookup(v, jpath)
+	if err != nil {
+		return nil
+	}
+	return res
+}
+
+func (b *BSONTable) getTableEntryInfo(snap *pebble.Snapshot, id []byte) (*EntryInfo, error) {
+	// Really only want to see if anything was returned or not
+	_, closer, err := snap.Get(benchtop.NewPosKey(b.tableId, id))
+	if err == pebble.ErrNotFound {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer closer.Close()
+	return &EntryInfo{}, nil
 }
 
 func convertBSONTypes(value any) any {
@@ -159,7 +193,7 @@ func (b *BSONTable) getBlockPos(id []byte) (uint64, uint64, error) {
 	return offset, size, nil
 }
 
-func (b *BSONTable) setIndices(inputs chan benchtop.Index) {
+func (b *BSONTable) setDataIndices(inputs chan benchtop.Index) {
 	for index := range inputs {
 		b.addTableEntryInfo(nil, index.Key, index.Position, index.Size)
 	}

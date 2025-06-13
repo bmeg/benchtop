@@ -6,20 +6,22 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 
 	"github.com/bmeg/benchtop"
-	"github.com/bmeg/benchtop/bsontable/filters"
 	"github.com/bmeg/benchtop/pebblebulk"
 	"github.com/bmeg/grip/log"
 	multierror "github.com/hashicorp/go-multierror"
 
+	tableFilters "github.com/bmeg/benchtop/bsontable/filters"
 	"github.com/cockroachdb/pebble"
 
 	"go.mongodb.org/mongo-driver/bson"
-	//NOTE: try github.com/dgraph-io/ristretto for cache
+	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
 type BSONTable struct {
@@ -32,7 +34,6 @@ type BSONTable struct {
 	handleLock sync.RWMutex
 	Path       string
 	Name       string
-	tType      byte
 	filePool   chan *os.File
 	FileName   string
 }
@@ -61,15 +62,17 @@ func (b *BSONTable) Close() {
 ////////////////////////////////////////////////////////////////
 Unary single effect operations
 */
-func (b *BSONTable) AddRow(elem benchtop.Row) error {
+func (b *BSONTable) AddRow(elem benchtop.Row, tx *pebblebulk.PebbleBulk) error {
 	mData, err := b.packData(elem.Data, string(elem.Id))
 	if err != nil {
 		return err
 	}
+
 	bData, err := bson.Marshal(mData)
 	if err != nil {
 		return err
 	}
+
 	//append to end of block file
 	b.handleLock.Lock()
 	defer b.handleLock.Unlock()
@@ -82,11 +85,10 @@ func (b *BSONTable) AddRow(elem benchtop.Row) error {
 	if err != nil {
 		log.Errorf("write handler err in Load: bulkSet: %s", err)
 	}
+	b.addTableDeleteEntryInfo(tx, elem.Id, elem.TableName)
+	b.addTableEntryInfo(tx, elem.Id, uint64(offset), uint64(writesize))
 
-	b.addTableDeleteEntryInfo(nil, elem.Id, elem.TableName)
-	b.addTableEntryInfo(nil, elem.Id, uint64(offset), uint64(writesize))
 	return nil
-
 }
 
 func (b *BSONTable) GetRow(id []byte, fields ...string) (map[string]any, error) {
@@ -128,15 +130,12 @@ func (b *BSONTable) DeleteRow(name []byte) error {
 	if err != nil {
 		return err
 	}
-	b.handle.Seek(int64(offset+8), io.SeekStart)
-	_, err = b.handle.Write([]byte{0x00, 0x00, 0x00, 0x00})
-	if err != nil {
-		return err
+	b.handleLock.Lock()
+	if _, err := b.handle.WriteAt([]byte{0x00, 0x00, 0x00, 0x00}, int64(offset+8)); err != nil {
+		return fmt.Errorf("writeAt failed: %w", err)
 	}
-
-	posKey := benchtop.NewPosKey(b.tableId, name)
-	b.db.Delete(posKey, nil)
-
+	b.handleLock.Unlock()
+	b.db.Delete(benchtop.NewPosKey(b.tableId, name), nil)
 	return nil
 }
 
@@ -179,7 +178,7 @@ func (b *BSONTable) Compact() error {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		b.setIndices(inputChan)
+		b.setDataIndices(inputChan)
 	}()
 
 	for {
@@ -316,91 +315,188 @@ func (b *BSONTable) Keys() (chan benchtop.Index, error) {
 	return out, nil
 }
 
-func (b *BSONTable) Scan(keys bool, filter []benchtop.FieldFilter, fields ...string) (chan map[string]any, error) {
+func (b *BSONTable) Scan(keys bool, filter []benchtop.FieldFilter, fields ...string) chan any {
 	b.handleLock.RLock()
 	defer b.handleLock.RUnlock()
 
-	out := make(chan map[string]any, 10)
+	// Create a single channel of type chan any
+	outChan := make(chan any, 100)
+
 	_, err := b.handle.Seek(0, io.SeekStart)
 	if err != nil {
-		return nil, err
+		close(outChan) // Close the channel if an error occurs before the goroutine starts
+		log.Errorln("Error in bsontable scan func", err)
+		return nil
 	}
 
+	filterFields := extractFilterFields(filter)
+	allFields := len(fields) == 0
+	selectedFields := fields
+	if allFields && !keys {
+		selectedFields = make([]string, len(b.columns))
+		for i, col := range b.columns {
+			selectedFields[i] = col.Key
+		}
+	}
+	requiredFields := union(filterFields, selectedFields)
+
 	go func() {
-		defer close(out)
+		defer close(outChan) // Always close the channel when the goroutine exits
+
+		var header [12]byte // 8 bytes offset + 4 bytes size
+		rowData := make([]byte, 0, 1024)
+
 		for {
-			offsetSizeData := make([]byte, 8)
-			_, err := b.handle.Read(offsetSizeData)
+			// Single read for offset and size
+			_, err := b.handle.Read(header[:])
 			if err == io.EOF {
 				break
 			}
 			if err != nil {
+				log.Errorln("Err in bsontable read", err)
 				return
 			}
+			nextOffset := binary.LittleEndian.Uint64(header[:8])
+			bSize := int32(binary.LittleEndian.Uint32(header[8:12]))
 
-			NextOffset := binary.LittleEndian.Uint64(offsetSizeData)
-
-			sizeBytes := make([]byte, 4)
-			_, err = b.handle.Read(sizeBytes)
-			if err != nil {
-				return
-			}
-
-			bSize := int32(binary.LittleEndian.Uint32(sizeBytes))
-
-			// Elem has been deleted or at the table header in the begginning of the file skip it.
-			if bSize == 0 || int64(bSize) == int64(NextOffset)-8 {
-				_, err = b.handle.Seek(int64(NextOffset), io.SeekStart)
+			// Skip deleted rows or headers
+			if bSize == 0 || int64(bSize) == int64(nextOffset)-8 {
+				_, err = b.handle.Seek(int64(nextOffset), io.SeekStart)
 				if err == io.EOF {
 					break
 				}
+				if err != nil {
+					log.Errorln("Err in bsontable seek", err)
+					return
+				}
 				continue
 			}
-			rowData := make([]byte, bSize)
-			copy(rowData, sizeBytes)
 
+			// Resize buffer and read row data
+			if cap(rowData) < int(bSize) {
+				rowData = make([]byte, bSize)
+			} else {
+				rowData = rowData[:bSize]
+			}
+			copy(rowData[:4], header[8:12])
 			_, err = b.handle.Read(rowData[4:])
 			if err != nil {
+				log.Errorln("Err in bsontable read", err)
 				return
 			}
 
+			// Parse BSON row
 			bd, ok := bson.Raw(rowData).Lookup("R").ArrayOK()
 			if !ok {
-				return
+				continue
 			}
 			columns := bd.Index(0).Value().Array()
+			key := bd.Index(2).Value().StringValue()
 
-			vOut := map[string]any{}
+			// Build row map for filtering and output
+			rowMap := make(map[string]any, len(requiredFields))
+			for i, col := range b.columns {
+				if allFields || slices.Contains(requiredFields, col.Key) {
+					if unpack, err := b.colUnpack(columns.Index(uint(i)), col.Type); err == nil {
+						rowMap[col.Key] = unpack
+					}
+				}
+			}
 
-			if len(fields) == 0 {
-				if keys {
-					vOut["_key"] = bd.Index(2).Value().StringValue()
+			otherData := bd.Index(1).Value().Document()
+			if allFields {
+				var otherMap map[string]any
+				if err := bson.Unmarshal(otherData, &otherMap); err == nil {
+					for k, v := range otherMap {
+						rowMap[k] = convertBSONValue(v)
+					}
 				}
 			} else {
-				for _, colName := range fields {
-					if i, ok := b.columnMap[colName]; ok {
-						n := b.columns[i]
-						unpack, _ := b.colUnpack(columns.Index(uint(i)), n.Type)
-						if filters.PassesFilters(unpack, filter) {
-							vOut[n.Key] = unpack
-							if keys {
-								vOut["_key"] = bd.Index(2).Value().StringValue()
-							}
+				for _, field := range requiredFields {
+					if !isNamedColumn(field, b.columns) {
+						if val, err := otherData.LookupErr(field); err == nil {
+							rowMap[field] = convertBSONValue(val)
 						}
 					}
 				}
 			}
-			if len(vOut) > 0 {
-				out <- vOut
+
+			if PassesFilters(rowMap, filter) {
+				if keys {
+					outChan <- key
+					continue
+				}
+				vOut := make(map[string]any)
+				if allFields {
+					maps.Copy(vOut, rowMap)
+					vOut["_key"] = key
+					vOut["_id"] = key
+				} else {
+					for _, colName := range selectedFields {
+						if val, ok := rowMap[colName]; ok {
+							vOut[colName] = val
+						}
+					}
+				}
+				if len(vOut) > 0 {
+					outChan <- vOut
+				}
 			}
 
-			_, err = b.handle.Seek(int64(NextOffset), io.SeekStart)
+			_, err = b.handle.Seek(int64(nextOffset), io.SeekStart)
 			if err == io.EOF {
 				break
 			}
+			if err != nil {
+				log.Errorln("Err in bsontable seek", err)
+				return
+			}
 		}
 	}()
-	return out, nil
+
+	return outChan
+}
+
+func convertBSONValue(val any) any {
+	switch v := val.(type) {
+	case primitive.D: // Ordered BSON document
+		m := make(map[string]any)
+		for _, elem := range v {
+			m[elem.Key] = convertBSONValue(elem.Value) // Recurse for nested values
+		}
+		return m
+	case primitive.M: // Unordered BSON document
+		m := make(map[string]any)
+		for key, value := range v {
+			m[key] = convertBSONValue(value) // Recurse for nested values
+		}
+		return m
+	case primitive.A: // BSON array
+		arr := make([]any, len(v))
+		for i, elem := range v {
+			arr[i] = convertBSONValue(elem) // Recurse for array elements
+		}
+		return arr
+	case primitive.ObjectID: // Convert ObjectID to its string representation
+		return v.Hex()
+	case primitive.DateTime: // Convert BSON DateTime to Go's time.Time
+		return v.Time()
+	// Add other specific primitive types if you need custom conversions, e.g.,
+	// case primitive.Decimal128:
+	//    return v.String() // Convert Decimal128 to string
+	default:
+		// For all other types (string, int, float, bool, nil, etc.), return as is
+		return val
+	}
+}
+
+func PassesFilters(val any, filters []benchtop.FieldFilter) bool {
+	for _, filter := range filters {
+		if !tableFilters.ApplyFilterCondition(PathLookup(val.(map[string]any), filter.Field), filter) {
+			return false
+		}
+	}
+	return true
 }
 
 func (b *BSONTable) Fetch(inputs chan benchtop.Index, workers int) <-chan benchtop.BulkResponse {
@@ -544,4 +640,36 @@ func (b *BSONTable) Remove(inputs chan benchtop.Index, workers int) <-chan bench
 	}()
 
 	return results
+}
+
+func union(a, b []string) []string {
+	set := make(map[string]struct{})
+	for _, v := range a {
+		set[v] = struct{}{}
+	}
+	for _, v := range b {
+		set[v] = struct{}{}
+	}
+	result := make([]string, 0, len(set))
+	for k := range set {
+		result = append(result, k)
+	}
+	return result
+}
+
+func extractFilterFields(filter []benchtop.FieldFilter) []string {
+	fields := make([]string, 0, len(filter))
+	for _, f := range filter {
+		fields = append(fields, f.Field)
+	}
+	return fields
+}
+
+func isNamedColumn(field string, columns []benchtop.ColumnDef) bool {
+	for _, col := range columns {
+		if col.Key == field {
+			return true
+		}
+	}
+	return false
 }
