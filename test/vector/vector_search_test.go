@@ -52,13 +52,15 @@ func TestInsert(t *testing.T) {
 		vmap[fmt.Sprintf("%d", i)] = c
 	}
 
-	for k, v := range vmap {
-		//fmt.Printf("==vector==:%s\n", k)
-		err := table.AddRow(benchtop.Row{Id: []byte(k), Data: map[string]any{"embedding": v}})
-		if err != nil {
-			t.Error(err)
+	loadChan := make(chan benchtop.Row)
+	go func() {
+		for k, v := range vmap {
+			//fmt.Printf("==vector==:%s\n", k)
+			loadChan <- benchtop.Row{Id: []byte(k), Data: map[string]any{"embedding": v}}
 		}
-	}
+		close(loadChan)
+	}()
+	table.Load(loadChan)
 
 	//TODO Add search here
 

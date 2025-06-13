@@ -27,12 +27,14 @@ func TestCompact(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for k, r := range fixtures.ScanData {
-		err := ts.AddRow(benchtop.Row{Id: []byte(k), Data: r})
-		if err != nil {
-			t.Fatal(err)
+	loadData := make(chan benchtop.Row)
+	go func() {
+		for k, r := range fixtures.ScanData {
+			loadData <- benchtop.Row{Id: []byte(k), Data: r}
 		}
-	}
+		close(loadData)
+	}()
+	ts.Load(loadData)
 
 	err = ts.DeleteRow([]byte("key4"))
 	if err != nil {
@@ -67,7 +69,7 @@ func TestCompact(t *testing.T) {
 		t.Logf("size before=%d, after=%d", beforeSize, afterSize)
 	}
 
-	testChan, err := ts.Scan(true, nil, "field1", "name")
+	testChan := ts.Scan(true, nil, "field1", "name")
 	if err != nil {
 		t.Error(err)
 	}

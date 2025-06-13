@@ -36,10 +36,10 @@ func TestScan(t *testing.T) {
 	}
 
 	lenscanChan := 0
-	scanChan, err := ts.Scan(false, []benchtop.FieldFilter{benchtop.FieldFilter{Field: "name", Operator: "==", Value: "alice"}}, "name", "field1")
-	if err != nil {
-		t.Error(err)
-	}
+	scanChan := ts.Scan(false, []benchtop.FieldFilter{benchtop.FieldFilter{Field: "name", Operator: "==", Value: "alice"}}, "name", "field1")
+	//if err != nil {
+	//	t.Error(err)
+	//}
 	for elem := range scanChan {
 		lenscanChan++
 		t.Log("scanChan: ", elem)
@@ -51,10 +51,10 @@ func TestScan(t *testing.T) {
 		}
 	}
 
-	scanChantwo, err := ts.Scan(true, []benchtop.FieldFilter{benchtop.FieldFilter{Field: "field1", Operator: "==", Value: 0.2}}, "name", "field1")
-	if err != nil {
-		t.Error(err)
-	}
+	scanChantwo := ts.Scan(true, []benchtop.FieldFilter{benchtop.FieldFilter{Field: "field1", Operator: "==", Value: 0.2}}, "name", "field1")
+	//if err != nil {
+	//	t.Error(err)
+	//}
 	for elem := range scanChantwo {
 		t.Log("scanChantwo: ", elem)
 		if elem["field1"] != 0.2 {
@@ -67,10 +67,10 @@ func TestScan(t *testing.T) {
 		}
 	}
 
-	scanChanthree, err := ts.Scan(true, []benchtop.FieldFilter{benchtop.FieldFilter{Field: "field1", Operator: ">", Value: 0.2}}, "name", "field1")
-	if err != nil {
-		t.Error(err)
-	}
+	scanChanthree := ts.Scan(true, []benchtop.FieldFilter{benchtop.FieldFilter{Field: "field1", Operator: ">", Value: 0.2}}, "name", "field1")
+	//if err != nil {
+	//	t.Error(err)
+	//}
 	scanChanLen := 0
 	for elem := range scanChanthree {
 		t.Log("scanChanthree: ", elem)
@@ -90,10 +90,10 @@ func TestScan(t *testing.T) {
 		t.Error(err)
 	}
 
-	scanChanfour, err := ts.Scan(false, []benchtop.FieldFilter{benchtop.FieldFilter{Field: "name", Operator: "startswith", Value: "a"}}, "name", "field1")
-	if err != nil {
-		t.Error(err)
-	}
+	scanChanfour := ts.Scan(false, []benchtop.FieldFilter{benchtop.FieldFilter{Field: "name", Operator: "startswith", Value: "a"}}, "name", "field1")
+	//if err != nil {
+	//	t.Error(err)
+	//}
 	scanChanLen = 0
 	for elem := range scanChanfour {
 		t.Log("scanChanfour: ", elem)
