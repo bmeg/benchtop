@@ -17,7 +17,6 @@ import (
 	"github.com/bmeg/grip/log"
 	multierror "github.com/hashicorp/go-multierror"
 
-	tableFilters "github.com/bmeg/benchtop/bsontable/filters"
 	"github.com/cockroachdb/pebble"
 
 	"go.mongodb.org/mongo-driver/bson"
@@ -315,7 +314,7 @@ func (b *BSONTable) Keys() (chan benchtop.Index, error) {
 	return out, nil
 }
 
-func (b *BSONTable) Scan(keys bool, filter []benchtop.FieldFilter, fields ...string) chan any {
+func (b *BSONTable) Scan(keys bool, filter benchtop.RowFilter, fields ...string) chan any {
 	b.handleLock.RLock()
 	defer b.handleLock.RUnlock()
 
@@ -329,7 +328,10 @@ func (b *BSONTable) Scan(keys bool, filter []benchtop.FieldFilter, fields ...str
 		return nil
 	}
 
-	filterFields := extractFilterFields(filter)
+	var filterFields []string
+	if filter != nil {
+		filterFields = filter.RequiredFields()
+	}
 	allFields := len(fields) == 0
 	selectedFields := fields
 	if allFields && !keys {
@@ -421,7 +423,7 @@ func (b *BSONTable) Scan(keys bool, filter []benchtop.FieldFilter, fields ...str
 				}
 			}
 
-			if PassesFilters(rowMap, filter) {
+			if filter == nil || (filter != nil && filter.Matches(rowMap)) {
 				if keys {
 					outChan <- key
 					continue
@@ -488,15 +490,6 @@ func convertBSONValue(val any) any {
 		// For all other types (string, int, float, bool, nil, etc.), return as is
 		return val
 	}
-}
-
-func PassesFilters(val any, filters []benchtop.FieldFilter) bool {
-	for _, filter := range filters {
-		if !tableFilters.ApplyFilterCondition(PathLookup(val.(map[string]any), filter.Field), filter) {
-			return false
-		}
-	}
-	return true
 }
 
 func (b *BSONTable) Fetch(inputs chan benchtop.Index, workers int) <-chan benchtop.BulkResponse {
@@ -655,14 +648,6 @@ func union(a, b []string) []string {
 		result = append(result, k)
 	}
 	return result
-}
-
-func extractFilterFields(filter []benchtop.FieldFilter) []string {
-	fields := make([]string, 0, len(filter))
-	for _, f := range filter {
-		fields = append(fields, f.Field)
-	}
-	return fields
 }
 
 func isNamedColumn(field string, columns []benchtop.ColumnDef) bool {

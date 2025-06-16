@@ -8,8 +8,7 @@ import (
 	"github.com/spf13/cast"
 )
 
-// This function is largely the same and is adapted from bmeg/grip/engine/logic/match.go MatchesCondition function
-func ApplyFilterCondition(val any, cond benchtop.FieldFilter) bool {
+func ApplyFilterCondition(val any, cond *benchtop.FieldFilter) bool {
 	condVal := cond.Value
 	if (val == nil || cond.Value == nil) &&
 		cond.Operator != benchtop.OP_EQ &&

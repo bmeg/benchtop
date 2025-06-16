@@ -18,7 +18,7 @@ func (dr *BSONDriver) AddField(label, field string) error {
 
 	foundTable, ok := dr.Tables[label]
 	if !ok {
-		log.Debugf("Creating index for table '%s' that has not been written yet", label)
+		log.Debugf("Creating index '%s' for table '%s' that has not been written yet", field, label)
 		// If the table doesn't yet exist, write the index Key stub.
 		err := dr.db.Set(
 			benchtop.FieldKey(field, label, nil, nil),
@@ -175,7 +175,7 @@ func (dr *BSONDriver) RowIdsByHas(fltField string, fltValue any, fltOp benchtop.
 				_, _, value, rowID := benchtop.FieldKeyParse(it.Key())
 				if tableFilters.ApplyFilterCondition(
 					value,
-					benchtop.FieldFilter{
+					&benchtop.FieldFilter{
 						Field: fltField, Value: fltValue, Operator: fltOp,
 					},
 				) {
@@ -205,7 +205,7 @@ func (dr *BSONDriver) RowIdsByLabelFieldValue(fltLabel string, fltField string, 
 				_, _, value, rowID := benchtop.FieldKeyParse(it.Key())
 				if tableFilters.ApplyFilterCondition(
 					value,
-					benchtop.FieldFilter{
+					&benchtop.FieldFilter{
 						Field: fltField, Value: fltValue, Operator: fltOp,
 					},
 				) {

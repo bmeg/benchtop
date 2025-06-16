@@ -70,6 +70,15 @@ type BulkResponse struct {
 	Err  string
 }
 
+type RowFilter interface {
+	// Matches returns true if the row passes the filter.
+	Matches(row map[string]any) bool
+
+	// RequiredFields returns a slice of field names needed to evaluate the filter.
+	RequiredFields() []string
+}
+
+
 type TableStore interface {
 	GetColumnDefs() []ColumnDef
 	AddRow(elem Row, tx *pebblebulk.PebbleBulk) error
@@ -78,7 +87,7 @@ type TableStore interface {
 
 	Fetch(inputs chan Index, workers int) <-chan BulkResponse
 	Remove(inputs chan Index, workers int) <-chan BulkResponse
-	Scan(key bool, filter []FieldFilter, fields ...string) chan any
+	Scan(key bool, filter RowFilter, fields ...string) chan any
 	Load(chan Row) error
 	Keys() (chan Index, error)
 
