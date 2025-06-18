@@ -192,7 +192,7 @@ func (dr *BSONDriver) RowIdsByHas(fltField string, fltValue any, fltOp benchtop.
 }
 
 func (dr *BSONDriver) RowIdsByLabelFieldValue(fltLabel string, fltField string, fltValue any, fltOp benchtop.OperatorType) chan string {
-	log.WithFields(log.Fields{"label": fltLabel, "field": fltField, "value": fltValue}).Info("Running RowIdsByLabelFieldValue")
+	log.WithFields(log.Fields{"label": fltLabel, "field": fltField, "value": fltValue}).Debug("Running RowIdsByLabelFieldValue")
 	dr.Lock.RLock()
 	defer dr.Lock.RUnlock()
 

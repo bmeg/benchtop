@@ -315,13 +315,18 @@ func (b *BSONTable) Keys() (chan benchtop.Index, error) {
 }
 
 func (b *BSONTable) Scan(keys bool, filter benchtop.RowFilter, fields ...string) chan any {
-	b.handleLock.RLock()
-	defer b.handleLock.RUnlock()
+	handle, ok := <-b.filePool
+	if !ok {
+		log.Errorln("Error: File pool is closed.")
+		outChan := make(chan any)
+		close(outChan)
+		return outChan
+	}
 
 	// Create a single channel of type chan any
 	outChan := make(chan any, 100)
 
-	_, err := b.handle.Seek(0, io.SeekStart)
+	_, err := handle.Seek(0, io.SeekStart)
 	if err != nil {
 		close(outChan) // Close the channel if an error occurs before the goroutine starts
 		log.Errorln("Error in bsontable scan func", err)
@@ -343,115 +348,150 @@ func (b *BSONTable) Scan(keys bool, filter benchtop.RowFilter, fields ...string)
 	requiredFields := union(filterFields, selectedFields)
 
 	go func() {
-		defer close(outChan) // Always close the channel when the goroutine exits
+		defer func() {
+			close(outChan)
+			b.filePool <- handle // Return handle to pool
+		}()
 
-		var header [12]byte // 8 bytes offset + 4 bytes size
-		rowData := make([]byte, 0, 1024)
+		const bufferSize = 16 << 20 // 1MB buffer
+		buffer := make([]byte, bufferSize)
+		var bufStart, bufEnd, filePos int64
+		var leftover []byte
 
 		for {
-			// Single read for offset and size
-			_, err := b.handle.Read(header[:])
-			if err == io.EOF {
-				break
-			}
-			if err != nil {
-				log.Errorln("Err in bsontable read", err)
-				return
-			}
-			nextOffset := binary.LittleEndian.Uint64(header[:8])
-			bSize := int32(binary.LittleEndian.Uint32(header[8:12]))
+			// Fill buffer if empty or insufficient data
+			if bufEnd-bufStart < 12 || (len(leftover) > 0 && int64(len(leftover)) < bufEnd-bufStart) {
+				// Shift remaining data to start
+				if bufStart < bufEnd {
+					copy(buffer[:bufEnd-bufStart], buffer[bufStart:bufEnd])
+				}
+				bufEnd -= bufStart
+				bufStart = 0
 
-			// Skip deleted rows or headers
-			if bSize == 0 || int64(bSize) == int64(nextOffset)-8 {
-				_, err = b.handle.Seek(int64(nextOffset), io.SeekStart)
-				if err == io.EOF {
+				// Read more data
+				n, err := handle.Read(buffer[bufEnd:])
+				if err == io.EOF && bufEnd == 0 && len(leftover) == 0 {
 					break
 				}
-				if err != nil {
-					log.Errorln("Err in bsontable seek", err)
+				if err != nil && err != io.EOF {
+					log.Errorln("Error reading file", err)
 					return
 				}
-				continue
+				bufEnd += int64(n)
+				filePos += int64(n)
 			}
 
-			// Resize buffer and read row data
-			if cap(rowData) < int(bSize) {
-				rowData = make([]byte, bSize)
-			} else {
-				rowData = rowData[:bSize]
-			}
-			copy(rowData[:4], header[8:12])
-			_, err = b.handle.Read(rowData[4:])
-			if err != nil {
-				log.Errorln("Err in bsontable read", err)
-				return
+			// Combine leftover with current buffer
+			data := buffer[bufStart:bufEnd]
+			if len(leftover) > 0 {
+				data = append(leftover, data...)
+				leftover = nil
 			}
 
-			// Parse BSON row
-			bd, ok := bson.Raw(rowData).Lookup("R").ArrayOK()
-			if !ok {
-				continue
-			}
-			columns := bd.Index(0).Value().Array()
-			key := bd.Index(2).Value().StringValue()
+			// Process records in buffer
+			for pos := int64(0); pos+12 <= int64(len(data)); {
+				nextOffset := binary.LittleEndian.Uint64(data[pos : pos+8])
+				bSize := int32(binary.LittleEndian.Uint32(data[pos+8 : pos+12]))
 
-			// Build row map for filtering and output
-			rowMap := make(map[string]any, len(requiredFields))
-			for i, col := range b.columns {
-				if allFields || slices.Contains(requiredFields, col.Key) {
-					if unpack, err := b.colUnpack(columns.Index(uint(i)), col.Type); err == nil {
-						rowMap[col.Key] = unpack
+				// Skip invalid records
+				if bSize == 0 || int64(bSize) == int64(nextOffset)-8 {
+					if nextOffset < uint64(filePos-bufEnd+bufStart+pos) {
+						log.Errorln("Invalid nextOffset, seeking backward")
+						return
 					}
-				}
-			}
-
-			otherData := bd.Index(1).Value().Document()
-			if allFields {
-				var otherMap map[string]any
-				if err := bson.Unmarshal(otherData, &otherMap); err == nil {
-					for k, v := range otherMap {
-						rowMap[k] = convertBSONValue(v)
-					}
-				}
-			} else {
-				for _, field := range requiredFields {
-					if !isNamedColumn(field, b.columns) {
-						if val, err := otherData.LookupErr(field); err == nil {
-							rowMap[field] = convertBSONValue(val)
+					if nextOffset > uint64(filePos) {
+						// Seek to next record
+						_, err := handle.Seek(int64(nextOffset), io.SeekStart)
+						if err != nil {
+							log.Errorln("Error seeking", err)
+							return
 						}
+						filePos = int64(nextOffset)
+						bufStart, bufEnd = 0, 0
+						leftover = nil
+						break
 					}
-				}
-			}
-
-			if filter == nil || (filter != nil && filter.Matches(rowMap)) {
-				if keys {
-					outChan <- key
+					pos = int64(nextOffset) - (filePos - bufEnd)
 					continue
 				}
-				vOut := make(map[string]any)
-				if allFields {
-					maps.Copy(vOut, rowMap)
-					vOut["_key"] = key
-					vOut["_id"] = key
-				} else {
-					for _, colName := range selectedFields {
-						if val, ok := rowMap[colName]; ok {
-							vOut[colName] = val
+
+				// Check if entire record is in buffer
+				if pos+8+int64(bSize) > int64(len(data)) {
+					leftover = data[pos:]
+					bufStart = bufEnd
+					break
+				}
+
+				// Extract row data
+				rowData := data[pos+8 : pos+8+int64(bSize)]
+
+				// Parse BSON row
+				bd, ok := bson.Raw(rowData).Lookup("R").ArrayOK()
+				if !ok {
+					pos += 8 + int64(bSize)
+					continue
+				}
+				columns := bd.Index(0).Value().Array()
+				key := bd.Index(2).Value().StringValue()
+
+				// Build row map
+				rowMap := make(map[string]any, len(requiredFields))
+				for i, col := range b.columns {
+					if allFields || slices.Contains(requiredFields, col.Key) {
+						if unpack, err := b.colUnpack(columns.Index(uint(i)), col.Type); err == nil {
+							rowMap[col.Key] = unpack
 						}
 					}
 				}
-				if len(vOut) > 0 {
-					outChan <- vOut
+
+				otherData := bd.Index(1).Value().Document()
+				if allFields {
+					var otherMap map[string]any
+					if err := bson.Unmarshal(otherData, &otherMap); err == nil {
+						for k, v := range otherMap {
+							rowMap[k] = convertBSONValue(v)
+						}
+					}
+				} else {
+					for _, field := range requiredFields {
+						if !isNamedColumn(field, b.columns) {
+							if val, err := otherData.LookupErr(field); err == nil {
+								rowMap[field] = convertBSONValue(val)
+							}
+						}
+					}
 				}
+
+				// Apply filter and send output
+				if filter == nil || filter.Matches(rowMap) {
+					if keys {
+						outChan <- key
+					} else {
+						vOut := make(map[string]any)
+						if allFields {
+							maps.Copy(vOut, rowMap)
+							vOut["_key"] = key
+							vOut["_id"] = key
+						} else {
+							for _, colName := range selectedFields {
+								if val, ok := rowMap[colName]; ok {
+									vOut[colName] = val
+								}
+							}
+						}
+						if len(vOut) > 0 {
+							outChan <- vOut
+						}
+					}
+				}
+
+				// Move to next record
+				pos += 8 + int64(bSize)
 			}
 
-			_, err = b.handle.Seek(int64(nextOffset), io.SeekStart)
-			if err == io.EOF {
-				break
-			}
-			if err != nil {
-				log.Errorln("Err in bsontable seek", err)
-				return
+			// Update buffer position
+			if len(leftover) == 0 {
+				bufStart += int64(len(data))
 			}
 		}
 	}()

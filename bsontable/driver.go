@@ -403,7 +403,7 @@ func (dr *BSONDriver) BulkLoad(inputs chan *benchtop.Row, tx *pebblebulk.PebbleB
 					_, fieldsExist := dr.Fields[tableName]
 					if fieldsExist {
 						for field := range dr.Fields[tableName] {
-							if val := PathLookup(row.Data,field); val != nil {
+							if val := PathLookup(row.Data, field); val != nil {
 								fieldIndexKeys = append(fieldIndexKeys, benchtop.FieldKey(field, tableName, val, row.Id))
 							}
 						}
