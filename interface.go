@@ -35,6 +35,9 @@ type TableInfo struct {
 	Id       uint32      `json:"id"`
 	FileName string      `json:"fileName"`
 	Columns  []ColumnDef `json:"columns"`
+	TableId  uint32      `json:"tableid"`
+	Path     string      `json:"path"`
+	Name     string      `json:"name"`
 }
 
 type ColumnDef struct {
@@ -77,7 +80,6 @@ type RowFilter interface {
 	// RequiredFields returns a slice of field names needed to evaluate the filter.
 	RequiredFields() []string
 }
-
 
 type TableStore interface {
 	GetColumnDefs() []ColumnDef

@@ -55,7 +55,6 @@ func NewBSONDriver(path string) (benchtop.TableDriver, error) {
 		PebbleLock: sync.Mutex{},
 	}, nil
 }
-
 func LoadBSONDriver(path string) (benchtop.TableDriver, error) {
 	db, err := pebble.Open(path, &pebble.Options{})
 	if err != nil {
@@ -81,7 +80,6 @@ func LoadBSONDriver(path string) (benchtop.TableDriver, error) {
 		PebbleLock: sync.Mutex{},
 	}
 
-	// load Field indices from disk
 	err = driver.LoadFields()
 	if err != nil {
 		return nil, err
@@ -94,47 +92,48 @@ func LoadBSONDriver(path string) (benchtop.TableDriver, error) {
 			driver.Close()
 			return nil, fmt.Errorf("failed to load table %s: %v", tableName, err)
 		}
-
 		bsonTable, ok := table.(*BSONTable)
 		if !ok {
 			driver.Close()
+			log.Errorf("invalid table type for %s", tableName)
 			return nil, fmt.Errorf("invalid table type for %s", tableName)
 		}
-
+		// Pb is already set in Get, but ensure consistency if needed
 		bsonTable.Pb = &pebblebulk.PebbleKV{
 			Db:           db,
 			InsertCount:  0,
 			CompactLimit: uint32(1000),
 		}
-
-		if err := bsonTable.Init(10); err != nil {
-			log.Errorf("Failed to init table %s: %v", tableName, err)
-			return nil, fmt.Errorf("failed to init table %s: %v", tableName, err)
-		}
+		driver.Lock.Lock()
 		driver.Tables[tableName] = bsonTable
-
+		driver.Lock.Unlock()
+		log.Debugf("Loaded table %s with FilePool: %v", tableName, bsonTable.FilePool)
 	}
 
 	return driver, nil
 }
 
 func (dr *BSONDriver) New(name string, columns []benchtop.ColumnDef) (benchtop.TableStore, error) {
-	p, _ := dr.Get(name)
-	if p != nil {
-		// No need to err here, if it exists just return the table
+	dr.Lock.RLock()
+	if p, ok := dr.Tables[name]; ok {
+		dr.Lock.RUnlock()
 		return p, nil
 	}
+	dr.Lock.RUnlock()
 
 	dr.Lock.Lock()
 	defer dr.Lock.Unlock()
 
+	if p, ok := dr.Tables[name]; ok {
+		return p, nil
+	}
+
 	newId := dr.getMaxTablePrefix()
 	formattedName := util.PadToSixDigits(int(newId))
-
 	tPath := filepath.Join(dr.base, "TABLES", formattedName)
 	f, err := os.Create(tPath)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to create table %s: %v", tPath, err)
 	}
 
 	out := &BSONTable{
@@ -145,39 +144,58 @@ func (dr *BSONDriver) New(name string, columns []benchtop.ColumnDef) (benchtop.T
 		Name:       name,
 		FileName:   formattedName,
 		handle:     f,
+		db:         dr.db,
+		Pb: &pebblebulk.PebbleKV{
+			Db:           dr.db,
+			InsertCount:  0,
+			CompactLimit: uint32(1000),
+		},
+		tableId: newId,
 	}
-
 	for n, d := range columns {
 		out.columnMap[d.Key] = n
 	}
 
-	out.tableId = newId
-	if err := dr.addTable(newId, name, columns, formattedName); err != nil {
-		log.Errorf("Error: %s", err)
+	// Create TableInfo for serialization
+	tinfo := &benchtop.TableInfo{
+		Columns:  columns,
+		TableId:  newId,
+		Path:     tPath,
+		FileName: formattedName,
+		Name:     name,
 	}
 
-	out.db = dr.db
-	out.Pb = &pebblebulk.PebbleKV{
-		Db:           dr.db,
-		InsertCount:  0,
-		CompactLimit: uint32(1000),
-	}
-
-	outData, err := bson.Marshal(out)
-	if err != nil {
+	if err := dr.addTable(tinfo); err != nil {
+		f.Close()
+		log.Errorf("Error adding table: %s", err)
 		return nil, err
+	}
+
+	outData, err := bson.Marshal(tinfo)
+	if err != nil {
+		f.Close()
+		return nil, fmt.Errorf("failed to marshal table info: %v", err)
 	}
 
 	buffer := make([]byte, 8)
 	binary.LittleEndian.PutUint64(buffer, uint64(0)+uint64(len(outData))+8)
-	out.handle.Write(buffer)
-	out.handle.Write(outData)
-
-	dr.Tables[name] = out
-	if err := out.Init(10); err != nil { // Pool size 10 as example
-		log.Errorln("TABLE POOL ERR: ", err)
+	if _, err := out.handle.Write(buffer); err != nil {
+		f.Close()
+		return nil, fmt.Errorf("failed to write table header: %v", err)
+	}
+	if _, err := out.handle.Write(outData); err != nil {
+		f.Close()
+		return nil, fmt.Errorf("failed to write table data: %v", err)
 	}
 
+	if err := out.Init(10); err != nil {
+		f.Close()
+		log.Errorln("TABLE POOL ERR: %v", err)
+		return nil, fmt.Errorf("failed to init table %s: %v", name, err)
+	}
+
+	dr.Tables[name] = out
+	log.Debugf("Created table %s with FilePool: %v", name, out.FilePool)
 	return out, nil
 }
 
@@ -230,7 +248,6 @@ func (dr *BSONDriver) Close() {
 }
 
 func (dr *BSONDriver) Get(name string) (benchtop.TableStore, error) {
-
 	dr.Lock.RLock()
 	if x, ok := dr.Tables[name]; ok {
 		dr.Lock.RUnlock()
@@ -241,14 +258,11 @@ func (dr *BSONDriver) Get(name string) (benchtop.TableStore, error) {
 	dr.Lock.Lock()
 	defer dr.Lock.Unlock()
 
-	// To avoid the race condition of creating a table when it has already been created,
-	// double check if the table was loaded by another goroutine
 	if x, ok := dr.Tables[name]; ok {
 		return x, nil
 	}
 
 	nkey := benchtop.NewTableKey([]byte(name))
-
 	value, closer, err := dr.db.Get(nkey)
 	if err != nil {
 		return nil, err
@@ -257,8 +271,8 @@ func (dr *BSONDriver) Get(name string) (benchtop.TableStore, error) {
 	bson.Unmarshal(value, &tinfo)
 	closer.Close()
 
+	log.Debugf("TINFO: %#v\n", tinfo)
 	tPath := filepath.Join(dr.base, "TABLES", string(tinfo.FileName))
-
 	f, err := os.OpenFile(tPath, os.O_RDWR|os.O_CREATE, 0644)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open table %s: %v", tPath, err)
@@ -268,18 +282,30 @@ func (dr *BSONDriver) Get(name string) (benchtop.TableStore, error) {
 		columns:    tinfo.Columns,
 		db:         dr.db,
 		columnMap:  map[string]int{},
-		tableId:    tinfo.Id,
+		tableId:    tinfo.TableId,
 		handle:     f,
 		handleLock: sync.RWMutex{},
 		Path:       tPath,
 		FileName:   tinfo.FileName,
 		Name:       name,
+		Pb: &pebblebulk.PebbleKV{
+			Db:           dr.db,
+			InsertCount:  0,
+			CompactLimit: uint32(1000),
+		},
 	}
 	for n, d := range out.columns {
 		out.columnMap[d.Key] = n
 	}
 
+	if out.FilePool == nil {
+		if err := out.Init(10); err != nil {
+			f.Close()
+			return nil, fmt.Errorf("failed to init table %s: %v", name, err)
+		}
+	}
 	dr.Tables[name] = out
+	log.Debugf("Created table %s with FilePool: %v", name, out.FilePool)
 	return out, nil
 }
 

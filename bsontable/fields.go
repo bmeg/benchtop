@@ -236,6 +236,7 @@ func (dr *BSONDriver) GetIDsForLabel(label string) chan string {
 			return
 		}
 
+		log.Debugln("TABLE AQUIRED: ", table.(*BSONTable).Name)
 		for id := range table.Scan(true, nil) {
 			out <- id.(string)
 		}

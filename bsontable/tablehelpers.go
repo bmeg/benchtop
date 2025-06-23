@@ -11,6 +11,7 @@ import (
 	"github.com/bmeg/benchtop"
 	"github.com/bmeg/benchtop/bsontable/tpath"
 	"github.com/bmeg/benchtop/pebblebulk"
+	"github.com/bmeg/grip/log"
 	"github.com/bmeg/jsonpath"
 	"github.com/cockroachdb/pebble"
 	"go.mongodb.org/mongo-driver/bson"
@@ -50,6 +51,8 @@ func (b *BSONTable) addTableDeleteEntryInfo(tx *pebblebulk.PebbleBulk, rowId []b
 	}
 }
 func (b *BSONTable) addTableEntryInfo(tx *pebblebulk.PebbleBulk, rowId []byte, offset, size uint64) {
+
+	log.Debugln("TABLE ID: ", b.tableId, "ID: ", string(rowId))
 	value := benchtop.NewPosValue(offset, size)
 	posKey := benchtop.NewPosKey(b.tableId, rowId)
 	if tx != nil {
@@ -184,8 +187,9 @@ func (b *BSONTable) colUnpack(v bson.RawElement, colType benchtop.FieldType) (an
 
 func (b *BSONTable) getBlockPos(id []byte) (uint64, uint64, error) {
 	idKey := benchtop.NewPosKey(b.tableId, id)
-	val, closer, err := b.db.Get(idKey)
+	val, closer, err := b.Pb.Db.Get(idKey)
 	if err != nil {
+		log.Debugln("TABLE ID: ", b.tableId, "ID: ", string(id))
 		return 0, 0, err
 	}
 	offset, size := benchtop.ParsePosValue(val)
