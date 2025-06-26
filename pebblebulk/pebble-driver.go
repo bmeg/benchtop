@@ -14,6 +14,13 @@ const (
 	maxWriterBuffer = 3 << 30
 )
 
+type PebbleKV struct {
+	Db           *pebble.DB
+	InsertCount  uint32
+	CompactLimit uint32
+	mu           sync.Mutex
+}
+
 type PebbleBulk struct {
 	Db              *pebble.DB
 	Batch           *pebble.Batch
@@ -21,12 +28,6 @@ type PebbleBulk struct {
 	CurSize         int
 	mu              sync.Mutex
 	totalInserts    uint32
-}
-
-type PebbleKV struct {
-	Db           *pebble.DB
-	InsertCount  uint32
-	CompactLimit uint32
 }
 
 func (pb *PebbleBulk) Set(id []byte, val []byte, opts *pebble.WriteOptions) error {
@@ -174,6 +175,7 @@ func (pit *PebbleIterator) Seek(id []byte) error {
 	pit.value = copyBytes(pit.iter.Value())
 	return nil
 }
+
 
 func (pit *PebbleIterator) Next() error {
 	if pit.forward {

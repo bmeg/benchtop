@@ -32,14 +32,15 @@ func (dr *BSONDriver) AddField(label, field string) error {
 	} else {
 		log.Debugf("Found table %s writing indices for field %s", label, field)
 		err := dr.Pb.BulkWrite(func(tx *pebblebulk.PebbleBulk) error {
-			for r := range foundTable.Scan(false, nil) {
+			var filter benchtop.RowFilter = nil
+			for r := range foundTable.Scan(false, filter) {
 				err := tx.Set(
 					benchtop.FieldKey(
 						field,
 						label,
 						PathLookup(
 							r.(map[string]any), field),
-						[]byte(r.(map[string]any)["_key"].(string)),
+						[]byte(r.(map[string]any)["_id"].(string)),
 					),
 					[]byte{},
 					nil,
@@ -236,8 +237,8 @@ func (dr *BSONDriver) GetIDsForLabel(label string) chan string {
 			return
 		}
 
-		log.Debugln("TABLE AQUIRED: ", table.(*BSONTable).Name)
-		for id := range table.Scan(true, nil) {
+		var filter benchtop.RowFilter = nil
+		for id := range table.Scan(true, filter) {
 			out <- id.(string)
 		}
 	}()

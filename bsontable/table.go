@@ -6,10 +6,8 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
-	"maps"
 	"os"
 	"path/filepath"
-	"slices"
 	"sync"
 
 	"github.com/bmeg/benchtop"
@@ -52,7 +50,6 @@ func (b *BSONTable) Init(poolSize int) error {
 		}
 		b.FilePool <- file
 	}
-	log.Debugf("Initialized FilePool for %s: len=%d, cap=%d, ptr=%v", b.Path, len(b.FilePool), cap(b.FilePool), b.FilePool)
 	return nil
 }
 
@@ -110,7 +107,7 @@ func (b *BSONTable) GetRow(id []byte, fields ...string) (map[string]any, error) 
 	file := <-b.FilePool
 
 	defer func() {
-		file.Seek(0, io.SeekStart)
+		//file.Seek(0, io.SeekStart)
 		b.FilePool <- file
 	}()
 
@@ -131,11 +128,11 @@ func (b *BSONTable) GetRow(id []byte, fields ...string) (map[string]any, error) 
 	var m bson.M
 	if err := bson.Unmarshal(rowData, &m); err == nil {
 		if len(m) > 0 {
-			out, err := b.unpackData(m)
+			out, err := b.unpackData(false, m)
 			if err != nil {
 				return nil, err
 			}
-			return out, nil
+			return out.(map[string]any), nil
 		}
 	}
 	return nil, err
@@ -332,17 +329,19 @@ func (b *BSONTable) Keys() (chan benchtop.Index, error) {
 }
 
 func (b *BSONTable) Scan(keys bool, filter benchtop.RowFilter, fields ...string) chan any {
-
-	// Create a single channel of type chan any
+	const chunkSize = 64 * 1024 * 1024 // 64MB
 	outChan := make(chan any, 100)
 
 	var filterFields []string
+	log.Debugln("FILTER: ", filter != nil)
 	if filter != nil {
-		filterFields = filter.RequiredFields()
+		if !filter.IsNoOp() {
+			filterFields = filter.RequiredFields()
+		}
 	}
 	allFields := len(fields) == 0
 	selectedFields := fields
-	if allFields && !keys {
+	if allFields {
 		selectedFields = make([]string, len(b.columns))
 		for i, col := range b.columns {
 			selectedFields[i] = col.Key
@@ -354,7 +353,6 @@ func (b *BSONTable) Scan(keys bool, filter benchtop.RowFilter, fields ...string)
 		handle := <-b.FilePool
 		_, err := handle.Seek(0, io.SeekStart)
 		if err != nil {
-			close(outChan) // Close the channel if an error occurs before the goroutine starts
 			log.Errorln("Error in bsontable scan func", err)
 			return
 		}
@@ -364,114 +362,105 @@ func (b *BSONTable) Scan(keys bool, filter benchtop.RowFilter, fields ...string)
 			close(outChan)
 		}()
 
-		var header [12]byte // 8 bytes offset + 4 bytes size
-		rowData := make([]byte, 0, 1024)
+		reader := bufio.NewReaderSize(handle, chunkSize)
+		buffer := make([]byte, chunkSize)
+		currentPosition := int64(0)
+		var data []byte
 
 		for {
-			// Single read for offset and size
-			_, err := handle.Read(header[:])
-			if err == io.EOF {
-				break
-			}
-			if err != nil {
-				log.Errorln("Err in bsontable read", err)
-				return
-			}
-			nextOffset := binary.LittleEndian.Uint64(header[:8])
-			bSize := int32(binary.LittleEndian.Uint32(header[8:12]))
-
-			// Skip deleted rows or headers
-			if bSize == 0 || int64(bSize) == int64(nextOffset)-8 {
-				_, err = handle.Seek(int64(nextOffset), io.SeekStart)
-				if err == io.EOF {
+			// Read a chunk if we don’t have data
+			if len(data) < 12 {
+				n, err := reader.Read(buffer)
+				if err == io.EOF && n == 0 {
 					break
 				}
-				if err != nil {
-					log.Errorln("Err in bsontable seek", err)
+				if err != nil && err != io.EOF {
+					log.Errorln("Err in bsontable read chunk", err)
 					return
 				}
-				continue
+				data = buffer[:n]
+				currentPosition += int64(n)
 			}
 
-			// Resize buffer and read row data
-			if cap(rowData) < int(bSize) {
-				rowData = make([]byte, bSize)
-			} else {
-				rowData = rowData[:bSize]
-			}
-			copy(rowData[:4], header[8:12])
-			_, err = handle.Read(rowData[4:])
-			if err != nil {
-				log.Errorln("Err in bsontable read", err)
-				return
-			}
+			// Process records in the current data
+			offset := 0
+			for offset+12 <= len(data) {
+				header := data[offset : offset+12]
+				nextOffset := binary.LittleEndian.Uint64(header[:8])
+				bSize := int32(binary.LittleEndian.Uint32(header[8:12]))
 
-			// Parse BSON row
-			bd, ok := bson.Raw(rowData).Lookup("R").ArrayOK()
-			if !ok {
-				continue
-			}
-			columns := bd.Index(0).Value().Array()
-			key := bd.Index(2).Value().StringValue()
-
-			// Build row map for filtering and output
-			rowMap := make(map[string]any, len(requiredFields))
-			for i, col := range b.columns {
-				if allFields || slices.Contains(requiredFields, col.Key) {
-					if unpack, err := b.colUnpack(columns.Index(uint(i)), col.Type); err == nil {
-						rowMap[col.Key] = unpack
-					}
-				}
-			}
-
-			otherData := bd.Index(1).Value().Document()
-			if allFields {
-				var otherMap map[string]any
-				if err := bson.Unmarshal(otherData, &otherMap); err == nil {
-					for k, v := range otherMap {
-						rowMap[k] = convertBSONValue(v)
-					}
-				}
-			} else {
-				for _, field := range requiredFields {
-					if !isNamedColumn(field, b.columns) {
-						if val, err := otherData.LookupErr(field); err == nil {
-							rowMap[field] = convertBSONValue(val)
-						}
-					}
-				}
-			}
-
-			if filter == nil || (filter != nil && filter.Matches(rowMap)) {
-				if keys {
-					outChan <- key
+				if bSize == 0 || int64(bSize) == int64(nextOffset)-8 {
+					// Skip record
+					data = data[int(nextOffset)-int(currentPosition)+len(data):]
 					continue
 				}
-				vOut := make(map[string]any)
-				if allFields {
-					maps.Copy(vOut, rowMap)
-					vOut["_key"] = key
-					vOut["_id"] = key
-				} else {
-					for _, colName := range selectedFields {
-						if val, ok := rowMap[colName]; ok {
-							vOut[colName] = val
-						}
-					}
-				}
-				if len(vOut) > 0 {
-					log.Debugln("VOut; ", vOut)
-					outChan <- vOut
-				}
-			}
 
-			_, err = handle.Seek(int64(nextOffset), io.SeekStart)
-			if err == io.EOF {
-				break
+				bsonStart := offset + 8
+				bsonEnd := bsonStart + int(bSize)
+				var rowData []byte
+
+				if bsonEnd <= len(data) {
+					// Complete record
+					rowData = data[bsonStart:bsonEnd]
+					err = b.processBSONRowData(rowData, keys, filter, requiredFields, selectedFields, allFields, outChan)
+					if err != nil {
+						log.Debugf("Skipping malformed row at offset %d: %v", nextOffset, err)
+					}
+					data = data[int(nextOffset)-int(currentPosition)+len(data):]
+				} else {
+					// Partial record
+					partialData := data[bsonStart:]
+					remaining := int(bSize) - len(partialData)
+					remainingData := make([]byte, remaining)
+					_, err = io.ReadFull(handle, remainingData)
+					if err != nil {
+						if err == io.EOF || err == io.ErrUnexpectedEOF {
+							log.Debugf("Incomplete record at end of file at offset %d", currentPosition-int64(len(data))+int64(offset))
+							return
+						}
+						log.Errorln("Err in bsontable read remaining", err)
+						return
+					}
+					currentPosition += int64(remaining)
+					rowData = append(partialData, remainingData...)
+					err = b.processBSONRowData(rowData, keys, filter, requiredFields, selectedFields, allFields, outChan)
+					if err != nil {
+						log.Debugf("Skipping malformed row at offset %d: %v", nextOffset, err)
+					}
+
+					// After reading remaining data, file pointer is at the end of the record.
+					// Read additional data to reach nextOffset if there’s a gap.
+					gap := int(nextOffset) - (int(currentPosition) - len(data) + bsonEnd)
+					if gap > 0 {
+						gapData := make([]byte, gap)
+						_, err = reader.Read(gapData)
+						if err != nil {
+							if err == io.EOF || err == io.ErrUnexpectedEOF {
+								return
+							}
+							log.Errorln("Err in bsontable read gap", err)
+							return
+						}
+						currentPosition += int64(gap)
+					}
+					data = nil // Reset data; next iteration will read a new chunk
+				}
 			}
-			if err != nil {
-				log.Errorln("Err in bsontable seek", err)
-				return
+			// If there’s leftover data less than a header, carry it over
+			if len(data) > 0 && len(data) < 12 {
+				remainingBuffer := make([]byte, chunkSize)
+				copy(remainingBuffer, data)
+				n, err := reader.Read(remainingBuffer[len(data):])
+
+				if err == io.EOF && n == 0 {
+					break
+				}
+				if err != nil && err != io.EOF {
+					log.Errorln("Err in bsontable read chunk", err)
+					return
+				}
+				data = remainingBuffer[:len(data)+n]
+				currentPosition += int64(n)
 			}
 		}
 	}()
@@ -479,35 +468,67 @@ func (b *BSONTable) Scan(keys bool, filter benchtop.RowFilter, fields ...string)
 	return outChan
 }
 
+// processBSONRowData handles the parsing of a raw BSON row,
+// applying filters, and sending the result to the output channel.
+// It returns an error if the BSON is malformed or cannot be processed.
+func (b *BSONTable) processBSONRowData(
+	rowData []byte,
+	keys bool,
+	filter benchtop.RowFilter,
+	requiredFields, selectedFields []string,
+	allFields bool,
+	outChan chan any,
+) error {
+
+	var m bson.M
+	bson.Unmarshal(rowData, &m)
+	res, err := b.unpackData(false, m)
+	if err != nil {
+		return err
+	}
+
+	if filter == nil || filter.IsNoOp() || !filter.IsNoOp() && filter.Matches(res.(map[string]any)) {
+		if keys {
+			outChan <- res.(map[string]any)["_id"]
+		} else {
+			outChan <- res
+		}
+	}
+	return nil // Successfully processed (or skipped by filter) this BSON row
+}
+
 func convertBSONValue(val any) any {
 	switch v := val.(type) {
 	case primitive.D: // Ordered BSON document
 		m := make(map[string]any)
 		for _, elem := range v {
-			m[elem.Key] = convertBSONValue(elem.Value) // Recurse for nested values
+			m[elem.Key] = convertBSONValue(elem.Value) // Recurse
 		}
 		return m
-	case primitive.M: // Unordered BSON document
+	case primitive.M: // Unordered BSON document (bson.M is an alias for primitive.M)
 		m := make(map[string]any)
 		for key, value := range v {
-			m[key] = convertBSONValue(value) // Recurse for nested values
+			m[key] = convertBSONValue(value) // Recurse
 		}
 		return m
 	case primitive.A: // BSON array
 		arr := make([]any, len(v))
 		for i, elem := range v {
-			arr[i] = convertBSONValue(elem) // Recurse for array elements
+			arr[i] = convertBSONValue(elem) // Recurse
 		}
 		return arr
 	case primitive.ObjectID: // Convert ObjectID to its string representation
 		return v.Hex()
 	case primitive.DateTime: // Convert BSON DateTime to Go's time.Time
+		// Use v.Time() as it's the most direct and standard way from primitive.DateTime
 		return v.Time()
+	case primitive.Binary: // Convert BSON Binary to Go's []byte
+		return v.Data
 	// Add other specific primitive types if you need custom conversions, e.g.,
 	// case primitive.Decimal128:
-	//    return v.String() // Convert Decimal128 to string
+	//     return v.String() // Convert Decimal128 to string
 	default:
-		// For all other types (string, int, float, bool, nil, etc.), return as is
+		// For all other types (string, int, float, bool, nil, etc., including primitive.Null, primitive.Undefined), return as is
 		return val
 	}
 }

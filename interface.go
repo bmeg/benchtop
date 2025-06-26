@@ -32,7 +32,6 @@ type FieldFilter struct {
 }
 
 type TableInfo struct {
-	Id       uint32      `json:"id"`
 	FileName string      `json:"fileName"`
 	Columns  []ColumnDef `json:"columns"`
 	TableId  uint32      `json:"tableid"`
@@ -76,6 +75,7 @@ type BulkResponse struct {
 type RowFilter interface {
 	// Matches returns true if the row passes the filter.
 	Matches(row map[string]any) bool
+	IsNoOp() bool
 
 	// RequiredFields returns a slice of field names needed to evaluate the filter.
 	RequiredFields() []string

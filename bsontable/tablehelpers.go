@@ -6,7 +6,12 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"time"
+
+
+
+
+	/*"sync"
+	"sort"*/
 
 	"github.com/bmeg/benchtop"
 	"github.com/bmeg/benchtop/bsontable/tpath"
@@ -51,8 +56,6 @@ func (b *BSONTable) addTableDeleteEntryInfo(tx *pebblebulk.PebbleBulk, rowId []b
 	}
 }
 func (b *BSONTable) addTableEntryInfo(tx *pebblebulk.PebbleBulk, rowId []byte, offset, size uint64) {
-
-	log.Debugln("TABLE ID: ", b.tableId, "ID: ", string(rowId))
 	value := benchtop.NewPosValue(offset, size)
 	posKey := benchtop.NewPosKey(b.tableId, rowId)
 	if tx != nil {
@@ -93,41 +96,17 @@ func (b *BSONTable) getTableEntryInfo(snap *pebble.Snapshot, id []byte) (*EntryI
 	return &EntryInfo{}, nil
 }
 
-func convertBSONTypes(value any) any {
-	switch v := value.(type) {
-	case primitive.ObjectID:
-		// Convert ObjectID to its hexadecimal string
-		return v.Hex()
-	case primitive.DateTime:
-		// Convert milliseconds since epoch to time.Time
-		return time.Unix(int64(v)/1000, (int64(v)%1000)*1000000)
-	case primitive.Binary:
-		// Extract binary data as []byte
-		return v.Data
-	case bson.M:
-		// Recursively convert nested maps
-		result := make(map[string]any)
-		for k, val := range v {
-			result[k] = convertBSONTypes(val)
-		}
-		return result
-	case primitive.A:
-		// Recursively convert nested arrays
-		result := make([]any, len(v))
-		for i, val := range v {
-			result[i] = convertBSONTypes(val)
-		}
-		return result
-	default:
-		// Return value as-is for standard types (string, int, float64, bool, nil, etc.)
-		return value
-	}
-}
-
-func (b *BSONTable) unpackData(doc bson.M) (map[string]any, error) {
-	row, ok := doc["R"].(primitive.A)
+func (b *BSONTable) unpackData(justKeys bool, doc bson.M) (any, error) {
+	row, ok :=  doc["R"].(primitive.A)
 	if !ok || len(row) != 3 {
-		return nil, errors.New("invalid row format: must be an array of 3 elements")
+		return nil , errors.New("invalid row format: must be an array of 3 elements")
+	}
+	if justKeys{
+		key, ok := row[2].(string)
+		if !ok {
+			return nil, errors.New("invalid bson record: expecting string key at index 2")
+		}
+		return key, nil
 	}
 
 	columnsArray, ok := row[0].(primitive.A)
@@ -142,15 +121,17 @@ func (b *BSONTable) unpackData(doc bson.M) (map[string]any, error) {
 
 	result := make(map[string]any, len(b.columns)+len(otherMap))
 	for i, col := range b.columns {
-		result[col.Key] = columnsArray[i]
+		result[col.Key] = convertBSONValue(columnsArray[i])
 	}
 
 	for k, v := range otherMap {
-		convertedValue := convertBSONTypes(v)
-		result[k] = convertedValue
+		result[k] = convertBSONValue(v)
 	}
 
+	result["_id"] = convertBSONValue(row[2])
+
 	return result, nil
+
 }
 
 func (b *BSONTable) colUnpack(v bson.RawElement, colType benchtop.FieldType) (any, error) {
@@ -186,14 +167,13 @@ func (b *BSONTable) colUnpack(v bson.RawElement, colType benchtop.FieldType) (an
 }
 
 func (b *BSONTable) getBlockPos(id []byte) (uint64, uint64, error) {
-	idKey := benchtop.NewPosKey(b.tableId, id)
-	val, closer, err := b.Pb.Db.Get(idKey)
+	val, closer, err := b.Pb.Db.Get(benchtop.NewPosKey(b.tableId, id))
 	if err != nil {
-		log.Debugln("TABLE ID: ", b.tableId, "ID: ", string(id))
+		log.Errorln("getBlockPos Err: ", err)
 		return 0, 0, err
 	}
 	offset, size := benchtop.ParsePosValue(val)
-	closer.Close()
+	defer closer.Close()
 	return offset, size, nil
 }
 
@@ -254,11 +234,11 @@ func (b *BSONTable) readFromFile(offset uint64) (map[string]any, error) {
 	}
 	var m bson.M
 	bson.Unmarshal(rowData, &m)
-	out, err := b.unpackData(m)
+	out, err := b.unpackData(false, m)
 	if err != nil {
 		return nil, err
 	}
-	return out, nil
+	return out.(map[string]any), nil
 }
 
 func (b *BSONTable) writeBsonEntry(offset int64, bData []byte) (int, error) {
