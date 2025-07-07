@@ -4,20 +4,28 @@ import (
 	"bytes"
 
 	"github.com/bmeg/benchtop"
-	"github.com/cockroachdb/pebble"
 	"go.mongodb.org/mongo-driver/bson"
+	"github.com/bmeg/benchtop/pebblebulk"
+	"github.com/bmeg/grip/log"
 )
 
 // Specify a table type prefix to differentiate between edge tables and vertex tables
-func (dr *BSONDriver) getMaxTablePrefix() uint32 {
+func (dr *BSONDriver) getMaxTablePrefix() uint16 {
 	// get the max table uint32. Useful for fetching keys.
 	prefix := []byte{benchtop.TablePrefix}
-	it, _ := dr.db.NewIter(&pebble.IterOptions{LowerBound: prefix})
-	maxID := uint32(0)
-	for it.SeekGE(prefix); it.Valid() && bytes.HasPrefix(it.Key(), prefix); it.Next() {
-		maxID++
-	}
-	it.Close()
+	
+	maxID := uint16(0)
+	dr.Pb.View(func(it *pebblebulk.PebbleIterator) error {
+		for it.Seek(prefix); it.Valid() && bytes.HasPrefix(it.Key(), prefix); it.Next() {
+			// fishing for edge cases
+			if maxID == ^uint16(0) {
+				log.Errorf("getMaxTablePrefix( maxID exceeds uint16 max value")
+			}
+			maxID++
+		}
+		return nil
+	})	
+	
 	return maxID
 }
 

@@ -107,7 +107,6 @@ func (pb *PebbleBulk) DeletePrefix(prefix []byte) error {
 }
 
 func (pb *PebbleBulk) DeleteRange(start, end []byte, opts *pebble.WriteOptions) error {
-	log.Debugln("Inside DeleteRange")
 	pb.mu.Lock()
 	defer pb.mu.Unlock()
 	if pb.Batch == nil {
@@ -175,7 +174,6 @@ func (pit *PebbleIterator) Seek(id []byte) error {
 	pit.value = copyBytes(pit.iter.Value())
 	return nil
 }
-
 
 func (pit *PebbleIterator) Next() error {
 	if pit.forward {

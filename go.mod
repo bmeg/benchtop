@@ -1,6 +1,8 @@
 module github.com/bmeg/benchtop
 
-go 1.23.0
+go 1.24
+
+toolchain go1.24.2
 
 require (
 	github.com/bmeg/grip v0.0.0-20250206222527-96023b5f8b4f
@@ -13,7 +15,6 @@ require (
 require (
 	github.com/DataDog/zstd v1.5.6-0.20230824185856-869dae002e5e // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
-	github.com/bmeg/jsonpath v0.0.0-20210207014051-cca5355553ad // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/cockroachdb/errors v1.11.3 // indirect
 	github.com/cockroachdb/fifo v0.0.0-20240616162244-4768e80dfb9a // indirect
@@ -39,16 +40,20 @@ require (
 	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/rogpeppe/go-internal v1.12.0 // indirect
 	github.com/sirupsen/logrus v1.9.3 // indirect
-	github.com/spf13/cast v1.9.2 // indirect
 	github.com/spf13/pflag v1.0.5 // indirect
 	golang.org/x/crypto v0.31.0 // indirect
-	golang.org/x/sys v0.28.0 // indirect
+	golang.org/x/sys v0.33.0 // indirect
 	golang.org/x/term v0.27.0 // indirect
 	golang.org/x/text v0.21.0 // indirect
 	google.golang.org/protobuf v1.36.5 // indirect
 )
 
 require (
+	github.com/bmeg/hnsw-index v0.0.0-20241122200324-94f3a5eb1f59
+	github.com/bmeg/jsonpath v0.0.0-20210207014051-cca5355553ad
 	github.com/cockroachdb/pebble v1.1.2
+	github.com/edsrzf/mmap-go v1.2.0
 	github.com/hashicorp/go-multierror v1.1.1
+	github.com/maypok86/otter/v2 v2.1.0
+	github.com/spf13/cast v1.9.2
 )

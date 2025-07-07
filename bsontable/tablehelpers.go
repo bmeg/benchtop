@@ -7,9 +7,6 @@ import (
 	"io"
 	"os"
 
-
-
-
 	/*"sync"
 	"sort"*/
 
@@ -47,27 +44,14 @@ func (b *BSONTable) packData(entry map[string]any, key string) (bson.M, error) {
 	return bson.M{"R": bson.A{columns, other, key}}, nil
 }
 
-func (b *BSONTable) addTableDeleteEntryInfo(tx *pebblebulk.PebbleBulk, rowId []byte, label string) {
-	rtAsocKey := benchtop.NewRowTableAsocKey(rowId)
-	if tx != nil {
-		tx.Set(rtAsocKey, []byte(label), nil)
-	} else {
-		b.db.Set(rtAsocKey, []byte(label), nil)
-	}
-}
-func (b *BSONTable) addTableEntryInfo(tx *pebblebulk.PebbleBulk, rowId []byte, offset, size uint64) {
-	value := benchtop.NewPosValue(offset, size)
-	posKey := benchtop.NewPosKey(b.tableId, rowId)
+func (b *BSONTable) AddTableEntryInfo(tx *pebblebulk.PebbleBulk, rowId []byte, rowLoc benchtop.RowLoc) {
+	value := benchtop.NewPosValue(rowLoc.Offset, rowLoc.Size)
+	posKey := benchtop.NewPosKey(b.TableId, rowId)
 	if tx != nil {
 		tx.Set(posKey, value, nil)
 	} else {
 		b.db.Set(posKey, value, nil)
 	}
-}
-
-type EntryInfo struct {
-	Offset uint64
-	Size   uint64
 }
 
 func PathLookup(v map[string]any, path string) any {
@@ -83,9 +67,9 @@ func PathLookup(v map[string]any, path string) any {
 	return res
 }
 
-func (b *BSONTable) getTableEntryInfo(snap *pebble.Snapshot, id []byte) (*EntryInfo, error) {
+func (b *BSONTable) getTableEntryInfo(snap *pebble.Snapshot, id []byte) (*benchtop.RowLoc, error) {
 	// Really only want to see if anything was returned or not
-	_, closer, err := snap.Get(benchtop.NewPosKey(b.tableId, id))
+	_, closer, err := snap.Get(benchtop.NewPosKey(b.TableId, id))
 	if err == pebble.ErrNotFound {
 		return nil, nil
 	}
@@ -93,15 +77,15 @@ func (b *BSONTable) getTableEntryInfo(snap *pebble.Snapshot, id []byte) (*EntryI
 		return nil, err
 	}
 	defer closer.Close()
-	return &EntryInfo{}, nil
+	return &benchtop.RowLoc{}, nil
 }
 
-func (b *BSONTable) unpackData(justKeys bool, doc bson.M) (any, error) {
-	row, ok :=  doc["R"].(primitive.A)
+func (b *BSONTable) unpackData(justKeys bool, retId bool, doc bson.M) (any, error) {
+	row, ok := doc["R"].(primitive.A)
 	if !ok || len(row) != 3 {
-		return nil , errors.New("invalid row format: must be an array of 3 elements")
+		return nil, errors.New("invalid row format: must be an array of 3 elements")
 	}
-	if justKeys{
+	if justKeys {
 		key, ok := row[2].(string)
 		if !ok {
 			return nil, errors.New("invalid bson record: expecting string key at index 2")
@@ -128,7 +112,9 @@ func (b *BSONTable) unpackData(justKeys bool, doc bson.M) (any, error) {
 		result[k] = convertBSONValue(v)
 	}
 
-	result["_id"] = convertBSONValue(row[2])
+	if retId {
+		result["_id"] = row[2].(string)
+	}
 
 	return result, nil
 
@@ -166,20 +152,31 @@ func (b *BSONTable) colUnpack(v bson.RawElement, colType benchtop.FieldType) (an
 	}
 }
 
-func (b *BSONTable) getBlockPos(id []byte) (uint64, uint64, error) {
-	val, closer, err := b.Pb.Db.Get(benchtop.NewPosKey(b.tableId, id))
+func (b *BSONTable) GetBlockPos(id []byte) (offset uint64, size uint64, err error) {
+	log.Debugln("TABLE ID: ", b.TableId, "ID: ", string(id))
+	val, closer, err := b.db.Get(benchtop.NewPosKey(b.TableId, id))
 	if err != nil {
-		log.Errorln("getBlockPos Err: ", err)
+		if err != pebble.ErrNotFound {
+			log.Errorln("getBlockPos Err: ", err)
+		}
 		return 0, 0, err
 	}
-	offset, size := benchtop.ParsePosValue(val)
+
+	offset, size = benchtop.ParsePosValue(val)
 	defer closer.Close()
 	return offset, size, nil
 }
 
 func (b *BSONTable) setDataIndices(inputs chan benchtop.Index) {
 	for index := range inputs {
-		b.addTableEntryInfo(nil, index.Key, index.Position, index.Size)
+		b.AddTableEntryInfo(
+			nil,
+			index.Key,
+			benchtop.RowLoc{
+				Offset:		index.Position,
+				Size:		index.Size,
+			},
+		)
 	}
 }
 
@@ -234,7 +231,7 @@ func (b *BSONTable) readFromFile(offset uint64) (map[string]any, error) {
 	}
 	var m bson.M
 	bson.Unmarshal(rowData, &m)
-	out, err := b.unpackData(false, m)
+	out, err := b.unpackData(false, false, m)
 	if err != nil {
 		return nil, err
 	}

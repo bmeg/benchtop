@@ -1,7 +1,6 @@
 package benchtop
 
 import (
-	"github.com/bmeg/benchtop/pebblebulk"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/bsontype"
 )
@@ -34,7 +33,7 @@ type FieldFilter struct {
 type TableInfo struct {
 	FileName string      `json:"fileName"`
 	Columns  []ColumnDef `json:"columns"`
-	TableId  uint32      `json:"tableid"`
+	TableId  uint16      `json:"tableid"`
 	Path     string      `json:"path"`
 	Name     string      `json:"name"`
 }
@@ -72,6 +71,12 @@ type BulkResponse struct {
 	Err  string
 }
 
+type RowLoc struct {
+	Offset uint64
+	Size   uint64
+	Label  uint16
+}
+
 type RowFilter interface {
 	// Matches returns true if the row passes the filter.
 	Matches(row map[string]any) bool
@@ -83,8 +88,8 @@ type RowFilter interface {
 
 type TableStore interface {
 	GetColumnDefs() []ColumnDef
-	AddRow(elem Row, tx *pebblebulk.PebbleBulk) error
-	GetRow(key []byte, fields ...string) (map[string]any, error)
+	AddRow(elem Row) (*RowLoc, error)
+	GetRow(loc RowLoc) (map[string]any, error)
 	DeleteRow(key []byte) error
 
 	Fetch(inputs chan Index, workers int) <-chan BulkResponse

@@ -13,6 +13,7 @@ import (
 	"github.com/bmeg/benchtop"
 	"github.com/bmeg/benchtop/pebblebulk"
 	"github.com/bmeg/grip/log"
+	"github.com/edsrzf/mmap-go"
 	multierror "github.com/hashicorp/go-multierror"
 
 	"github.com/cockroachdb/pebble"
@@ -22,17 +23,19 @@ import (
 )
 
 type BSONTable struct {
-	Pb         *pebblebulk.PebbleKV
-	db         *pebble.DB
-	columns    []benchtop.ColumnDef
-	columnMap  map[string]int
-	handle     *os.File
-	tableId    uint32
-	handleLock sync.RWMutex
-	Path       string
-	Name       string
+	Pb        *pebblebulk.PebbleKV
+	db        *pebble.DB
+	columns   []benchtop.ColumnDef
+	columnMap map[string]int
+
 	FilePool   chan *os.File
-	FileName   string
+	handle     *os.File
+	handleLock sync.RWMutex
+	TableId    uint16
+
+	Path     string
+	Name     string
+	FileName string
 }
 
 func (b *BSONTable) Init(poolSize int) error {
@@ -73,15 +76,15 @@ func (b *BSONTable) Close() {
 ////////////////////////////////////////////////////////////////
 Unary single effect operations
 */
-func (b *BSONTable) AddRow(elem benchtop.Row, tx *pebblebulk.PebbleBulk) error {
+func (b *BSONTable) AddRow(elem benchtop.Row) (*benchtop.RowLoc, error) {
 	mData, err := b.packData(elem.Data, string(elem.Id))
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	bData, err := bson.Marshal(mData)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	//append to end of block file
@@ -89,57 +92,58 @@ func (b *BSONTable) AddRow(elem benchtop.Row, tx *pebblebulk.PebbleBulk) error {
 	defer b.handleLock.Unlock()
 	offset, err := b.handle.Seek(0, io.SeekEnd)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	writesize, err := b.writeBsonEntry(offset, bData)
 	if err != nil {
 		log.Errorf("write handler err in Load: bulkSet: %s", err)
+		return nil, err
 	}
 
-	b.addTableDeleteEntryInfo(tx, elem.Id, elem.TableName)
-	b.addTableEntryInfo(tx, elem.Id, uint64(offset), uint64(writesize))
-
-	return nil
+	return &benchtop.RowLoc{
+		Offset: uint64(offset),
+		Size:         uint64(writesize),
+	}, nil
 }
 
-func (b *BSONTable) GetRow(id []byte, fields ...string) (map[string]any, error) {
+func (b *BSONTable) GetRow(loc benchtop.RowLoc) (map[string]any, error) {
 	file := <-b.FilePool
-
 	defer func() {
-		//file.Seek(0, io.SeekStart)
 		b.FilePool <- file
 	}()
 
-	offset, size, err := b.getBlockPos(id)
+	// Offset skip the first 8 bytes since they are for getting the offset for a scan operation
+	_, err := file.Seek(int64(loc.Offset+8), io.SeekStart)
 	if err != nil {
 		return nil, err
 	}
-	// Offset skip the first 8 bytes since they are for getting the offset for a scan operation
-	if _, err := file.Seek(int64(offset+8), io.SeekStart); err != nil {
-		return nil, err
-	}
 
-	rowData := make([]byte, size)
-	if _, err := io.ReadFull(file, rowData); err != nil {
+	rowData := make([]byte, loc.Size)
+	_, err = io.ReadFull(file, rowData)
+	if err != nil {
 		return nil, err
 	}
 
 	var m bson.M
-	if err := bson.Unmarshal(rowData, &m); err == nil {
-		if len(m) > 0 {
-			out, err := b.unpackData(false, m)
-			if err != nil {
-				return nil, err
-			}
-			return out.(map[string]any), nil
-		}
+	err = bson.Unmarshal(rowData, &m)
+	if err != nil {
+		return nil, err
 	}
+
+	if len(m) > 0 {
+		out, err := b.unpackData(false, false, m)
+		if err != nil {
+			return nil, err
+		}
+		return out.(map[string]any), nil
+	}
+
 	return nil, err
 }
 
 func (b *BSONTable) DeleteRow(name []byte) error {
-	offset, _, err := b.getBlockPos(name)
+	offset, _, err := b.GetBlockPos(name)
 	if err != nil {
 		return err
 	}
@@ -148,7 +152,7 @@ func (b *BSONTable) DeleteRow(name []byte) error {
 		return fmt.Errorf("writeAt failed: %w", err)
 	}
 	b.handleLock.Unlock()
-	b.db.Delete(benchtop.NewPosKey(b.tableId, name), nil)
+	b.db.Delete(benchtop.NewPosKey(b.TableId, name), nil)
 	return nil
 }
 
@@ -316,7 +320,7 @@ func (b *BSONTable) Keys() (chan benchtop.Index, error) {
 	out := make(chan benchtop.Index, 10)
 	go func() {
 		defer close(out)
-		prefix := benchtop.NewPosKeyPrefix(b.tableId)
+		prefix := benchtop.NewPosKeyPrefix(b.TableId)
 		b.Pb.View(func(it *pebblebulk.PebbleIterator) error {
 			for it.Seek(prefix); it.Valid() && bytes.HasPrefix(it.Key(), prefix); it.Next() {
 				_, value := benchtop.ParsePosKey(it.Key())
@@ -333,7 +337,6 @@ func (b *BSONTable) Scan(keys bool, filter benchtop.RowFilter, fields ...string)
 	outChan := make(chan any, 100)
 
 	var filterFields []string
-	log.Debugln("FILTER: ", filter != nil)
 	if filter != nil {
 		if !filter.IsNoOp() {
 			filterFields = filter.RequiredFields()
@@ -356,115 +359,49 @@ func (b *BSONTable) Scan(keys bool, filter benchtop.RowFilter, fields ...string)
 			log.Errorln("Error in bsontable scan func", err)
 			return
 		}
-
 		defer func() {
 			b.FilePool <- handle
 			close(outChan)
 		}()
 
-		reader := bufio.NewReaderSize(handle, chunkSize)
-		buffer := make([]byte, chunkSize)
-		currentPosition := int64(0)
-		var data []byte
+		// Map the file into memory
+		m, err := mmap.Map(handle, mmap.RDONLY, 0)
+		if err != nil {
+			log.Errorln("Error mapping file:", err)
+			return
+		}
+		defer m.Unmap()
 
-		for {
-			// Read a chunk if we don’t have data
-			if len(data) < 12 {
-				n, err := reader.Read(buffer)
-				if err == io.EOF && n == 0 {
-					break
-				}
-				if err != nil && err != io.EOF {
-					log.Errorln("Err in bsontable read chunk", err)
-					return
-				}
-				data = buffer[:n]
-				currentPosition += int64(n)
+		// Process the memory-mapped data
+		offset := 0
+		for offset+12 <= len(m) {
+
+			header := m[offset : offset+12]
+			nextOffset := binary.LittleEndian.Uint64(header[:8])
+			bSize := int32(binary.LittleEndian.Uint32(header[8:12]))
+
+			if bSize == 0 || int64(bSize) == int64(nextOffset)-8 {
+				offset = int(nextOffset)
+				continue
 			}
 
-			// Process records in the current data
-			offset := 0
-			for offset+12 <= len(data) {
-				header := data[offset : offset+12]
-				nextOffset := binary.LittleEndian.Uint64(header[:8])
-				bSize := int32(binary.LittleEndian.Uint32(header[8:12]))
-
-				if bSize == 0 || int64(bSize) == int64(nextOffset)-8 {
-					// Skip record
-					data = data[int(nextOffset)-int(currentPosition)+len(data):]
-					continue
-				}
-
-				bsonStart := offset + 8
-				bsonEnd := bsonStart + int(bSize)
-				var rowData []byte
-
-				if bsonEnd <= len(data) {
-					// Complete record
-					rowData = data[bsonStart:bsonEnd]
-					err = b.processBSONRowData(rowData, keys, filter, requiredFields, selectedFields, allFields, outChan)
-					if err != nil {
-						log.Debugf("Skipping malformed row at offset %d: %v", nextOffset, err)
-					}
-					data = data[int(nextOffset)-int(currentPosition)+len(data):]
-				} else {
-					// Partial record
-					partialData := data[bsonStart:]
-					remaining := int(bSize) - len(partialData)
-					remainingData := make([]byte, remaining)
-					_, err = io.ReadFull(handle, remainingData)
-					if err != nil {
-						if err == io.EOF || err == io.ErrUnexpectedEOF {
-							log.Debugf("Incomplete record at end of file at offset %d", currentPosition-int64(len(data))+int64(offset))
-							return
-						}
-						log.Errorln("Err in bsontable read remaining", err)
-						return
-					}
-					currentPosition += int64(remaining)
-					rowData = append(partialData, remainingData...)
-					err = b.processBSONRowData(rowData, keys, filter, requiredFields, selectedFields, allFields, outChan)
-					if err != nil {
-						log.Debugf("Skipping malformed row at offset %d: %v", nextOffset, err)
-					}
-
-					// After reading remaining data, file pointer is at the end of the record.
-					// Read additional data to reach nextOffset if there’s a gap.
-					gap := int(nextOffset) - (int(currentPosition) - len(data) + bsonEnd)
-					if gap > 0 {
-						gapData := make([]byte, gap)
-						_, err = reader.Read(gapData)
-						if err != nil {
-							if err == io.EOF || err == io.ErrUnexpectedEOF {
-								return
-							}
-							log.Errorln("Err in bsontable read gap", err)
-							return
-						}
-						currentPosition += int64(gap)
-					}
-					data = nil // Reset data; next iteration will read a new chunk
-				}
+			bsonStart := offset + 8
+			bsonEnd := bsonStart + int(bSize)
+			if bsonEnd > len(m) {
+				log.Debugf("Incomplete record at end of file at offset %d", offset)
+				break
 			}
-			// If there’s leftover data less than a header, carry it over
-			if len(data) > 0 && len(data) < 12 {
-				remainingBuffer := make([]byte, chunkSize)
-				copy(remainingBuffer, data)
-				n, err := reader.Read(remainingBuffer[len(data):])
 
-				if err == io.EOF && n == 0 {
-					break
-				}
-				if err != nil && err != io.EOF {
-					log.Errorln("Err in bsontable read chunk", err)
-					return
-				}
-				data = remainingBuffer[:len(data)+n]
-				currentPosition += int64(n)
+			rowData := m[bsonStart:bsonEnd]
+
+			err = b.processBSONRowData(rowData, keys, filter, requiredFields, selectedFields, allFields, outChan)
+			if err != nil {
+				log.Debugf("Skipping malformed row at offset %d: %v", offset, err)
 			}
+			offset = int(nextOffset)
+
 		}
 	}()
-
 	return outChan
 }
 
@@ -482,7 +419,7 @@ func (b *BSONTable) processBSONRowData(
 
 	var m bson.M
 	bson.Unmarshal(rowData, &m)
-	res, err := b.unpackData(false, m)
+	res, err := b.unpackData(false, true, m)
 	if err != nil {
 		return err
 	}
@@ -524,11 +461,9 @@ func convertBSONValue(val any) any {
 		return v.Time()
 	case primitive.Binary: // Convert BSON Binary to Go's []byte
 		return v.Data
-	// Add other specific primitive types if you need custom conversions, e.g.,
-	// case primitive.Decimal128:
+		// case primitive.Decimal128:
 	//     return v.String() // Convert Decimal128 to string
 	default:
-		// For all other types (string, int, float, bool, nil, etc., including primitive.Null, primitive.Undefined), return as is
 		return val
 	}
 }
@@ -541,7 +476,7 @@ func (b *BSONTable) Fetch(inputs chan benchtop.Index, workers int) <-chan bencht
 			wg.Add(1)
 			go func(index benchtop.Index) {
 				defer wg.Done()
-				val, closer, err := b.db.Get(benchtop.NewPosKey(b.tableId, index.Key))
+				val, closer, err := b.db.Get(benchtop.NewPosKey(b.TableId, index.Key))
 				if err != nil {
 					results <- benchtop.BulkResponse{Key: index.Key, Data: nil, Err: func() string {
 						if err != nil {
@@ -600,9 +535,8 @@ func (b *BSONTable) Load(inputs chan benchtop.Row) error {
 			if err != nil {
 				errs = multierror.Append(errs, err)
 				log.Errorf("write handler err in Load: bulkSet: %s", err)
-			}
-			b.addTableDeleteEntryInfo(tx, entry.Id, entry.TableName)
-			b.addTableEntryInfo(tx, entry.Id, uint64(offset), uint64(writeSize))
+			}  
+			b.AddTableEntryInfo(tx, entry.Id, benchtop.RowLoc{Offset:  uint64(offset), Size : uint64(writeSize)})
 			offset += int64(writeSize) + 8
 		}
 		return nil
@@ -621,7 +555,7 @@ func (b *BSONTable) Remove(inputs chan benchtop.Index, workers int) <-chan bench
 
 	go func() {
 		for index := range batchDeletes {
-			err := b.db.Delete(benchtop.NewPosKey(b.tableId, index.Key), nil)
+			err := b.db.Delete(benchtop.NewPosKey(b.TableId, index.Key), nil)
 			if err != nil {
 				results <- benchtop.BulkResponse{Key: index.Key, Data: nil, Err: func() string {
 					if err != nil {
@@ -643,7 +577,7 @@ func (b *BSONTable) Remove(inputs chan benchtop.Index, workers int) <-chan bench
 			go func(index benchtop.Index) {
 				defer wg.Done()
 
-				val, closer, err := b.db.Get(benchtop.NewPosKey(b.tableId, index.Key))
+				val, closer, err := b.db.Get(benchtop.NewPosKey(b.TableId, index.Key))
 				if err != nil {
 					results <- benchtop.BulkResponse{Key: index.Key, Data: nil, Err: func() string {
 						if err != nil {

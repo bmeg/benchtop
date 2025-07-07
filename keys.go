@@ -13,11 +13,6 @@ import (
 // The starting point for vertex table ids in th pebble index
 var TablePrefix = byte('T')
 
-// RowTableAsociation Reverse index
-// Key: R
-// given an ID return the table uint32 associated with it
-var RowTableAsocPrefix = byte('R')
-
 // Position
 // key: P | TableId | Position
 // The position and offset of the document.
@@ -69,20 +64,6 @@ func FieldLabelKey(field, label string) []byte {
 	)
 }
 
-func NewRowTableAsocKey(id []byte) []byte {
-	out := make([]byte, len(id)+1)
-	out[0] = RowTableAsocPrefix
-	copy(out[1:], id)
-	return out
-}
-
-func ParseTableAsocKey(key []byte) []byte {
-	//duplicate the key, because pebble reuses memory
-	out := make([]byte, len(key)-1)
-	copy(out, key[1:])
-	return out
-}
-
 func NewTableKey(id []byte) []byte {
 	out := make([]byte, len(id)+1)
 	out[0] = TablePrefix
@@ -98,25 +79,25 @@ func ParseTableKey(key []byte) []byte {
 }
 
 /* New pos key used for creating a pos key from a table entry*/
-func NewPosKey(table uint32, name []byte) []byte {
+func NewPosKey(table uint16, name []byte) []byte {
 	out := make([]byte, 5+len(name))
 	out[0] = PosPrefix
-	binary.LittleEndian.PutUint32(out[1:], table)
+	binary.LittleEndian.PutUint16(out[1:], table)
 	copy(out[5:], name)
 	return out
 }
 
-func ParsePosKey(key []byte) (uint32, []byte) {
+func ParsePosKey(key []byte) (uint16, []byte) {
 	//duplicate the key, because pebble reuses memory
-	out := make([]byte, len(key)-5)
-	copy(out, key[5:])
-	return binary.LittleEndian.Uint32(key[1:5]), out
+	out := make([]byte, len(key)-3)
+	copy(out, key[3:])
+	return binary.LittleEndian.Uint16(key[1:3]), out
 }
 
-func NewPosKeyPrefix(table uint32) []byte {
-	var out [5]byte
+func NewPosKeyPrefix(table uint16) []byte {
+	var out [3]byte
 	out[0] = PosPrefix
-	binary.LittleEndian.PutUint32(out[1:], table)
+	binary.LittleEndian.PutUint16(out[1:], table)
 	return out[:]
 }
 
@@ -127,6 +108,6 @@ func NewPosValue(offset uint64, size uint64) []byte {
 	return out[:]
 }
 
-func ParsePosValue(v []byte) (uint64, uint64) {
+func ParsePosValue(v []byte) (offset uint64, size uint64) {
 	return binary.LittleEndian.Uint64(v), binary.LittleEndian.Uint64(v[8:])
 }

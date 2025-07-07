@@ -5,11 +5,10 @@ import (
 	"fmt"
 
 	"github.com/bmeg/benchtop"
+	"github.com/bmeg/grip/log"
 
 	tableFilters "github.com/bmeg/benchtop/bsontable/filters"
 	"github.com/bmeg/benchtop/pebblebulk"
-	"github.com/bmeg/grip/log"
-	"github.com/cockroachdb/pebble"
 )
 
 func (dr *BSONDriver) AddField(label, field string) error {
@@ -65,6 +64,7 @@ func (dr *BSONDriver) AddField(label, field string) error {
 		return fmt.Errorf("index label '%s' field '%s' already exists", label, field)
 	}
 	innerMap[field] = struct{}{}
+	log.Debugln("Fields: ", dr.Fields)
 
 	return nil
 }
@@ -81,33 +81,16 @@ func (dr *BSONDriver) RemoveField(label string, field string) error {
 	}
 
 	key := benchtop.FieldLabelKey(field, label)
-	upperBound, err := calculate_upper_bound(key)
-	if err != nil {
-		return err
-	}
 
-	log.Infof("Deleting keys in range: [%q, %q)", key, upperBound)
+	log.Infof("Deleting prefix: %q", key)
 	// Perform deletion in a bulk write transaction
-	err = dr.Pb.BulkWrite(func(tx *pebblebulk.PebbleBulk) error {
-		return tx.DeleteRange(key, upperBound, &pebble.WriteOptions{Sync: true})
+	err := dr.Pb.BulkWrite(func(tx *pebblebulk.PebbleBulk) error {
+		return tx.DeletePrefix(key)
 	})
 	if err != nil {
 		return fmt.Errorf("delete range failed: %w", err)
 	}
 	return nil
-}
-
-func calculate_upper_bound(key []byte) ([]byte, error) {
-	uBound := make([]byte, len(key))
-	copy(uBound, key)
-	for i := len(uBound) - 1; i >= 0; i-- {
-		uBound[i]++
-		if uBound[i] != 0 {
-			return uBound, nil
-		}
-	}
-	// This should never be reached since we're using prefixes that don't start with 0xFF
-	return nil, fmt.Errorf("failed to calculate upper bound")
 }
 
 func (dr *BSONDriver) LoadFields() error {
