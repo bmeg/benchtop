@@ -102,8 +102,9 @@ func (b *BSONTable) AddRow(elem benchtop.Row) (*benchtop.RowLoc, error) {
 	}
 
 	return &benchtop.RowLoc{
-		Offset: uint64(offset),
+		Offset: 	  uint64(offset),
 		Size:         uint64(writesize),
+		Label:	      b.TableId,
 	}, nil
 }
 
