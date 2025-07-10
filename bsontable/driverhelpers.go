@@ -4,9 +4,9 @@ import (
 	"bytes"
 
 	"github.com/bmeg/benchtop"
-	"go.mongodb.org/mongo-driver/bson"
 	"github.com/bmeg/benchtop/pebblebulk"
 	"github.com/bmeg/grip/log"
+	"go.mongodb.org/mongo-driver/bson"
 )
 
 // Specify a table type prefix to differentiate between edge tables and vertex tables
@@ -29,10 +29,9 @@ func (dr *BSONDriver) getMaxTablePrefix() uint16 {
 	return maxID
 }
 
-func (dr *BSONDriver) addTable(tinfo *benchtop.TableInfo) error {
-	tdata, _ := bson.Marshal(*tinfo)
-	nkey := benchtop.NewTableKey([]byte(tinfo.Name))
-	return dr.db.Set(nkey, tdata, nil)
+func (dr *BSONDriver) addTable(Name string, TinfoMarshal []byte) error {
+	nkey := benchtop.NewTableKey([]byte(Name))
+	return dr.db.Set(nkey, TinfoMarshal, nil)
 }
 
 func (dr *BSONDriver) dropTable(name string) error {

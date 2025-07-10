@@ -80,10 +80,10 @@ func ParseTableKey(key []byte) []byte {
 
 /* New pos key used for creating a pos key from a table entry*/
 func NewPosKey(table uint16, name []byte) []byte {
-	out := make([]byte, 5+len(name))
+	out := make([]byte, 3+len(name))
 	out[0] = PosPrefix
 	binary.LittleEndian.PutUint16(out[1:], table)
-	copy(out[5:], name)
+	copy(out[3:], name)
 	return out
 }
 

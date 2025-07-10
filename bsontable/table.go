@@ -16,10 +16,10 @@ import (
 	"github.com/edsrzf/mmap-go"
 	multierror "github.com/hashicorp/go-multierror"
 
+	"github.com/bytedance/sonic"
 	"github.com/cockroachdb/pebble"
 
 	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
 type BSONTable struct {
@@ -82,7 +82,7 @@ func (b *BSONTable) AddRow(elem benchtop.Row) (*benchtop.RowLoc, error) {
 		return nil, err
 	}
 
-	bData, err := bson.Marshal(mData)
+	bData, err := sonic.ConfigFastest.Marshal(mData)
 	if err != nil {
 		return nil, err
 	}
@@ -95,6 +95,7 @@ func (b *BSONTable) AddRow(elem benchtop.Row) (*benchtop.RowLoc, error) {
 		return nil, err
 	}
 
+	log.Debugln("WRITE ENTRY: ", offset, len(bData))
 	writesize, err := b.writeBsonEntry(offset, bData)
 	if err != nil {
 		log.Errorf("write handler err in Load: bulkSet: %s", err)
@@ -102,9 +103,9 @@ func (b *BSONTable) AddRow(elem benchtop.Row) (*benchtop.RowLoc, error) {
 	}
 
 	return &benchtop.RowLoc{
-		Offset: 	  uint64(offset),
-		Size:         uint64(writesize),
-		Label:	      b.TableId,
+		Offset: 	uint64(offset),
+		Size:   	uint64(writesize),
+		Label:   	b.TableId,
 	}, nil
 }
 
@@ -115,32 +116,25 @@ func (b *BSONTable) GetRow(loc benchtop.RowLoc) (map[string]any, error) {
 	}()
 
 	// Offset skip the first 8 bytes since they are for getting the offset for a scan operation
-	_, err := file.Seek(int64(loc.Offset+8), io.SeekStart)
+	_, err := file.Seek(int64(loc.Offset+12), io.SeekStart)
 	if err != nil {
 		return nil, err
 	}
 
-	rowData := make([]byte, loc.Size)
-	_, err = io.ReadFull(file, rowData)
+	decoder := sonic.ConfigFastest.NewDecoder(io.LimitReader(file, int64(loc.Size)))
+	var m RowData
+	err = decoder.Decode(&m)
 	if err != nil {
-		return nil, err
-	}
-
-	var m bson.M
-	err = bson.Unmarshal(rowData, &m)
-	if err != nil {
-		return nil, err
-	}
-
-	if len(m) > 0 {
-		out, err := b.unpackData(false, false, m)
-		if err != nil {
-			return nil, err
+		if err == io.EOF {
+			return nil, fmt.Errorf("JSON data for row at offset %d, size %d was incomplete: %w", loc.Offset, loc.Size, err)
 		}
-		return out.(map[string]any), nil
+		return nil, fmt.Errorf("failed to decode JSON row at offset %d, size %d: %w", loc.Offset, loc.Size, err)
 	}
-
-	return nil, err
+	out, err := b.unpackData(false, false, &m)
+	if err != nil {
+		return nil, err
+	}
+	return out.(map[string]any), nil
 }
 
 func (b *BSONTable) DeleteRow(name []byte) error {
@@ -149,7 +143,7 @@ func (b *BSONTable) DeleteRow(name []byte) error {
 		return err
 	}
 	b.handleLock.Lock()
-	if _, err := b.handle.WriteAt([]byte{0x00, 0x00, 0x00, 0x00}, int64(offset+8)); err != nil {
+	if _, err := b.handle.WriteAt([]byte{0x00, 0x00, 0x00, 0x00}, int64(offset+12)); err != nil {
 		return fmt.Errorf("writeAt failed: %w", err)
 	}
 	b.handleLock.Unlock()
@@ -215,7 +209,7 @@ func (b *BSONTable) Compact() error {
 		}
 		bSize := int32(binary.LittleEndian.Uint32(sizeBytes))
 
-		fileOffset += 8 + 4
+		fileOffset += 12
 		if bSize == 0 || fileOffset == int64(12) {
 			if int64(nextOffset) > fileOffset {
 				_, err = oldHandle.Seek(int64(nextOffset), io.SeekStart)
@@ -246,7 +240,7 @@ func (b *BSONTable) Compact() error {
 		inputChan <- benchtop.Index{Key: []byte(val.StringValue()), Position: newOffset, Size: uint64(bSize)}
 
 		newOffsetBytes := make([]byte, 8)
-		binary.LittleEndian.PutUint64(newOffsetBytes, newOffset+uint64(len(rowBuff))+8)
+		binary.LittleEndian.PutUint64(newOffsetBytes, newOffset+uint64(len(rowBuff))+12)
 
 		_, err = writer.Write(newOffsetBytes)
 		if err != nil {
@@ -334,59 +328,41 @@ func (b *BSONTable) Keys() (chan benchtop.Index, error) {
 }
 
 func (b *BSONTable) Scan(keys bool, filter benchtop.RowFilter, fields ...string) chan any {
-	const chunkSize = 64 * 1024 * 1024 // 64MB
 	outChan := make(chan any, 100)
-
-	var filterFields []string
-	if filter != nil {
-		if !filter.IsNoOp() {
-			filterFields = filter.RequiredFields()
-		}
-	}
-	allFields := len(fields) == 0
-	selectedFields := fields
-	if allFields {
-		selectedFields = make([]string, len(b.columns))
-		for i, col := range b.columns {
-			selectedFields[i] = col.Key
-		}
-	}
-	requiredFields := union(filterFields, selectedFields)
-
 	go func() {
+		defer close(outChan)
 		handle := <-b.FilePool
 		_, err := handle.Seek(0, io.SeekStart)
 		if err != nil {
 			log.Errorln("Error in bsontable scan func", err)
 			return
 		}
-		defer func() {
-			b.FilePool <- handle
-			close(outChan)
-		}()
-
-		// Map the file into memory
+		
 		m, err := mmap.Map(handle, mmap.RDONLY, 0)
 		if err != nil {
 			log.Errorln("Error mapping file:", err)
 			return
 		}
-		defer m.Unmap()
+		
+		defer func() {
+			b.FilePool <- handle
+			defer m.Unmap()
+		}()
+
 
 		// Process the memory-mapped data
 		offset := 0
-		for offset+12 <= len(m) {
+		for offset+ ROW_HSIZE <= len(m) {
+			header := m[offset : offset+ ROW_HSIZE]
+			nextOffset := binary.LittleEndian.Uint64(header[:ROW_OFFSET_HSIZE])
+			bSize := int32(binary.LittleEndian.Uint32(header[ROW_OFFSET_HSIZE:ROW_HSIZE]))
 
-			header := m[offset : offset+12]
-			nextOffset := binary.LittleEndian.Uint64(header[:8])
-			bSize := int32(binary.LittleEndian.Uint32(header[8:12]))
-
-			if bSize == 0 || int64(bSize) == int64(nextOffset)-8 {
+			if bSize == 0 || int64(bSize) == int64(nextOffset)- ROW_HSIZE {
 				offset = int(nextOffset)
 				continue
 			}
 
-			bsonStart := offset + 8
+			bsonStart := offset + ROW_HSIZE
 			bsonEnd := bsonStart + int(bSize)
 			if bsonEnd > len(m) {
 				log.Debugf("Incomplete record at end of file at offset %d", offset)
@@ -395,7 +371,7 @@ func (b *BSONTable) Scan(keys bool, filter benchtop.RowFilter, fields ...string)
 
 			rowData := m[bsonStart:bsonEnd]
 
-			err = b.processBSONRowData(rowData, keys, filter, requiredFields, selectedFields, allFields, outChan)
+			err = b.processBSONRowData(rowData, keys, filter, outChan)
 			if err != nil {
 				log.Debugf("Skipping malformed row at offset %d: %v", offset, err)
 			}
@@ -413,14 +389,12 @@ func (b *BSONTable) processBSONRowData(
 	rowData []byte,
 	keys bool,
 	filter benchtop.RowFilter,
-	requiredFields, selectedFields []string,
-	allFields bool,
 	outChan chan any,
 ) error {
 
-	var m bson.M
-	bson.Unmarshal(rowData, &m)
-	res, err := b.unpackData(false, true, m)
+	var m RowData
+	sonic.ConfigFastest.Unmarshal(rowData, &m)
+	res, err := b.unpackData(false, true, &m)
 	if err != nil {
 		return err
 	}
@@ -432,42 +406,9 @@ func (b *BSONTable) processBSONRowData(
 			outChan <- res
 		}
 	}
-	return nil // Successfully processed (or skipped by filter) this BSON row
+	return nil
 }
 
-func convertBSONValue(val any) any {
-	switch v := val.(type) {
-	case primitive.D: // Ordered BSON document
-		m := make(map[string]any)
-		for _, elem := range v {
-			m[elem.Key] = convertBSONValue(elem.Value) // Recurse
-		}
-		return m
-	case primitive.M: // Unordered BSON document (bson.M is an alias for primitive.M)
-		m := make(map[string]any)
-		for key, value := range v {
-			m[key] = convertBSONValue(value) // Recurse
-		}
-		return m
-	case primitive.A: // BSON array
-		arr := make([]any, len(v))
-		for i, elem := range v {
-			arr[i] = convertBSONValue(elem) // Recurse
-		}
-		return arr
-	case primitive.ObjectID: // Convert ObjectID to its string representation
-		return v.Hex()
-	case primitive.DateTime: // Convert BSON DateTime to Go's time.Time
-		// Use v.Time() as it's the most direct and standard way from primitive.DateTime
-		return v.Time()
-	case primitive.Binary: // Convert BSON Binary to Go's []byte
-		return v.Data
-		// case primitive.Decimal128:
-	//     return v.String() // Convert Decimal128 to string
-	default:
-		return val
-	}
-}
 
 func (b *BSONTable) Fetch(inputs chan benchtop.Index, workers int) <-chan benchtop.BulkResponse {
 	results := make(chan benchtop.BulkResponse, workers)
@@ -525,7 +466,7 @@ func (b *BSONTable) Load(inputs chan benchtop.Row) error {
 				errs = multierror.Append(errs, err)
 				log.Errorf("pack data err in Load: bulkSet: %s", err)
 			}
-			bData, err := bson.Marshal(mData)
+			bData, err := sonic.Marshal(mData)
 			if err != nil {
 				errs = multierror.Append(errs, err)
 				log.Errorf("bson Marshall err in Load: bulkSet: %s", err)
@@ -536,8 +477,8 @@ func (b *BSONTable) Load(inputs chan benchtop.Row) error {
 			if err != nil {
 				errs = multierror.Append(errs, err)
 				log.Errorf("write handler err in Load: bulkSet: %s", err)
-			}  
-			b.AddTableEntryInfo(tx, entry.Id, benchtop.RowLoc{Offset:  uint64(offset), Size : uint64(writeSize)})
+			}
+			b.AddTableEntryInfo(tx, entry.Id, benchtop.RowLoc{Offset:uint64(offset), Size:uint64(writeSize)})
 			offset += int64(writeSize) + 8
 		}
 		return nil

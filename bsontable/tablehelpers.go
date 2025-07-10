@@ -2,13 +2,9 @@ package bsontable
 
 import (
 	"encoding/binary"
-	"errors"
 	"fmt"
 	"io"
 	"os"
-
-	/*"sync"
-	"sort"*/
 
 	"github.com/bmeg/benchtop"
 	"github.com/bmeg/benchtop/bsontable/tpath"
@@ -17,31 +13,39 @@ import (
 	"github.com/bmeg/jsonpath"
 	"github.com/cockroachdb/pebble"
 	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
-func (b *BSONTable) packData(entry map[string]any, key string) (bson.M, error) {
-	// pack named columns
-	columns := []any{}
-	for _, c := range b.columns {
-		if e, ok := entry[c.Key]; ok {
-			v, err := benchtop.CheckType(e, c.Type)
-			if err != nil {
-				return nil, err
-			}
-			columns = append(columns, v)
-		} else {
-			columns = append(columns, nil)
-		}
-	}
-	// pack all other data
-	other := map[string]any{}
-	for k, v := range entry {
-		if _, ok := b.columnMap[k]; !ok {
-			other[k] = v
-		}
-	}
-	return bson.M{"R": bson.A{columns, other, key}}, nil
+type RowData struct {
+	Columns []any          `json:"0"`
+	Data   map[string]any  `json:"1"`
+	Key     string         `json:"2"`
+}
+
+func (b *BSONTable) packData(entry map[string]any, key string) (*RowData, error) {
+	rowData := &RowData{
+        Columns: 	make([]any, len(b.columns)),
+        Data:   	make(map[string]any),
+        Key:     	key,
+    }
+    
+    /*for i, c := range b.columns {
+        if e, ok := entry[c.Key]; ok {
+            v, err := benchtop.CheckType(e, c.Type)
+            if err != nil {
+                return nil, fmt.Errorf("invalid type for column %s: %w", c.Key, err)
+            }
+            rowData.Columns[i] = v
+        } else {
+            rowData.Columns[i] = nil
+        }
+    }*/
+    
+    for k, v := range entry {
+        if _, ok := b.columnMap[k]; !ok {
+            rowData.Data[k] = v
+        }
+    }
+	return rowData, nil
 }
 
 func (b *BSONTable) AddTableEntryInfo(tx *pebblebulk.PebbleBulk, rowId []byte, rowLoc benchtop.RowLoc) {
@@ -80,76 +84,32 @@ func (b *BSONTable) getTableEntryInfo(snap *pebble.Snapshot, id []byte) (*bencht
 	return &benchtop.RowLoc{}, nil
 }
 
-func (b *BSONTable) unpackData(justKeys bool, retId bool, doc bson.M) (any, error) {
-	row, ok := doc["R"].(primitive.A)
-	if !ok || len(row) != 3 {
-		return nil, errors.New("invalid row format: must be an array of 3 elements")
+func (b *BSONTable) unpackData(justKeys bool, retId bool, doc *RowData) (any, error) {
+	if doc == nil {
+		return nil, fmt.Errorf("Doc is nil nothing to unpack")
 	}
 	if justKeys {
-		key, ok := row[2].(string)
-		if !ok {
-			return nil, errors.New("invalid bson record: expecting string key at index 2")
-		}
-		return key, nil
+		return doc.Key, nil
 	}
 
-	columnsArray, ok := row[0].(primitive.A)
-	if !ok || len(columnsArray) != len(b.columns) {
-		return nil, errors.New("invalid columns array: must match number of defined columns")
-	}
-
-	otherMap, ok := row[1].(bson.M)
-	if !ok {
-		return nil, errors.New("invalid other map: must be a map")
-	}
-
-	result := make(map[string]any, len(b.columns)+len(otherMap))
+	/* This whole copy from one map to another map doesn't make any sense to do if we're not using the 
+	 * columnMap for anything currently anyway
+		
+	result := make(map[string]any, len(doc.Columns)+len(doc.Data))
 	for i, col := range b.columns {
-		result[col.Key] = convertBSONValue(columnsArray[i])
+		result[col.Key] = doc.Columns[i]
+	}
+	for k, v := range doc.Data {
+		result[k] = v
+		}
+	*/
+	
+	if retId && doc.Data != nil{
+		doc.Data["_id"] = doc.Key
 	}
 
-	for k, v := range otherMap {
-		result[k] = convertBSONValue(v)
-	}
+	return doc.Data, nil
 
-	if retId {
-		result["_id"] = row[2].(string)
-	}
-
-	return result, nil
-
-}
-
-func (b *BSONTable) colUnpack(v bson.RawElement, colType benchtop.FieldType) (any, error) {
-	switch colType {
-	case benchtop.String:
-		if v.Value().Type != bson.TypeString {
-			return nil, fmt.Errorf("expected String but got %s", v.Value().Type)
-		}
-		return v.Value().StringValue(), nil
-
-	case benchtop.Double:
-		if v.Value().Type != bson.TypeDouble {
-			return nil, fmt.Errorf("expected Double but got %s", v.Value().Type)
-		}
-		return v.Value().Double(), nil
-
-	case benchtop.Int64:
-		if v.Value().Type != bson.TypeInt64 {
-			return nil, fmt.Errorf("expected Int64 but got %s", v.Value().Type)
-		}
-		return v.Value().Int64(), nil
-
-	case benchtop.Bytes:
-		if v.Value().Type != bson.TypeBinary {
-			return nil, fmt.Errorf("expected Binary but got %s", v.Value().Type)
-		}
-		binData, _ := v.Value().Binary()
-		return binData, nil
-
-	default:
-		return nil, fmt.Errorf("unknown column type: %d", colType)
-	}
 }
 
 func (b *BSONTable) GetBlockPos(id []byte) (offset uint64, size uint64, err error) {
@@ -173,8 +133,8 @@ func (b *BSONTable) setDataIndices(inputs chan benchtop.Index) {
 			nil,
 			index.Key,
 			benchtop.RowLoc{
-				Offset:		index.Position,
-				Size:		index.Size,
+				Offset: index.Position,
+				Size:   index.Size,
 			},
 		)
 	}
@@ -229,8 +189,8 @@ func (b *BSONTable) readFromFile(offset uint64) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	var m bson.M
-	bson.Unmarshal(rowData, &m)
+	var m *RowData = nil
+	bson.Unmarshal(rowData, m)
 	out, err := b.unpackData(false, false, m)
 	if err != nil {
 		return nil, err
@@ -240,12 +200,15 @@ func (b *BSONTable) readFromFile(offset uint64) (map[string]any, error) {
 
 func (b *BSONTable) writeBsonEntry(offset int64, bData []byte) (int, error) {
 	// make next offset equal to existing offset + length of data
-	buffer := make([]byte, 8)
-	binary.LittleEndian.PutUint64(buffer, uint64(offset)+uint64(len(bData))+8)
+	buffer := make([]byte, 12)
+	binary.LittleEndian.PutUint64(buffer[:8], uint64(offset)+uint64(len(bData))+12)
+	binary.LittleEndian.PutUint32(buffer[8:], uint32(len(bData)))
+
 	_, err := b.handle.Write(buffer)
 	if err != nil {
 		return 0, fmt.Errorf("write offset error: %v", err)
 	}
+
 	n, err := b.handle.Write(bData)
 	if err != nil {
 		return 0, fmt.Errorf("write BSON error: %v", err)

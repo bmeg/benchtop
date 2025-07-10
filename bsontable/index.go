@@ -34,7 +34,7 @@ func (dr *BSONDriver) GetAllColNames() chan string {
 	return out
 }
 
-func (dr *BSONDriver) GetLabels(edges bool) chan string {
+func (dr *BSONDriver) GetLabels(edges bool, removePrefix bool) chan string {
 	dr.Lock.RLock()
 	defer dr.Lock.RUnlock()
 
@@ -46,7 +46,11 @@ func (dr *BSONDriver) GetLabels(edges bool) chan string {
 			for it.Seek(prefix); it.Valid() && bytes.HasPrefix(it.Key(), prefix); it.Next() {
 				strKey := string(benchtop.ParseTableKey(it.Key()))
 				if (edges && strKey[:2] == "e_") || (!edges && strKey[:2] == "v_") {
-					out <- strKey[2:]
+					if removePrefix {
+						out <- strKey[2:]
+					}else {
+						out <- strKey
+					}
 				}
 			}
 			return nil

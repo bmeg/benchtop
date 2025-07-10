@@ -39,7 +39,8 @@ func (dr *BSONDriver) AddField(label, field string) error {
 						label,
 						PathLookup(
 							r.(map[string]any), field),
-						[]byte(r.(map[string]any)["_id"].(string)),
+						[]byte(r.(map[string]any)["_id"].(string),
+						),
 					),
 					[]byte{},
 					nil,
@@ -94,6 +95,9 @@ func (dr *BSONDriver) RemoveField(label string, field string) error {
 }
 
 func (dr *BSONDriver) LoadFields() error {
+	/* 
+	 * Not sure wether to use a cache here as well or keep it how it is.
+	 */
 	fPrefix := benchtop.FieldPrefix
 	dr.Lock.Lock()
 	defer dr.Lock.Unlock()
@@ -123,7 +127,7 @@ type FieldInfo struct {
 }
 
 func (dr *BSONDriver) ListFields() []FieldInfo {
-	/* Lists cached fields.
+	/* Lists loaded fields.
 	 * Since fields on disk are loaded on startup this should be all that is needed */
 
 	dr.Lock.RLock()

@@ -18,10 +18,12 @@ import (
 	"github.com/cockroachdb/pebble"
 	multierror "github.com/hashicorp/go-multierror"
 	"github.com/maypok86/otter/v2"
-	"go.mongodb.org/mongo-driver/bson"
+	"github.com/bytedance/sonic"
 )
 
-const batchSize = 1000
+const BATCH_SIZE = 1000
+const ROW_HSIZE = 12
+const ROW_OFFSET_HSIZE = 8
 
 type BSONDriver struct {
 	base       string
@@ -112,6 +114,12 @@ func LoadBSONDriver(path string) (benchtop.TableDriver, error) {
 		}),
 		LabelLookup: map[uint16]string{},
 	}
+	
+	err = driver.LoadFields()
+	if err != nil {
+		return nil, err
+	}
+	
 
 	for _, tableName := range driver.List() {
 		table, err := driver.Get(tableName)
@@ -147,11 +155,13 @@ func LoadBSONDriver(path string) (benchtop.TableDriver, error) {
 			return benchtop.RowLoc{}, err
 		}
 		offset, size := benchtop.ParsePosValue(val)
-		closer.Close()
+		defer closer.Close()
 		return benchtop.RowLoc{Offset: offset, Size: size}, nil
 	})
 
+	driver.Lock.RLock()
 	err = driver.PreloadCache()
+	driver.Lock.RUnlock()
 	if err != nil {
 		return nil, err
 	}
@@ -213,20 +223,22 @@ func (dr *BSONDriver) New(name string, columns []benchtop.ColumnDef) (benchtop.T
 		Name:     name,
 	}
 
-	if err := dr.addTable(tinfo); err != nil {
+	outData, err := sonic.ConfigFastest.Marshal(tinfo)
+	if err != nil {
+		f.Close()
+		return nil, fmt.Errorf("failed to marshal table info: %v", err)
+	}
+	
+	if err := dr.addTable(tinfo.Name, outData); err != nil {
 		f.Close()
 		log.Errorf("Error adding table: %s", err)
 		return nil, err
 	}
 
-	outData, err := bson.Marshal(tinfo)
-	if err != nil {
-		f.Close()
-		return nil, fmt.Errorf("failed to marshal table info: %v", err)
-	}
+	buffer := make([]byte, 12)
+	binary.LittleEndian.PutUint64(buffer[:8], uint64(0) + uint64(len(outData))+12)
+	binary.LittleEndian.PutUint32(buffer[8:12], uint32(len(outData)))
 
-	buffer := make([]byte, 8)
-	binary.LittleEndian.PutUint64(buffer, uint64(0)+uint64(len(outData))+8)
 	if _, err := out.handle.Write(buffer); err != nil {
 		f.Close()
 		return nil, fmt.Errorf("failed to write table header: %v", err)
@@ -316,9 +328,9 @@ func (dr *BSONDriver) Get(name string) (benchtop.TableStore, error) {
 		log.Errorln("BSONDriver Get: ", err)
 		return nil, err
 	}
-	tinfo := benchtop.TableInfo{}
-	bson.Unmarshal(value, &tinfo)
 	defer closer.Close()
+	tinfo := benchtop.TableInfo{}
+	sonic.ConfigFastest.Unmarshal(value, &tinfo)
 
 	log.Debugf("Opening Table: %#v\n", tinfo)
 	tPath := filepath.Join(dr.base, "TABLES", string(tinfo.FileName))
@@ -389,7 +401,7 @@ func (dr *BSONDriver) Delete(name string) error {
 // BulkLoad
 // tx: set null to initialize pebble bulk write context
 func (dr *BSONDriver) BulkLoad(inputs chan *benchtop.Row, tx *pebblebulk.PebbleBulk) error {
-
+	
 	if dr.Pb == nil || dr.Pb.Db == nil {
         return fmt.Errorf("pebble database instance is nil")
     }
@@ -439,8 +451,8 @@ func (dr *BSONDriver) BulkLoad(inputs chan *benchtop.Row, tx *pebblebulk.PebbleB
 				dr.Lock.Unlock()
 			}
 			for {
-				batch := make([]*benchtop.Row, 0, batchSize)
-				for range batchSize {
+				batch := make([]*benchtop.Row, 0, BATCH_SIZE)
+				for range BATCH_SIZE {
 					row, ok := <-ch
 					if !ok {
 						break
@@ -451,8 +463,8 @@ func (dr *BSONDriver) BulkLoad(inputs chan *benchtop.Row, tx *pebblebulk.PebbleB
 					break
 				}
 
-				bDatas := make([][]byte, 0, batchSize)
-				ids := make([]string, 0, batchSize)
+				bDatas := make([][]byte, 0, BATCH_SIZE)
+				ids := make([]string, 0, BATCH_SIZE)
 				for _, row := range batch {
 					_, fieldsExist := dr.Fields[tableName]
 					if fieldsExist {
@@ -467,7 +479,7 @@ func (dr *BSONDriver) BulkLoad(inputs chan *benchtop.Row, tx *pebblebulk.PebbleB
 						localErr = multierror.Append(localErr, fmt.Errorf("pack data error for table %s: %v", tableName, err))
 						continue
 					}
-					bData, err := bson.Marshal(mData)
+					bData, err := sonic.ConfigFastest.Marshal(mData)
 					if err != nil {
 						localErr = multierror.Append(localErr, fmt.Errorf("marshal data error for table %s: %v", tableName, err))
 						continue
@@ -500,17 +512,17 @@ func (dr *BSONDriver) BulkLoad(inputs chan *benchtop.Row, tx *pebblebulk.PebbleB
 				offsets[0] = uint64(startOffset)
 				totalLen := 0
 				for i, bData := range bDatas {
-					offsets[i+1] = offsets[i] + 8 + uint64(len(bData))
-					totalLen += 8 + len(bData)
+					offsets[i+1] = offsets[i] + ROW_HSIZE + uint64(len(bData))
+					totalLen += ROW_HSIZE + len(bData)
 				}
 
 				batchData := make([]byte, totalLen)
 				pos := 0
 				for i, bData := range bDatas {
-					binary.LittleEndian.PutUint64(batchData[pos:pos+8], offsets[i+1])
-					pos += 8
-					copy(batchData[pos:pos+len(bData)], bData)
-					pos += len(bData)
+					binary.LittleEndian.PutUint64(batchData[pos:pos + ROW_OFFSET_HSIZE], offsets[i+1])
+					binary.LittleEndian.PutUint32(batchData[pos + ROW_OFFSET_HSIZE: pos + ROW_HSIZE], uint32(len(bData)))
+					pos += ROW_HSIZE + len(bData)
+					copy(batchData[pos - len(bData):pos], bData)
 				}
 
 				_, err = table.handle.Write(batchData)

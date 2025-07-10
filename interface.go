@@ -47,7 +47,7 @@ type TableDriver interface {
 	New(name string, columns []ColumnDef) (TableStore, error)
 	Get(name string) (TableStore, error)
 	GetAllColNames() chan string
-	GetLabels(edges bool) chan string
+	GetLabels(edges bool, removePrefix bool) chan string
 	List() []string
 	Delete(name string) error
 	Close()
