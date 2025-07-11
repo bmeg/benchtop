@@ -474,12 +474,10 @@ func (dr *BSONDriver) BulkLoad(inputs chan *benchtop.Row, tx *pebblebulk.PebbleB
 							}
 						}
 					}
-					mData, err := table.packData(row.Data, string(row.Id))
-					if err != nil {
-						localErr = multierror.Append(localErr, fmt.Errorf("pack data error for table %s: %v", tableName, err))
-						continue
-					}
-					bData, err := sonic.ConfigFastest.Marshal(mData)
+
+					bData, err := sonic.ConfigFastest.Marshal(
+						table.packData(row.Data, string(row.Id)),
+					)
 					if err != nil {
 						localErr = multierror.Append(localErr, fmt.Errorf("marshal data error for table %s: %v", tableName, err))
 						continue

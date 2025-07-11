@@ -16,36 +16,15 @@ import (
 )
 
 type RowData struct {
-	Columns []any          `json:"0"`
-	Data   map[string]any  `json:"1"`
-	Key     string         `json:"2"`
+	Data map[string]any 	`json:"0"`
+	Key  string				`json:"1"`
 }
 
-func (b *BSONTable) packData(entry map[string]any, key string) (*RowData, error) {
-	rowData := &RowData{
-        Columns: 	make([]any, len(b.columns)),
-        Data:   	make(map[string]any),
+func (b *BSONTable) packData(entry map[string]any, key string) *RowData {
+	return &RowData{
+        Data:   	entry,
         Key:     	key,
     }
-    
-    /*for i, c := range b.columns {
-        if e, ok := entry[c.Key]; ok {
-            v, err := benchtop.CheckType(e, c.Type)
-            if err != nil {
-                return nil, fmt.Errorf("invalid type for column %s: %w", c.Key, err)
-            }
-            rowData.Columns[i] = v
-        } else {
-            rowData.Columns[i] = nil
-        }
-    }*/
-    
-    for k, v := range entry {
-        if _, ok := b.columnMap[k]; !ok {
-            rowData.Data[k] = v
-        }
-    }
-	return rowData, nil
 }
 
 func (b *BSONTable) AddTableEntryInfo(tx *pebblebulk.PebbleBulk, rowId []byte, rowLoc benchtop.RowLoc) {
@@ -91,23 +70,9 @@ func (b *BSONTable) unpackData(justKeys bool, retId bool, doc *RowData) (any, er
 	if justKeys {
 		return doc.Key, nil
 	}
-
-	/* This whole copy from one map to another map doesn't make any sense to do if we're not using the 
-	 * columnMap for anything currently anyway
-		
-	result := make(map[string]any, len(doc.Columns)+len(doc.Data))
-	for i, col := range b.columns {
-		result[col.Key] = doc.Columns[i]
-	}
-	for k, v := range doc.Data {
-		result[k] = v
-		}
-	*/
-	
 	if retId && doc.Data != nil{
 		doc.Data["_id"] = doc.Key
 	}
-
 	return doc.Data, nil
 
 }

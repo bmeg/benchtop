@@ -77,12 +77,10 @@ func (b *BSONTable) Close() {
 Unary single effect operations
 */
 func (b *BSONTable) AddRow(elem benchtop.Row) (*benchtop.RowLoc, error) {
-	mData, err := b.packData(elem.Data, string(elem.Id))
-	if err != nil {
-		return nil, err
-	}
 
-	bData, err := sonic.ConfigFastest.Marshal(mData)
+	bData, err := sonic.ConfigFastest.Marshal(
+		b.packData(elem.Data, string(elem.Id)),
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -461,12 +459,10 @@ func (b *BSONTable) Load(inputs chan benchtop.Row) error {
 
 	err = b.Pb.BulkWrite(func(tx *pebblebulk.PebbleBulk) error {
 		for entry := range inputs {
-			mData, err := b.packData(entry.Data, string(entry.Id))
-			if err != nil {
-				errs = multierror.Append(errs, err)
-				log.Errorf("pack data err in Load: bulkSet: %s", err)
-			}
-			bData, err := sonic.Marshal(mData)
+
+			bData, err := sonic.Marshal(
+				b.packData(entry.Data, string(entry.Id)),
+			)
 			if err != nil {
 				errs = multierror.Append(errs, err)
 				log.Errorf("bson Marshall err in Load: bulkSet: %s", err)
