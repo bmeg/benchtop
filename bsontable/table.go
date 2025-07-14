@@ -8,6 +8,9 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/bmeg/benchtop"
@@ -101,9 +104,9 @@ func (b *BSONTable) AddRow(elem benchtop.Row) (*benchtop.RowLoc, error) {
 	}
 
 	return &benchtop.RowLoc{
-		Offset: 	uint64(offset),
-		Size:   	uint64(writesize),
-		Label:   	b.TableId,
+		Offset: uint64(offset),
+		Size:   uint64(writesize),
+		Label:  b.TableId,
 	}, nil
 }
 
@@ -128,7 +131,7 @@ func (b *BSONTable) GetRow(loc benchtop.RowLoc) (map[string]any, error) {
 		}
 		return nil, fmt.Errorf("failed to decode JSON row at offset %d, size %d: %w", loc.Offset, loc.Size, err)
 	}
-	out, err := b.unpackData(false, false, &m)
+	out, err := b.unpackData(true, false, &m)
 	if err != nil {
 		return nil, err
 	}
@@ -325,7 +328,7 @@ func (b *BSONTable) Keys() (chan benchtop.Index, error) {
 	return out, nil
 }
 
-func (b *BSONTable) Scan(keys bool, filter benchtop.RowFilter, fields ...string) chan any {
+func (b *BSONTable) Scan(loadData bool, filter benchtop.RowFilter, fields ...string) chan any {
 	outChan := make(chan any, 100)
 	go func() {
 		defer close(outChan)
@@ -335,27 +338,26 @@ func (b *BSONTable) Scan(keys bool, filter benchtop.RowFilter, fields ...string)
 			log.Errorln("Error in bsontable scan func", err)
 			return
 		}
-		
+
 		m, err := mmap.Map(handle, mmap.RDONLY, 0)
 		if err != nil {
 			log.Errorln("Error mapping file:", err)
 			return
 		}
-		
+
 		defer func() {
 			b.FilePool <- handle
 			defer m.Unmap()
 		}()
 
-
 		// Process the memory-mapped data
 		offset := 0
-		for offset+ ROW_HSIZE <= len(m) {
-			header := m[offset : offset+ ROW_HSIZE]
+		for offset+ROW_HSIZE <= len(m) {
+			header := m[offset : offset+ROW_HSIZE]
 			nextOffset := binary.LittleEndian.Uint64(header[:ROW_OFFSET_HSIZE])
 			bSize := int32(binary.LittleEndian.Uint32(header[ROW_OFFSET_HSIZE:ROW_HSIZE]))
 
-			if bSize == 0 || int64(bSize) == int64(nextOffset)- ROW_HSIZE {
+			if bSize == 0 || int64(bSize) == int64(nextOffset)-ROW_HSIZE {
 				offset = int(nextOffset)
 				continue
 			}
@@ -369,7 +371,7 @@ func (b *BSONTable) Scan(keys bool, filter benchtop.RowFilter, fields ...string)
 
 			rowData := m[bsonStart:bsonEnd]
 
-			err = b.processBSONRowData(rowData, keys, filter, outChan)
+			err = b.processBSONRowData(rowData, loadData, filter, outChan)
 			if err != nil {
 				log.Debugf("Skipping malformed row at offset %d: %v", offset, err)
 			}
@@ -385,28 +387,44 @@ func (b *BSONTable) Scan(keys bool, filter benchtop.RowFilter, fields ...string)
 // It returns an error if the BSON is malformed or cannot be processed.
 func (b *BSONTable) processBSONRowData(
 	rowData []byte,
-	keys bool,
+	loadData bool,
 	filter benchtop.RowFilter,
 	outChan chan any,
 ) error {
+	var val any
+	var err error
 
-	var m RowData
-	sonic.ConfigFastest.Unmarshal(rowData, &m)
-	res, err := b.unpackData(false, true, &m)
-	if err != nil {
-		return err
+	if loadData {
+		var m RowData
+		sonic.ConfigFastest.Unmarshal(rowData, &m)
+		val, err = b.unpackData(true, true, &m)
+		if err != nil {
+			return err
+		}
+	}else {
+		val = rowData
 	}
 
-	if filter == nil || filter.IsNoOp() || !filter.IsNoOp() && filter.Matches(res.(map[string]any)) {
-		if keys {
-			outChan <- res.(map[string]any)["_id"]
-		} else {
-			outChan <- res
+	if filter == nil || filter.IsNoOp() || (!filter.IsNoOp() && filter.Matches(val)) {
+		if loadData {
+			outChan <- val
+			return nil
 		}
+	
+		node, err := sonic.Get(rowData, "1")
+		if err != nil {
+			log.Errorf("Error accessing JSON path for row data %s: %v\n", string(rowData), err)
+			return err
+		}
+		ID, err := node.Interface()
+		if err != nil {
+			log.Errorf("Error unmarshaling node: %v\n", err)
+			return err
+		}
+		outChan <- ID
 	}
 	return nil
 }
-
 
 func (b *BSONTable) Fetch(inputs chan benchtop.Index, workers int) <-chan benchtop.BulkResponse {
 	results := make(chan benchtop.BulkResponse, workers)
@@ -474,7 +492,7 @@ func (b *BSONTable) Load(inputs chan benchtop.Row) error {
 				errs = multierror.Append(errs, err)
 				log.Errorf("write handler err in Load: bulkSet: %s", err)
 			}
-			b.AddTableEntryInfo(tx, entry.Id, benchtop.RowLoc{Offset:uint64(offset), Size:uint64(writeSize)})
+			b.AddTableEntryInfo(tx, entry.Id, benchtop.RowLoc{Offset: uint64(offset), Size: uint64(writeSize)})
 			offset += int64(writeSize) + 8
 		}
 		return nil
@@ -548,26 +566,23 @@ func (b *BSONTable) Remove(inputs chan benchtop.Index, workers int) <-chan bench
 	return results
 }
 
-func union(a, b []string) []string {
-	set := make(map[string]struct{})
-	for _, v := range a {
-		set[v] = struct{}{}
-	}
-	for _, v := range b {
-		set[v] = struct{}{}
-	}
-	result := make([]string, 0, len(set))
-	for k := range set {
-		result = append(result, k)
-	}
-	return result
-}
+func ConvertJSONPathToArray(path string) ([]any, error) {
+	path = strings.TrimLeft(path, "./")
+	result := []any{"0"}
 
-func isNamedColumn(field string, columns []benchtop.ColumnDef) bool {
-	for _, col := range columns {
-		if col.Key == field {
-			return true
+	re := regexp.MustCompile(`[^.\[\]]+|\[\d+\]`)
+	matches := re.FindAllString(path, -1)
+	for _, token := range matches {
+		if strings.HasPrefix(token, "[") && strings.HasSuffix(token, "]") {
+			numStr := token[1 : len(token)-1]
+			index, err := strconv.Atoi(numStr)
+			if err != nil {
+				return nil, fmt.Errorf("invalid array index: %s", token)
+			}
+			result = append(result, index)
+		} else {
+			result = append(result, token)
 		}
 	}
-	return false
+	return result, nil
 }

@@ -32,7 +32,7 @@ func (dr *BSONDriver) AddField(label, field string) error {
 		log.Debugf("Found table %s writing indices for field %s", label, field)
 		err := dr.Pb.BulkWrite(func(tx *pebblebulk.PebbleBulk) error {
 			var filter benchtop.RowFilter = nil
-			for r := range foundTable.Scan(false, filter) {
+			for r := range foundTable.Scan(true, filter) {
 				err := tx.Set(
 					benchtop.FieldKey(
 						field,
@@ -101,6 +101,7 @@ func (dr *BSONDriver) LoadFields() error {
 	fPrefix := benchtop.FieldPrefix
 	dr.Lock.Lock()
 	defer dr.Lock.Unlock()
+	count :=0
 	err := dr.Pb.View(func(it *pebblebulk.PebbleIterator) error {
 		for it.Seek(fPrefix); it.Valid() && bytes.HasPrefix(it.Key(), fPrefix); it.Next() {
 			field, label, _, _ := benchtop.FieldKeyParse(it.Key())
@@ -109,9 +110,10 @@ func (dr *BSONDriver) LoadFields() error {
 			}
 			if _, exists := dr.Fields[label][field]; !exists {
 				dr.Fields[label][field] = struct{}{}
+				count++
 			}
 		}
-		log.Infof("Loaded %d label-fields from Indices", len(dr.Fields))
+		log.Debugf("Loaded %d indices", len(dr.Fields))
 		return nil
 	})
 	if err != nil {
@@ -225,7 +227,7 @@ func (dr *BSONDriver) GetIDsForLabel(label string) chan string {
 		}
 
 		var filter benchtop.RowFilter = nil
-		for id := range table.Scan(true, filter) {
+		for id := range table.Scan(false, filter) {
 			out <- id.(string)
 		}
 	}()

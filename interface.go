@@ -79,7 +79,7 @@ type RowLoc struct {
 
 type RowFilter interface {
 	// Matches returns true if the row passes the filter.
-	Matches(row map[string]any) bool
+	Matches(row any) bool
 	IsNoOp() bool
 
 	// RequiredFields returns a slice of field names needed to evaluate the filter.

@@ -63,11 +63,11 @@ func (b *BSONTable) getTableEntryInfo(snap *pebble.Snapshot, id []byte) (*bencht
 	return &benchtop.RowLoc{}, nil
 }
 
-func (b *BSONTable) unpackData(justKeys bool, retId bool, doc *RowData) (any, error) {
+func (b *BSONTable) unpackData(loadData bool, retId bool, doc *RowData) (any, error) {
 	if doc == nil {
 		return nil, fmt.Errorf("Doc is nil nothing to unpack")
 	}
-	if justKeys {
+	if !loadData {
 		return doc.Key, nil
 	}
 	if retId && doc.Data != nil{
@@ -156,7 +156,7 @@ func (b *BSONTable) readFromFile(offset uint64) (map[string]any, error) {
 	}
 	var m *RowData = nil
 	bson.Unmarshal(rowData, m)
-	out, err := b.unpackData(false, false, m)
+	out, err := b.unpackData(true, false, m)
 	if err != nil {
 		return nil, err
 	}
