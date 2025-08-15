@@ -8,10 +8,10 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"regexp"
-	"strconv"
 	"strings"
 	"sync"
+	"strconv"
+	"regexp"
 
 	"github.com/bmeg/benchtop"
 	"github.com/bmeg/benchtop/pebblebulk"
@@ -411,7 +411,7 @@ func (b *BSONTable) processBSONRowData(
 			return nil
 		}
 	
-		node, err := sonic.Get(rowData, "1")
+		node, err := sonic.Get(rowData, "K")
 		if err != nil {
 			log.Errorf("Error accessing JSON path for row data %s: %v\n", string(rowData), err)
 			return err
@@ -566,23 +566,35 @@ func (b *BSONTable) Remove(inputs chan benchtop.Index, workers int) <-chan bench
 	return results
 }
 
-func ConvertJSONPathToArray(path string) ([]any, error) {
-	path = strings.TrimLeft(path, "./")
-	result := []any{"0"}
+func ParseJSONPath(path string) ([]interface{}, int, error) {
+    path = strings.TrimLeft(path, "./")
+    // Match non-dot sequences or bracketed numbers (e.g., "a", "0", "[0]", "*")
+    re := regexp.MustCompile(`(?:\[[0-9]+\]|[^.]+)`)
+    elements := re.FindAllString(path, -1)
+    result := make([]interface{}, 0, len(elements)+1)
+    result = append(result, "D") // Prepend "D" as convention
+    wcIdx := -1
 
-	re := regexp.MustCompile(`[^.\[\]]+|\[\d+\]`)
-	matches := re.FindAllString(path, -1)
-	for _, token := range matches {
-		if strings.HasPrefix(token, "[") && strings.HasSuffix(token, "]") {
-			numStr := token[1 : len(token)-1]
-			index, err := strconv.Atoi(numStr)
-			if err != nil {
-				return nil, fmt.Errorf("invalid array index: %s", token)
-			}
-			result = append(result, index)
-		} else {
-			result = append(result, token)
-		}
-	}
-	return result, nil
+    for i, elem := range elements {
+        if elem == "*" {
+            if wcIdx == -1 {
+                wcIdx = i + 1 // Index in result, accounting for "D"
+            }
+            result = append(result, elem)
+        } else if len(elem) > 2 && elem[0] == '[' && elem[len(elem)-1] == ']' {
+            // Handle bracketed index, e.g., "[0]"
+            idx, err := strconv.Atoi(elem[1 : len(elem)-1])
+            if err != nil {
+                return nil, -1, err
+            }
+            result = append(result, idx)
+        } else if idx, err := strconv.Atoi(elem); err == nil {
+            // Handle plain numeric index, e.g., "0"
+            result = append(result, idx)
+        } else {
+            // Handle object key
+            result = append(result, elem)
+        }
+    }
+    return result, wcIdx, nil
 }

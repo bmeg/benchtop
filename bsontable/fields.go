@@ -163,7 +163,7 @@ func (dr *BSONDriver) RowIdsByHas(fltField string, fltValue any, fltOp benchtop.
 		err := dr.Pb.View(func(it *pebblebulk.PebbleIterator) error {
 			for it.Seek(prefix); it.Valid() && bytes.HasPrefix(it.Key(), prefix); it.Next() {
 				_, _, value, rowID := benchtop.FieldKeyParse(it.Key())
-				if tableFilters.ApplyFilterCondition(
+				if tableFilters.ApplyBaseFilterCondition(
 					value,
 					&benchtop.FieldFilter{
 						Field: fltField, Value: fltValue, Operator: fltOp,
@@ -193,7 +193,7 @@ func (dr *BSONDriver) RowIdsByLabelFieldValue(fltLabel string, fltField string, 
 		err := dr.Pb.View(func(it *pebblebulk.PebbleIterator) error {
 			for it.Seek(prefix); it.Valid() && bytes.HasPrefix(it.Key(), prefix); it.Next() {
 				_, _, value, rowID := benchtop.FieldKeyParse(it.Key())
-				if tableFilters.ApplyFilterCondition(
+				if tableFilters.ApplyBaseFilterCondition(
 					value,
 					&benchtop.FieldFilter{
 						Field: fltField, Value: fltValue, Operator: fltOp,

@@ -16,8 +16,8 @@ import (
 )
 
 type RowData struct {
-	Data map[string]any 	`json:"0"`
-	Key  string				`json:"1"`
+	Data map[string]any 	`json:"D"`
+	Key  string				`json:"K"`
 }
 
 func (b *BSONTable) packData(entry map[string]any, key string) *RowData {
@@ -44,6 +44,8 @@ func PathLookup(v map[string]any, path string) any {
 	field := tpath.NormalizePath(path)
 	jpath := tpath.ToLocalPath(field)
 	res, err := jsonpath.JsonPathLookup(v, jpath)
+	log.Debug("field: ", field, "    jpath: ", jpath, " res: ", res)
+
 	if err != nil {
 		return nil
 	}
