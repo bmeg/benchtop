@@ -4,7 +4,7 @@ import (
 	"testing"
 
 	"github.com/bmeg/benchtop"
-	"go.mongodb.org/mongo-driver/bson"
+	"github.com/bytedance/sonic"
 )
 
 func TestMarshal(t *testing.T) {
@@ -13,17 +13,17 @@ func TestMarshal(t *testing.T) {
 		Columns: []benchtop.ColumnDef{
 			{Key: "columnA", Type: benchtop.String},
 		},
-		Id: 42,
+		TableId: 42,
 	}
 
-	md, err := bson.Marshal(tinfo)
+	md, err := sonic.ConfigFastest.Marshal(tinfo)
 	if err != nil {
 		t.Errorf("error: %s", err)
 	}
 
 	out := benchtop.TableInfo{}
 
-	err = bson.Unmarshal(md, &out)
+	err = sonic.ConfigFastest.Unmarshal(md, &out)
 	if err != nil {
 		t.Errorf("error: %s", err)
 	}

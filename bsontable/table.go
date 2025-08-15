@@ -21,8 +21,6 @@ import (
 
 	"github.com/bytedance/sonic"
 	"github.com/cockroachdb/pebble"
-
-	"go.mongodb.org/mongo-driver/bson"
 )
 
 type BSONTable struct {
@@ -43,11 +41,11 @@ type BSONTable struct {
 
 func (b *BSONTable) Init(poolSize int) error {
 	b.FilePool = make(chan *os.File, poolSize)
-	for i := 0; i < poolSize; i++ {
+	for i := range poolSize {
 		file, err := os.Open(b.Path)
 		if err != nil {
 			// Close already opened files
-			for j := 0; j < i; j++ {
+			for range i {
 				if file, ok := <-b.FilePool; ok {
 					file.Close()
 				}
@@ -152,162 +150,6 @@ func (b *BSONTable) DeleteRow(name []byte) error {
 	return nil
 }
 
-func (b *BSONTable) Compact() error {
-	const flushThreshold = 1000
-	flushCounter := 0
-	b.handleLock.Lock()
-	defer b.handleLock.Unlock()
-
-	tempFileName, err := filepath.Abs(b.handle.Name() + ".compact")
-	if err != nil {
-		return err
-	}
-
-	tempHandle, err := os.Create(tempFileName)
-	if err != nil {
-		return err
-	}
-	defer tempHandle.Close()
-
-	oldHandle := b.handle
-	_, err = oldHandle.Seek(0, io.SeekStart)
-	if err != nil {
-		return err
-	}
-	defer oldHandle.Close()
-
-	reader := bufio.NewReaderSize(oldHandle, 16*1024*1024)
-	writer := bufio.NewWriterSize(tempHandle, 16*1024*1024)
-
-	var newOffset uint64 = 0
-	offsetSizeData := make([]byte, 8)
-	sizeBytes := make([]byte, 4)
-	rowBuff := make([]byte, 0, 1<<20)
-
-	fileOffset := int64(0)
-	inputChan := make(chan benchtop.Index, 100)
-
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		b.setDataIndices(inputChan)
-	}()
-
-	for {
-		_, err := io.ReadFull(reader, offsetSizeData)
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return fmt.Errorf("failed reading next offset: %w", err)
-		}
-		nextOffset := binary.LittleEndian.Uint64(offsetSizeData)
-
-		_, err = io.ReadFull(reader, sizeBytes)
-		if err != nil {
-			return fmt.Errorf("failed reading size: %w", err)
-		}
-		bSize := int32(binary.LittleEndian.Uint32(sizeBytes))
-
-		fileOffset += 12
-		if bSize == 0 || fileOffset == int64(12) {
-			if int64(nextOffset) > fileOffset {
-				_, err = oldHandle.Seek(int64(nextOffset), io.SeekStart)
-				if err != nil {
-					if err == io.EOF {
-						break
-					}
-					return fmt.Errorf("failed to seek to nextOffset: %w", err)
-				}
-				fileOffset = int64(nextOffset)
-				reader.Reset(oldHandle)
-			}
-			continue
-		}
-
-		if int(bSize) > cap(rowBuff) {
-			rowBuff = make([]byte, bSize)
-		} else {
-			rowBuff = rowBuff[:bSize]
-		}
-		copy(rowBuff, sizeBytes)
-		_, err = io.ReadFull(reader, rowBuff[4:])
-		if err != nil {
-			return fmt.Errorf("failed reading BSON data: %w", err)
-		}
-
-		val := bson.Raw(rowBuff).Lookup("R").Array().Index(2).Value()
-		inputChan <- benchtop.Index{Key: []byte(val.StringValue()), Position: newOffset, Size: uint64(bSize)}
-
-		newOffsetBytes := make([]byte, 8)
-		binary.LittleEndian.PutUint64(newOffsetBytes, newOffset+uint64(len(rowBuff))+12)
-
-		_, err = writer.Write(newOffsetBytes)
-		if err != nil {
-			return fmt.Errorf("failed writing new offset: %w", err)
-		}
-		_, err = writer.Write(rowBuff)
-		if err != nil {
-			return fmt.Errorf("failed writing BSON row: %w", err)
-		}
-
-		flushCounter++
-		if flushCounter%flushThreshold == 0 {
-			if err := writer.Flush(); err != nil {
-				return fmt.Errorf("failed flushing writer: %w", err)
-			}
-		}
-
-		newOffset += uint64(len(rowBuff)) + 8
-	}
-	close(inputChan)
-	wg.Wait()
-
-	if err := writer.Flush(); err != nil {
-		return fmt.Errorf("failed final flush of writer: %w", err)
-	}
-	if err := tempHandle.Sync(); err != nil {
-		return fmt.Errorf("failed syncing temp file: %w", err)
-	}
-	if err := tempHandle.Close(); err != nil {
-		return fmt.Errorf("failed closing temp file: %w", err)
-	}
-	if err := oldHandle.Close(); err != nil {
-		return fmt.Errorf("failed closing old handle: %w", err)
-	}
-
-	fileName, err := filepath.Abs(b.handle.Name())
-	if err != nil {
-		return err
-	}
-	if err := os.Rename(tempFileName, fileName); err != nil {
-		return fmt.Errorf("failed renaming compacted file: %w", err)
-	}
-
-	newHandle, err := os.OpenFile(fileName, os.O_RDWR, 0644)
-	if err != nil {
-		return fmt.Errorf("failed reopening compacted file: %w", err)
-	}
-	b.handle = newHandle
-
-	oldPool := b.FilePool
-	b.FilePool = make(chan *os.File, cap(oldPool))
-	for i := 0; i < cap(oldPool); i++ {
-		file, err := os.Open(b.Path)
-		if err != nil {
-			return fmt.Errorf("failed to refresh file pool: %v", err)
-		}
-		b.FilePool <- file
-	}
-	close(oldPool)
-	for file := range oldPool {
-		file.Close()
-	}
-
-	return nil
-}
-
 /*
 ////////////////////////////////////////////////////////////////
 Start of bulk, chan based functions
@@ -328,7 +170,7 @@ func (b *BSONTable) Keys() (chan benchtop.Index, error) {
 	return out, nil
 }
 
-func (b *BSONTable) Scan(loadData bool, filter benchtop.RowFilter, fields ...string) chan any {
+func (b *BSONTable) Scan(loadData bool, filter benchtop.RowFilter) chan any {
 	outChan := make(chan any, 100)
 	go func() {
 		defer close(outChan)
@@ -382,9 +224,9 @@ func (b *BSONTable) Scan(loadData bool, filter benchtop.RowFilter, fields ...str
 	return outChan
 }
 
-// processBSONRowData handles the parsing of a raw BSON row,
+// processBSONRowData handles the parsing of row bytes,
 // applying filters, and sending the result to the output channel.
-// It returns an error if the BSON is malformed or cannot be processed.
+// It returns an error if the row is malformed or cannot be processed.
 func (b *BSONTable) processBSONRowData(
 	rowData []byte,
 	loadData bool,
@@ -394,14 +236,14 @@ func (b *BSONTable) processBSONRowData(
 	var val any
 	var err error
 
-	if loadData {
+	if loadData || !filter.IsNoOp() {
 		var m RowData
 		sonic.ConfigFastest.Unmarshal(rowData, &m)
 		val, err = b.unpackData(true, true, &m)
 		if err != nil {
 			return err
 		}
-	}else {
+	} else {
 		val = rowData
 	}
 
@@ -410,7 +252,7 @@ func (b *BSONTable) processBSONRowData(
 			outChan <- val
 			return nil
 		}
-	
+
 		node, err := sonic.Get(rowData, "1")
 		if err != nil {
 			log.Errorf("Error accessing JSON path for row data %s: %v\n", string(rowData), err)
@@ -423,6 +265,150 @@ func (b *BSONTable) processBSONRowData(
 		}
 		outChan <- ID
 	}
+	return nil
+}
+
+// Compact, Fetch, Load, And Remove methods are not currently being used in grip.
+// Compact should be introduced into grip in a future PR since the heavy load and delete design approach that we are taking
+func (b *BSONTable) Compact() error {
+	const flushThreshold = 1000
+	flushCounter := 0
+	b.handleLock.Lock()
+	defer b.handleLock.Unlock()
+
+	tempFileName, err := filepath.Abs(b.handle.Name() + ".compact")
+	if err != nil {
+		return fmt.Errorf("failed to get absolute path for temp file: %w", err)
+	}
+
+	tempHandle, err := os.Create(tempFileName)
+	if err != nil {
+		return fmt.Errorf("failed to create temp file: %w", err)
+	}
+	defer tempHandle.Close()
+
+	oldHandle := b.handle
+	m, err := mmap.Map(oldHandle, mmap.RDONLY, 0)
+	if err != nil {
+		return fmt.Errorf("failed to map file: %w", err)
+	}
+	defer m.Unmap()
+
+	writer := bufio.NewWriterSize(tempHandle, 16*1024*1024)
+	var newOffset uint64 = 0
+	inputChan := make(chan benchtop.Index, 100)
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		b.setDataIndices(inputChan)
+	}()
+
+	offset := 0
+	for offset+ROW_HSIZE <= len(m) {
+		header := m[offset : offset+ROW_HSIZE]
+		nextOffset := binary.LittleEndian.Uint64(header[:ROW_OFFSET_HSIZE])
+		bSize := int32(binary.LittleEndian.Uint32(header[ROW_OFFSET_HSIZE:ROW_HSIZE]))
+
+		if bSize == 0 || int64(nextOffset) == int64(12) {
+			if int64(nextOffset) > int64(offset) {
+				offset = int(nextOffset)
+			}
+			continue
+		}
+
+		bsonStart := offset + 12
+		bsonEnd := bsonStart + int(bSize)
+		if bsonEnd > len(m) {
+			return fmt.Errorf("incomplete BSON data at offset %d, size %d", offset, bSize)
+		}
+
+		rowData := m[bsonStart:bsonEnd]
+		var mRow RowData
+		err = sonic.ConfigFastest.Unmarshal(rowData, &mRow)
+		if err != nil {
+			if err == io.EOF {
+				return fmt.Errorf("BSON data for row at offset %d, size %d was incomplete: %w", offset, bSize, err)
+			}
+			return fmt.Errorf("failed to decode BSON row at offset %d, size %d: %w", offset, bSize, err)
+		}
+
+		node, err := sonic.Get(rowData, "1")
+		if err != nil {
+			return fmt.Errorf("failed to access ID field for row at offset %d: %w", offset, err)
+		}
+		key, err := node.String()
+		if err != nil {
+			return fmt.Errorf("failed to unmarshal ID field for row at offset %d: %w", offset, err)
+		}
+		inputChan <- benchtop.Index{Key: []byte(key), Position: newOffset, Size: uint64(bSize)}
+
+		newOffsetBytes := make([]byte, 8)
+		binary.LittleEndian.PutUint64(newOffsetBytes, newOffset+uint64(bSize)+12)
+
+		_, err = writer.Write(newOffsetBytes)
+		if err != nil {
+			return fmt.Errorf("failed writing new offset at %d: %w", newOffset, err)
+		}
+		_, err = writer.Write(rowData)
+		if err != nil {
+			return fmt.Errorf("failed writing BSON row at offset %d: %w", newOffset, err)
+		}
+
+		flushCounter++
+		if flushCounter%flushThreshold == 0 {
+			if err := writer.Flush(); err != nil {
+				return fmt.Errorf("failed flushing writer: %w", err)
+			}
+		}
+
+		newOffset += uint64(bSize) + 8
+	}
+	close(inputChan)
+	wg.Wait()
+
+	if err := writer.Flush(); err != nil {
+		return fmt.Errorf("failed final flush of writer: %w", err)
+	}
+	if err := tempHandle.Sync(); err != nil {
+		return fmt.Errorf("failed syncing temp file: %w", err)
+	}
+	if err := tempHandle.Close(); err != nil {
+		return fmt.Errorf("failed closing temp file: %w", err)
+	}
+	if err := oldHandle.Close(); err != nil {
+		return fmt.Errorf("failed closing old handle: %w", err)
+	}
+
+	fileName, err := filepath.Abs(b.handle.Name())
+	if err != nil {
+		return fmt.Errorf("failed to get absolute path for file: %w", err)
+	}
+	if err := os.Rename(tempFileName, fileName); err != nil {
+		return fmt.Errorf("failed renaming compacted file: %w", err)
+	}
+
+	newHandle, err := os.OpenFile(fileName, os.O_RDWR, 0644)
+	if err != nil {
+		return fmt.Errorf("failed reopening compacted file: %w", err)
+	}
+	b.handle = newHandle
+
+	oldPool := b.FilePool
+	b.FilePool = make(chan *os.File, cap(oldPool))
+	for range oldPool {
+		file, err := os.Open(b.Path)
+		if err != nil {
+			return fmt.Errorf("failed to refresh file pool: %w", err)
+		}
+		b.FilePool <- file
+	}
+	close(oldPool)
+	for file := range oldPool {
+		file.Close()
+	}
+
 	return nil
 }
 

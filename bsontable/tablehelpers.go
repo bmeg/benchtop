@@ -16,25 +16,32 @@ import (
 )
 
 type RowData struct {
-	Data map[string]any 	`json:"0"`
-	Key  string				`json:"1"`
+	Data map[string]any `json:"0"`
+	Key  string         `json:"1"`
 }
 
 func (b *BSONTable) packData(entry map[string]any, key string) *RowData {
 	return &RowData{
-        Data:   	entry,
-        Key:     	key,
-    }
+		Data: entry,
+		Key:  key,
+	}
 }
 
-func (b *BSONTable) AddTableEntryInfo(tx *pebblebulk.PebbleBulk, rowId []byte, rowLoc benchtop.RowLoc) {
+func (b *BSONTable) AddTableEntryInfo(tx *pebblebulk.PebbleBulk, rowId []byte, rowLoc benchtop.RowLoc) error {
 	value := benchtop.NewPosValue(rowLoc.Offset, rowLoc.Size)
 	posKey := benchtop.NewPosKey(b.TableId, rowId)
 	if tx != nil {
-		tx.Set(posKey, value, nil)
+		err := tx.Set(posKey, value, nil)
+		if err != nil {
+			return err
+		}
 	} else {
-		b.db.Set(posKey, value, nil)
+		err := b.Pb.Db.Set(posKey, value, nil)
+		if err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
 func PathLookup(v map[string]any, path string) any {
@@ -70,7 +77,7 @@ func (b *BSONTable) unpackData(loadData bool, retId bool, doc *RowData) (any, er
 	if !loadData {
 		return doc.Key, nil
 	}
-	if retId && doc.Data != nil{
+	if retId && doc.Data != nil {
 		doc.Data["_id"] = doc.Key
 	}
 	return doc.Data, nil

@@ -84,7 +84,7 @@ func BenchmarkRemove(b *testing.B) {
 		b.Error("Unexpected Key: ", key)
 	}
 
-	scaChan, err := compactbsonTable.Scan(true, nil, "data")
+	scaChan := compactbsonTable.Scan(true, nil)
 	for elem := range scaChan {
 		fmt.Println("ELEM: ", elem)
 	}
