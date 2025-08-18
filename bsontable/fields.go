@@ -7,8 +7,9 @@ import (
 	"github.com/bmeg/benchtop"
 	"github.com/bmeg/grip/log"
 
-	tableFilters "github.com/bmeg/benchtop/bsontable/filters"
+	"github.com/bmeg/benchtop/filters"
 	"github.com/bmeg/benchtop/pebblebulk"
+	"github.com/bmeg/grip/gripql"
 )
 
 func (dr *BSONDriver) AddField(label, field string) error {
@@ -39,8 +40,7 @@ func (dr *BSONDriver) AddField(label, field string) error {
 						label,
 						PathLookup(
 							r.(map[string]any), field),
-						[]byte(r.(map[string]any)["_id"].(string),
-						),
+						[]byte(r.(map[string]any)["_id"].(string)),
 					),
 					[]byte{},
 					nil,
@@ -95,13 +95,13 @@ func (dr *BSONDriver) RemoveField(label string, field string) error {
 }
 
 func (dr *BSONDriver) LoadFields() error {
-	/* 
+	/*
 	 * Not sure wether to use a cache here as well or keep it how it is.
 	 */
 	fPrefix := benchtop.FieldPrefix
 	dr.Lock.Lock()
 	defer dr.Lock.Unlock()
-	count :=0
+	count := 0
 	err := dr.Pb.View(func(it *pebblebulk.PebbleIterator) error {
 		for it.Seek(fPrefix); it.Valid() && bytes.HasPrefix(it.Key(), fPrefix); it.Next() {
 			field, label, _, _ := benchtop.FieldKeyParse(it.Key())
@@ -148,7 +148,7 @@ func (dr *BSONDriver) ListFields() []FieldInfo {
 	return out
 }
 
-func (dr *BSONDriver) RowIdsByHas(fltField string, fltValue any, fltOp benchtop.OperatorType) chan string {
+func (dr *BSONDriver) RowIdsByHas(fltField string, fltValue any, fltOp gripql.Condition) chan string {
 	dr.Lock.RLock()
 	defer dr.Lock.RUnlock()
 
@@ -163,9 +163,9 @@ func (dr *BSONDriver) RowIdsByHas(fltField string, fltValue any, fltOp benchtop.
 		err := dr.Pb.View(func(it *pebblebulk.PebbleIterator) error {
 			for it.Seek(prefix); it.Valid() && bytes.HasPrefix(it.Key(), prefix); it.Next() {
 				_, _, value, rowID := benchtop.FieldKeyParse(it.Key())
-				if tableFilters.ApplyFilterCondition(
+				if filters.ApplyFilterCondition(
 					value,
-					&benchtop.FieldFilter{
+					&filters.FieldFilter{
 						Field: fltField, Value: fltValue, Operator: fltOp,
 					},
 				) {
@@ -181,7 +181,7 @@ func (dr *BSONDriver) RowIdsByHas(fltField string, fltValue any, fltOp benchtop.
 	return out
 }
 
-func (dr *BSONDriver) RowIdsByLabelFieldValue(fltLabel string, fltField string, fltValue any, fltOp benchtop.OperatorType) chan string {
+func (dr *BSONDriver) RowIdsByLabelFieldValue(fltLabel string, fltField string, fltValue any, fltOp gripql.Condition) chan string {
 	log.WithFields(log.Fields{"label": fltLabel, "field": fltField, "value": fltValue}).Debug("Running RowIdsByLabelFieldValue")
 	dr.Lock.RLock()
 	defer dr.Lock.RUnlock()
@@ -193,9 +193,9 @@ func (dr *BSONDriver) RowIdsByLabelFieldValue(fltLabel string, fltField string, 
 		err := dr.Pb.View(func(it *pebblebulk.PebbleIterator) error {
 			for it.Seek(prefix); it.Valid() && bytes.HasPrefix(it.Key(), prefix); it.Next() {
 				_, _, value, rowID := benchtop.FieldKeyParse(it.Key())
-				if tableFilters.ApplyFilterCondition(
+				if filters.ApplyFilterCondition(
 					value,
-					&benchtop.FieldFilter{
+					&filters.FieldFilter{
 						Field: fltField, Value: fltValue, Operator: fltOp,
 					},
 				) {

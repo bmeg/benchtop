@@ -109,6 +109,7 @@ func (b *BSONTable) AddRow(elem benchtop.Row) (*benchtop.RowLoc, error) {
 }
 
 func (b *BSONTable) GetRow(loc benchtop.RowLoc) (map[string]any, error) {
+
 	file := <-b.FilePool
 	defer func() {
 		b.FilePool <- file
@@ -236,7 +237,7 @@ func (b *BSONTable) processBSONRowData(
 	var val any
 	var err error
 
-	if loadData || !filter.IsNoOp() {
+	if loadData || filter != nil && !filter.IsNoOp() {
 		var m RowData
 		sonic.ConfigFastest.Unmarshal(rowData, &m)
 		val, err = b.unpackData(true, true, &m)

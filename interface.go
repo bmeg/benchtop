@@ -24,12 +24,6 @@ const (
 	OP_ENDSWITH   OperatorType = "ENDSWITH"
 )
 
-type FieldFilter struct {
-	Field    string
-	Operator OperatorType
-	Value    any
-}
-
 type TableInfo struct {
 	FileName string      `json:"fileName"`
 	Columns  []ColumnDef `json:"columns"`
@@ -78,11 +72,9 @@ type RowLoc struct {
 }
 
 type RowFilter interface {
-	// Matches returns true if the row passes the filter.
 	Matches(row any) bool
+	GetFilter() any
 	IsNoOp() bool
-
-	// RequiredFields returns a slice of field names needed to evaluate the filter.
 	RequiredFields() []string
 }
 
