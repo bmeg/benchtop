@@ -53,8 +53,7 @@ func TestInsert(t *testing.T) {
 	}
 
 	for k, v := range vmap {
-		//fmt.Printf("==vector==:%s\n", k)
-		err := table.AddRow(benchtop.Row{Id: []byte(k), Data: map[string]any{"embedding": v}})
+		_, err := table.AddRow(benchtop.Row{Id: []byte(k), TableName: "VECTORS", Data: map[string]any{"embedding": v}})
 		if err != nil {
 			t.Error(err)
 		}

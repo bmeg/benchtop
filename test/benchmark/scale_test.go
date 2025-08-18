@@ -9,6 +9,8 @@ import (
 	"github.com/bmeg/benchtop/bsontable"
 	"github.com/bmeg/benchtop/test/fixtures"
 	"github.com/bmeg/benchtop/util"
+	"github.com/bmeg/grip/log"
+	"github.com/cockroachdb/pebble"
 )
 
 var Bsonname = "test.bson" + util.RandomString(5)
@@ -53,10 +55,10 @@ func BenchmarkScaleWriteBson(b *testing.B) {
 
 	b.ResetTimer()
 
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		inputChan := make(chan benchtop.Row, 100)
 		go func() {
-			for j := 0; j < scalenumKeys; j++ {
+			for j := range scalenumKeys {
 				key := []byte(fmt.Sprintf("key_%d", j))
 				value := fixtures.GenerateRandomBytes(scalevalueSize)
 				inputChan <- benchtop.Row{Id: key, Data: map[string]any{"data": value}}
@@ -97,13 +99,26 @@ func BenchmarkRandomReadBson(b *testing.B) {
 	b.ResetTimer()
 
 	OTKEYS, _ := ot.Keys()
+	bT, _ := ot.(*bsontable.BSONTable)
 	for key := range OTKEYS {
 		if _, exists := randomIndexSet[count]; exists {
-			val, err := ot.GetRow(key.Key)
+
+			pKey := benchtop.NewPosKey(bT.TableId, key.Key)
+			val, closer, err := bT.Pb.Db.Get(pKey)
+			if err != nil {
+				if err != pebble.ErrNotFound {
+					log.Errorf("Err on dr.Pb.Get for key %s in CacheLoader: %v", key.Key, err)
+				}
+				log.Errorln("ERR: ", err)
+			}
+			offset, size := benchtop.ParsePosValue(val)
+			closer.Close()
+
+			rOw, err := bT.GetRow(benchtop.RowLoc{Offset: offset, Size: size, Label: 0})
 			if err != nil {
 				b.Fatal(err)
 			}
-			selectedValues = append(selectedValues, val)
+			selectedValues = append(selectedValues, rOw)
 		}
 		count++
 	}

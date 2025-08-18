@@ -9,6 +9,8 @@ import (
 	"github.com/bmeg/benchtop/bsontable"
 	"github.com/bmeg/benchtop/test/fixtures"
 	"github.com/bmeg/benchtop/util"
+	"github.com/bmeg/grip/log"
+	"github.com/cockroachdb/pebble"
 )
 
 const (
@@ -52,8 +54,21 @@ func BenchmarkRemove(b *testing.B) {
 	}
 	b.Log("Load completed successfully")
 
-	data, err := compactbsonTable.GetRow([]byte("key_5"))
+	bT, _ := compactbsonTable.(*bsontable.BSONTable)
+	pKey := benchtop.NewPosKey(bT.TableId, []byte("key_5"))
+	val, closer, err := bT.Pb.Db.Get(pKey)
+	if err != nil {
+		if err != pebble.ErrNotFound {
+			log.Errorf("Err on dr.Pb.Get for key %s in CacheLoader: %v", pKey, err)
+		}
+		log.Errorln("ERR: ", err)
+	}
+	closer.Close()
+	offset, size := benchtop.ParsePosValue(val)
+
+	data, err := compactbsonTable.GetRow(benchtop.RowLoc{Offset: offset, Size: size, Label: 0})
 	b.Log("DATA BEFORE: ", data)
+
 	if len(data) == 0 {
 		b.Fatal("Expected data to be in key_5 but none was found")
 	}
@@ -74,7 +89,7 @@ func BenchmarkRemove(b *testing.B) {
 		b.Fatal(err)
 	}
 
-	data, err = compactbsonTable.GetRow([]byte("key_5"))
+	data, err = compactbsonTable.GetRow(benchtop.RowLoc{Offset: offset, Size: size, Label: 0})
 	b.Log("DATA AFTER: ", data)
 	if len(data) != 0 {
 		b.Fatalf("Expected data to be empty for key_5 but %#v was found\n", data)
