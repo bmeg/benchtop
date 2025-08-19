@@ -3,17 +3,19 @@ package test
 import (
 	"fmt"
 	"os"
-	"strings"
+	"reflect"
 	"testing"
 
 	"github.com/bmeg/benchtop"
 	"github.com/bmeg/benchtop/bsontable"
+	"github.com/bmeg/benchtop/filters"
 	"github.com/bmeg/benchtop/test/fixtures"
+	"github.com/bmeg/grip/gripql"
 
 	"github.com/bmeg/benchtop/util"
 )
 
-type FieldFilters []benchtop.FieldFilter
+type FieldFilters []filters.FieldFilter
 
 func (ff FieldFilters) Matches(row any) bool {
 	rowData, ok := row.(map[string]any)
@@ -26,23 +28,11 @@ func (ff FieldFilters) Matches(row any) bool {
 			return false
 		}
 		switch filter.Operator {
-		case benchtop.OP_EQ:
+		case gripql.Condition_EQ:
 			if fmt.Sprintf("%v", fieldValue) != fmt.Sprintf("%v", filter.Value) {
 				return false
 			}
-		case benchtop.OP_STARTSWITH:
-			strVal, ok := fieldValue.(string)
-			if !ok {
-				return false
-			}
-			filterVal, ok := filter.Value.(string)
-			if !ok {
-				return false
-			}
-			if !strings.HasPrefix(strVal, filterVal) {
-				return false
-			}
-		case benchtop.OP_GT:
+		case gripql.Condition_GT:
 			val1, ok1 := fieldValue.(float64)
 			val2, ok2 := filter.Value.(float64)
 			if !ok1 || !ok2 {
@@ -52,13 +42,36 @@ func (ff FieldFilters) Matches(row any) bool {
 			if val1 <= val2 {
 				return false // Does not match the "greater than" condition
 			}
+
+		case gripql.Condition_CONTAINS:
+			found := false
+			switch val := filter.Value.(type) {
+			case []any:
+				for _, v := range val {
+					if reflect.DeepEqual(v, fieldValue) {
+						found = true
+					}
+				}
+			case nil:
+				found = false
+			default:
+			}
+			return found
+
+		default:
+			return false
 		}
+
 	}
 	return true
 }
 
 func (ff FieldFilters) IsNoOp() bool {
 	return len(ff) == 0
+}
+
+func (ff FieldFilters) GetFilter() any {
+	return ff
 }
 
 func (ff FieldFilters) RequiredFields() []string {
@@ -101,7 +114,7 @@ func TestScan(t *testing.T) {
 		}
 	}
 
-	filters1 := FieldFilters{benchtop.FieldFilter{Field: "name", Operator: benchtop.OP_EQ, Value: "alice"}}
+	filters1 := FieldFilters{filters.FieldFilter{Field: "name", Operator: gripql.Condition_EQ, Value: "alice"}}
 	lenscanChan1 := 0
 	for elem := range bT.Scan(true, filters1) {
 		lenscanChan1++
@@ -118,7 +131,7 @@ func TestScan(t *testing.T) {
 	}
 
 	// Second test case: "field1" == 0.2
-	filters2 := FieldFilters{benchtop.FieldFilter{Field: "field1", Operator: benchtop.OP_EQ, Value: 0.2}}
+	filters2 := FieldFilters{filters.FieldFilter{Field: "field1", Operator: gripql.Condition_EQ, Value: 0.2}}
 	scanChan2 := bT.Scan(true, filters2)
 
 	for elem := range scanChan2 {
@@ -139,7 +152,7 @@ func TestScan(t *testing.T) {
 	}
 
 	// Third test case: "field1" > 0.2
-	filters3 := FieldFilters{benchtop.FieldFilter{Field: "field1", Operator: benchtop.OP_GT, Value: 0.2}}
+	filters3 := FieldFilters{filters.FieldFilter{Field: "field1", Operator: gripql.Condition_GT, Value: 0.2}}
 	scanChan3 := bT.Scan(true, filters3)
 
 	scanChanLen3 := 0
@@ -168,7 +181,7 @@ func TestScan(t *testing.T) {
 
 	// Fourth test case: "name" starts with "a"
 	// NOTE: You need to fix the case in your original code from "startswith" to "STARTSWITH"
-	filters4 := FieldFilters{benchtop.FieldFilter{Field: "name", Operator: benchtop.OP_STARTSWITH, Value: "a"}}
+	filters4 := FieldFilters{filters.FieldFilter{Field: "name", Operator: gripql.Condition_CONTAINS, Value: []any{"mnbv"}}}
 	scanChan4 := bT.Scan(false, filters4)
 
 	scanChanLen4 := 0
