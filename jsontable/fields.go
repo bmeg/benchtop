@@ -1,4 +1,4 @@
-package bsontable
+package jsontable
 
 import (
 	"bytes"
@@ -12,7 +12,7 @@ import (
 	"github.com/bmeg/grip/gripql"
 )
 
-func (dr *BSONDriver) AddField(label, field string) error {
+func (dr *JSONDriver) AddField(label, field string) error {
 	dr.Lock.Lock()
 	defer dr.Lock.Unlock()
 
@@ -70,7 +70,7 @@ func (dr *BSONDriver) AddField(label, field string) error {
 	return nil
 }
 
-func (dr *BSONDriver) RemoveField(label string, field string) error {
+func (dr *JSONDriver) RemoveField(label string, field string) error {
 	dr.Lock.Lock()
 	defer dr.Lock.Unlock()
 
@@ -94,7 +94,7 @@ func (dr *BSONDriver) RemoveField(label string, field string) error {
 	return nil
 }
 
-func (dr *BSONDriver) LoadFields() error {
+func (dr *JSONDriver) LoadFields() error {
 	/*
 	 * Not sure wether to use a cache here as well or keep it how it is.
 	 */
@@ -128,7 +128,7 @@ type FieldInfo struct {
 	Field string
 }
 
-func (dr *BSONDriver) ListFields() []FieldInfo {
+func (dr *JSONDriver) ListFields() []FieldInfo {
 	/* Lists loaded fields.
 	 * Since fields on disk are loaded on startup this should be all that is needed */
 
@@ -148,7 +148,7 @@ func (dr *BSONDriver) ListFields() []FieldInfo {
 	return out
 }
 
-func (dr *BSONDriver) RowIdsByHas(fltField string, fltValue any, fltOp gripql.Condition) chan string {
+func (dr *JSONDriver) RowIdsByHas(fltField string, fltValue any, fltOp gripql.Condition) chan string {
 	dr.Lock.RLock()
 	defer dr.Lock.RUnlock()
 
@@ -181,7 +181,7 @@ func (dr *BSONDriver) RowIdsByHas(fltField string, fltValue any, fltOp gripql.Co
 	return out
 }
 
-func (dr *BSONDriver) RowIdsByLabelFieldValue(fltLabel string, fltField string, fltValue any, fltOp gripql.Condition) chan string {
+func (dr *JSONDriver) RowIdsByLabelFieldValue(fltLabel string, fltField string, fltValue any, fltOp gripql.Condition) chan string {
 	log.WithFields(log.Fields{"label": fltLabel, "field": fltField, "value": fltValue}).Debug("Running RowIdsByLabelFieldValue")
 	dr.Lock.RLock()
 	defer dr.Lock.RUnlock()
@@ -212,7 +212,7 @@ func (dr *BSONDriver) RowIdsByLabelFieldValue(fltLabel string, fltField string, 
 	return out
 }
 
-func (dr *BSONDriver) GetIDsForLabel(label string) chan string {
+func (dr *JSONDriver) GetIDsForLabel(label string) chan string {
 	dr.Lock.RLock()
 	defer dr.Lock.RUnlock()
 

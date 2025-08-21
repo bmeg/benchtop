@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	"github.com/bmeg/benchtop"
-	"github.com/bmeg/benchtop/bsontable"
+	"github.com/bmeg/benchtop/jsontable"
 	"github.com/bmeg/benchtop/util"
 )
 
@@ -14,7 +14,7 @@ func TestDelete(t *testing.T) {
 	dbname := "test.data" + util.RandomString(5)
 	defer os.RemoveAll(dbname)
 
-	dr, err := bsontable.NewBSONDriver(dbname)
+	dr, err := jsontable.NewJSONDriver(dbname)
 	if err != nil {
 		t.Error(err)
 	}
@@ -29,7 +29,7 @@ func TestDelete(t *testing.T) {
 	}
 
 	totalCount := 100
-	bT, _ := ts.(*bsontable.BSONTable)
+	bT, _ := ts.(*jsontable.JSONTable)
 	for i := 0; i < totalCount; i++ {
 		key := fmt.Sprintf("key_%d", i)
 		loc, err := bT.AddRow(benchtop.Row{Id: []byte(key), Data: map[string]any{

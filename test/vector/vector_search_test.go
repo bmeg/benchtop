@@ -8,8 +8,8 @@ import (
 	"time"
 
 	"github.com/bmeg/benchtop"
-	"github.com/bmeg/benchtop/bsontable"
 	"github.com/bmeg/benchtop/distqueue"
+	"github.com/bmeg/benchtop/jsontable"
 )
 
 // RandomString generates a random string of length n.
@@ -32,7 +32,7 @@ func TestInsert(t *testing.T) {
 
 	dbname := "test_index." + RandomString(5)
 
-	driver, err := bsontable.NewBSONDriver(dbname)
+	driver, err := jsontable.NewJSONDriver(dbname)
 
 	if err != nil {
 		t.Error(err)

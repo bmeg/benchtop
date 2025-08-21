@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	"github.com/bmeg/benchtop"
-	"github.com/bmeg/benchtop/bsontable"
+	"github.com/bmeg/benchtop/jsontable"
 	"github.com/bmeg/benchtop/util"
 )
 
@@ -13,7 +13,7 @@ func TestGetAllColls(t *testing.T) {
 	name := "test.data" + util.RandomString(5)
 	defer os.RemoveAll(name)
 
-	dr, err := bsontable.NewBSONDriver(name)
+	dr, err := jsontable.NewJSONDriver(name)
 	if err != nil {
 		t.Error(err)
 	}

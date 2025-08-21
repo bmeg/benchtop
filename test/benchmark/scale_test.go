@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	"github.com/bmeg/benchtop"
-	"github.com/bmeg/benchtop/bsontable"
+	"github.com/bmeg/benchtop/jsontable"
 	"github.com/bmeg/benchtop/test/fixtures"
 	"github.com/bmeg/benchtop/util"
 	"github.com/bmeg/grip/log"
@@ -14,8 +14,8 @@ import (
 )
 
 var Bsonname = "test.bson" + util.RandomString(5)
-var bsonTable *bsontable.BSONTable
-var bsonDriver *bsontable.BSONDriver
+var jsonTable *jsontable.JSONTable
+var bsonDriver *jsontable.JSONDriver
 
 const (
 	scalenumKeys   = 100000
@@ -27,12 +27,12 @@ func BenchmarkScaleWriteBson(b *testing.B) {
 
 	var err error
 	if bsonDriver == nil {
-		driver, err := bsontable.NewBSONDriver(Bsonname)
+		driver, err := jsontable.NewJSONDriver(Bsonname)
 		if err != nil {
 			b.Fatal(err)
 		}
 		var ok bool
-		bsonDriver, ok = driver.(*bsontable.BSONDriver)
+		bsonDriver, ok = driver.(*jsontable.JSONDriver)
 		if !ok {
 			b.Fatal("Failed to assert type *benchtop.BSONDriver")
 		}
@@ -40,14 +40,14 @@ func BenchmarkScaleWriteBson(b *testing.B) {
 
 	columns := []benchtop.ColumnDef{{Key: "data", Type: benchtop.Bytes}}
 
-	if bsonTable == nil {
+	if jsonTable == nil {
 		table, err := bsonDriver.New(Bsonname, columns)
 		if err != nil {
 			b.Fatal(err)
 		}
 
 		var ok bool
-		bsonTable, ok = table.(*bsontable.BSONTable)
+		jsonTable, ok = table.(*jsontable.JSONTable)
 		if !ok {
 			b.Fatal("Failed to assert type *benchtop.BSONDriver")
 		}
@@ -66,7 +66,7 @@ func BenchmarkScaleWriteBson(b *testing.B) {
 			close(inputChan)
 		}()
 
-		err = bsonTable.Load(inputChan)
+		err = jsonTable.Load(inputChan)
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -76,12 +76,12 @@ func BenchmarkScaleWriteBson(b *testing.B) {
 func BenchmarkRandomReadBson(b *testing.B) {
 	var err error
 	if bsonDriver == nil {
-		driver, err := bsontable.NewBSONDriver(Bsonname)
+		driver, err := jsontable.NewJSONDriver(Bsonname)
 		if err != nil {
 			b.Fatal(err)
 		}
 		var ok bool
-		bsonDriver, ok = driver.(*bsontable.BSONDriver)
+		bsonDriver, ok = driver.(*jsontable.JSONDriver)
 		if !ok {
 			b.Fatal("Failed to assert type *benchtop.BSONDriver")
 		}
@@ -99,7 +99,7 @@ func BenchmarkRandomReadBson(b *testing.B) {
 	b.ResetTimer()
 
 	OTKEYS, _ := ot.Keys()
-	bT, _ := ot.(*bsontable.BSONTable)
+	bT, _ := ot.(*jsontable.JSONTable)
 	for key := range OTKEYS {
 		if _, exists := randomIndexSet[count]; exists {
 
@@ -129,12 +129,12 @@ func BenchmarkRandomReadBson(b *testing.B) {
 func BenchmarkRandomKeysBson(b *testing.B) {
 	var err error
 	if bsonDriver == nil {
-		driver, err := bsontable.NewBSONDriver(Bsonname)
+		driver, err := jsontable.NewJSONDriver(Bsonname)
 		if err != nil {
 			b.Fatal(err)
 		}
 		var ok bool
-		bsonDriver, ok = driver.(*bsontable.BSONDriver)
+		bsonDriver, ok = driver.(*jsontable.JSONDriver)
 		if !ok {
 			b.Fatal("Failed to assert type *benchtop.BSONDriver")
 		}

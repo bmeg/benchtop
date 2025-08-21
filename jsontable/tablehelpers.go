@@ -1,4 +1,4 @@
-package bsontable
+package jsontable
 
 import (
 	"encoding/binary"
@@ -7,7 +7,7 @@ import (
 	"os"
 
 	"github.com/bmeg/benchtop"
-	"github.com/bmeg/benchtop/bsontable/tpath"
+	"github.com/bmeg/benchtop/jsontable/tpath"
 	"github.com/bmeg/benchtop/pebblebulk"
 	"github.com/bmeg/grip/log"
 	"github.com/bmeg/jsonpath"
@@ -20,14 +20,14 @@ type RowData struct {
 	Key  string         `json:"1"`
 }
 
-func (b *BSONTable) packData(entry map[string]any, key string) *RowData {
+func (b *JSONTable) packData(entry map[string]any, key string) *RowData {
 	return &RowData{
 		Data: entry,
 		Key:  key,
 	}
 }
 
-func (b *BSONTable) AddTableEntryInfo(tx *pebblebulk.PebbleBulk, rowId []byte, rowLoc benchtop.RowLoc) error {
+func (b *JSONTable) AddTableEntryInfo(tx *pebblebulk.PebbleBulk, rowId []byte, rowLoc benchtop.RowLoc) error {
 	value := benchtop.NewPosValue(rowLoc.Offset, rowLoc.Size)
 	posKey := benchtop.NewPosKey(b.TableId, rowId)
 	if tx != nil {
@@ -57,7 +57,7 @@ func PathLookup(v map[string]any, path string) any {
 	return res
 }
 
-func (b *BSONTable) getTableEntryInfo(snap *pebble.Snapshot, id []byte) (*benchtop.RowLoc, error) {
+func (b *JSONTable) getTableEntryInfo(snap *pebble.Snapshot, id []byte) (*benchtop.RowLoc, error) {
 	// Really only want to see if anything was returned or not
 	_, closer, err := snap.Get(benchtop.NewPosKey(b.TableId, id))
 	if err == pebble.ErrNotFound {
@@ -70,7 +70,7 @@ func (b *BSONTable) getTableEntryInfo(snap *pebble.Snapshot, id []byte) (*bencht
 	return &benchtop.RowLoc{}, nil
 }
 
-func (b *BSONTable) unpackData(loadData bool, retId bool, doc *RowData) (any, error) {
+func (b *JSONTable) unpackData(loadData bool, retId bool, doc *RowData) (any, error) {
 	if doc == nil {
 		return nil, fmt.Errorf("Doc is nil nothing to unpack")
 	}
@@ -84,7 +84,7 @@ func (b *BSONTable) unpackData(loadData bool, retId bool, doc *RowData) (any, er
 
 }
 
-func (b *BSONTable) GetBlockPos(id []byte) (offset uint64, size uint64, err error) {
+func (b *JSONTable) GetBlockPos(id []byte) (offset uint64, size uint64, err error) {
 	log.Debugln("TABLE ID: ", b.TableId, "ID: ", string(id))
 	val, closer, err := b.db.Get(benchtop.NewPosKey(b.TableId, id))
 	if err != nil {
@@ -99,7 +99,7 @@ func (b *BSONTable) GetBlockPos(id []byte) (offset uint64, size uint64, err erro
 	return offset, size, nil
 }
 
-func (b *BSONTable) setDataIndices(inputs chan benchtop.Index) {
+func (b *JSONTable) setDataIndices(inputs chan benchtop.Index) {
 	for index := range inputs {
 		b.AddTableEntryInfo(
 			nil,
@@ -112,7 +112,7 @@ func (b *BSONTable) setDataIndices(inputs chan benchtop.Index) {
 	}
 }
 
-func (b *BSONTable) markDelete(offset uint64) error {
+func (b *JSONTable) markDelete(offset uint64) error {
 	file, err := os.OpenFile(b.Path, os.O_RDWR, 0644)
 	if err != nil {
 		return err
@@ -135,7 +135,7 @@ func (b *BSONTable) markDelete(offset uint64) error {
 	return nil
 }
 
-func (b *BSONTable) readFromFile(offset uint64) (map[string]any, error) {
+func (b *JSONTable) readFromFile(offset uint64) (map[string]any, error) {
 	file, err := os.Open(b.Path)
 	if err != nil {
 		return nil, err
@@ -170,7 +170,7 @@ func (b *BSONTable) readFromFile(offset uint64) (map[string]any, error) {
 	return out.(map[string]any), nil
 }
 
-func (b *BSONTable) writeBsonEntry(offset int64, bData []byte) (int, error) {
+func (b *JSONTable) writeBsonEntry(offset int64, bData []byte) (int, error) {
 	// make next offset equal to existing offset + length of data
 	buffer := make([]byte, 12)
 	binary.LittleEndian.PutUint64(buffer[:8], uint64(offset)+uint64(len(bData))+12)

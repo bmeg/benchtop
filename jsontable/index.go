@@ -1,4 +1,4 @@
-package bsontable
+package jsontable
 
 import (
 	"bytes"
@@ -10,7 +10,7 @@ import (
 const bufferSize = 100
 
 // List all unique col names held by all tables
-func (dr *BSONDriver) GetAllColNames() chan string {
+func (dr *JSONDriver) GetAllColNames() chan string {
 	dr.Lock.RLock()
 	defer dr.Lock.RUnlock()
 
@@ -34,7 +34,7 @@ func (dr *BSONDriver) GetAllColNames() chan string {
 	return out
 }
 
-func (dr *BSONDriver) GetLabels(edges bool, removePrefix bool) chan string {
+func (dr *JSONDriver) GetLabels(edges bool, removePrefix bool) chan string {
 	dr.Lock.RLock()
 	defer dr.Lock.RUnlock()
 
@@ -48,7 +48,7 @@ func (dr *BSONDriver) GetLabels(edges bool, removePrefix bool) chan string {
 				if (edges && strKey[:2] == "e_") || (!edges && strKey[:2] == "v_") {
 					if removePrefix {
 						out <- strKey[2:]
-					}else {
+					} else {
 						out <- strKey
 					}
 				}

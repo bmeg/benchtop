@@ -1,4 +1,4 @@
-package bsontable
+package jsontable
 
 import (
 	"bytes"
@@ -15,33 +15,33 @@ import (
 	"github.com/bmeg/benchtop/pebblebulk"
 	"github.com/bmeg/benchtop/util"
 	"github.com/bmeg/grip/log"
+	"github.com/bytedance/sonic"
 	"github.com/cockroachdb/pebble"
 	multierror "github.com/hashicorp/go-multierror"
 	"github.com/maypok86/otter/v2"
-	"github.com/bytedance/sonic"
 )
 
 const BATCH_SIZE = 1000
 const ROW_HSIZE = 12
 const ROW_OFFSET_HSIZE = 8
 
-type BSONDriver struct {
+type JSONDriver struct {
 	base       string
 	Lock       sync.RWMutex
 	PebbleLock sync.Mutex
 	db         *pebble.DB
 	Pb         *pebblebulk.PebbleKV
 
-	PageCache   *otter.Cache[string, benchtop.RowLoc]
-	PageLoader  otter.LoaderFunc[string, benchtop.RowLoc]
+	PageCache  *otter.Cache[string, benchtop.RowLoc]
+	PageLoader otter.LoaderFunc[string, benchtop.RowLoc]
 
-	Tables map[string]*BSONTable
+	Tables      map[string]*JSONTable
 	LabelLookup map[uint16]string
 	// Fields is defined like label, field
 	Fields map[string]map[string]struct{}
 }
 
-func NewBSONDriver(path string) (benchtop.TableDriver, error) {
+func NewJSONDriver(path string) (benchtop.TableDriver, error) {
 	db, err := pebble.Open(path, &pebble.Options{})
 	if err != nil {
 		return nil, err
@@ -51,10 +51,10 @@ func NewBSONDriver(path string) (benchtop.TableDriver, error) {
 		os.Mkdir(tableDir, 0700)
 	}
 
-	driver := &BSONDriver{
+	driver := &JSONDriver{
 		base:   path,
 		db:     db,
-		Tables: map[string]*BSONTable{},
+		Tables: map[string]*JSONTable{},
 		Pb: &pebblebulk.PebbleKV{
 			Db:           db,
 			InsertCount:  0,
@@ -63,9 +63,9 @@ func NewBSONDriver(path string) (benchtop.TableDriver, error) {
 		PageCache: otter.Must(&otter.Options[string, benchtop.RowLoc]{
 			MaximumSize: 10_000_000,
 		}),
-		Fields:     map[string]map[string]struct{}{},
-		Lock:       sync.RWMutex{},
-		PebbleLock: sync.Mutex{},
+		Fields:      map[string]map[string]struct{}{},
+		Lock:        sync.RWMutex{},
+		PebbleLock:  sync.Mutex{},
 		LabelLookup: map[uint16]string{},
 	}
 
@@ -85,7 +85,6 @@ func NewBSONDriver(path string) (benchtop.TableDriver, error) {
 	return driver, nil
 }
 
-
 func LoadBSONDriver(path string) (benchtop.TableDriver, error) {
 	db, err := pebble.Open(path, &pebble.Options{})
 	if err != nil {
@@ -97,10 +96,10 @@ func LoadBSONDriver(path string) (benchtop.TableDriver, error) {
 		return nil, fmt.Errorf("TABLES directory not found at %s", tableDir)
 	}
 
-	driver := &BSONDriver{
+	driver := &JSONDriver{
 		base:   path,
 		db:     db,
-		Tables: map[string]*BSONTable{},
+		Tables: map[string]*JSONTable{},
 		Pb: &pebblebulk.PebbleKV{
 			Db:           db,
 			InsertCount:  0,
@@ -114,12 +113,11 @@ func LoadBSONDriver(path string) (benchtop.TableDriver, error) {
 		}),
 		LabelLookup: map[uint16]string{},
 	}
-	
+
 	err = driver.LoadFields()
 	if err != nil {
 		return nil, err
 	}
-	
 
 	for _, tableName := range driver.List() {
 		table, err := driver.Get(tableName)
@@ -127,7 +125,7 @@ func LoadBSONDriver(path string) (benchtop.TableDriver, error) {
 			driver.Close()
 			return nil, fmt.Errorf("failed to load table %s: %v", tableName, err)
 		}
-		bsonTable, ok := table.(*BSONTable)
+		bsonTable, ok := table.(*JSONTable)
 		if !ok {
 			driver.Close()
 			log.Errorf("invalid table type for %s", tableName)
@@ -169,7 +167,7 @@ func LoadBSONDriver(path string) (benchtop.TableDriver, error) {
 	return driver, nil
 }
 
-func (dr *BSONDriver) New(name string, columns []benchtop.ColumnDef) (benchtop.TableStore, error) {
+func (dr *JSONDriver) New(name string, columns []benchtop.ColumnDef) (benchtop.TableStore, error) {
 	dr.Lock.RLock()
 	if p, ok := dr.Tables[name]; ok {
 		dr.Lock.RUnlock()
@@ -192,7 +190,7 @@ func (dr *BSONDriver) New(name string, columns []benchtop.ColumnDef) (benchtop.T
 		return nil, fmt.Errorf("failed to create table %s: %v", tPath, err)
 	}
 
-	out := &BSONTable{
+	out := &JSONTable{
 		columns:    columns,
 		handleLock: sync.RWMutex{},
 		columnMap:  map[string]int{},
@@ -213,7 +211,7 @@ func (dr *BSONDriver) New(name string, columns []benchtop.ColumnDef) (benchtop.T
 	}
 
 	dr.LabelLookup[newId] = name[2:]
- 	
+
 	// Create TableInfo for serialization
 	tinfo := &benchtop.TableInfo{
 		Columns:  columns,
@@ -228,7 +226,7 @@ func (dr *BSONDriver) New(name string, columns []benchtop.ColumnDef) (benchtop.T
 		f.Close()
 		return nil, fmt.Errorf("failed to marshal table info: %v", err)
 	}
-	
+
 	if err := dr.addTable(tinfo.Name, outData); err != nil {
 		f.Close()
 		log.Errorf("Error adding table: %s", err)
@@ -236,7 +234,7 @@ func (dr *BSONDriver) New(name string, columns []benchtop.ColumnDef) (benchtop.T
 	}
 
 	buffer := make([]byte, 12)
-	binary.LittleEndian.PutUint64(buffer[:8], uint64(0) + uint64(len(outData))+12)
+	binary.LittleEndian.PutUint64(buffer[:8], uint64(0)+uint64(len(outData))+12)
 	binary.LittleEndian.PutUint32(buffer[8:12], uint32(len(outData)))
 
 	if _, err := out.handle.Write(buffer); err != nil {
@@ -259,7 +257,7 @@ func (dr *BSONDriver) New(name string, columns []benchtop.ColumnDef) (benchtop.T
 	return out, nil
 }
 
-func (dr *BSONDriver) List() []string {
+func (dr *JSONDriver) List() []string {
 	out := []string{}
 	prefix := []byte{benchtop.TablePrefix}
 	dr.Pb.View(func(it *pebblebulk.PebbleIterator) error {
@@ -272,7 +270,7 @@ func (dr *BSONDriver) List() []string {
 	return out
 }
 
-func (dr *BSONDriver) Close() {
+func (dr *JSONDriver) Close() {
 	dr.Lock.Lock()
 	defer dr.Lock.Unlock()
 
@@ -293,7 +291,7 @@ func (dr *BSONDriver) Close() {
 		table.handleLock.Unlock()
 		table.Pb = nil
 	}
-	dr.Tables = make(map[string]*BSONTable)
+	dr.Tables = make(map[string]*JSONTable)
 	if dr.db != nil {
 		if closeErr := dr.db.Close(); closeErr != nil {
 			log.Errorf("Error closing Pebble database: %v", closeErr)
@@ -307,7 +305,7 @@ func (dr *BSONDriver) Close() {
 	return
 }
 
-func (dr *BSONDriver) Get(name string) (benchtop.TableStore, error) {
+func (dr *JSONDriver) Get(name string) (benchtop.TableStore, error) {
 	dr.Lock.RLock()
 	if x, ok := dr.Tables[name]; ok {
 		dr.Lock.RUnlock()
@@ -339,7 +337,7 @@ func (dr *BSONDriver) Get(name string) (benchtop.TableStore, error) {
 		return nil, fmt.Errorf("failed to open table %s: %v", tPath, err)
 	}
 
-	out := &BSONTable{
+	out := &JSONTable{
 		columns:    tinfo.Columns,
 		db:         dr.db,
 		columnMap:  map[string]int{},
@@ -370,7 +368,7 @@ func (dr *BSONDriver) Get(name string) (benchtop.TableStore, error) {
 }
 
 // Currently not used
-func (dr *BSONDriver) Delete(name string) error {
+func (dr *JSONDriver) Delete(name string) error {
 	dr.Lock.Lock()
 	defer dr.Lock.Unlock()
 
@@ -400,20 +398,19 @@ func (dr *BSONDriver) Delete(name string) error {
 
 // BulkLoad
 // tx: set null to initialize pebble bulk write context
-func (dr *BSONDriver) BulkLoad(inputs chan *benchtop.Row, tx *pebblebulk.PebbleBulk) error {
-	
+func (dr *JSONDriver) BulkLoad(inputs chan *benchtop.Row, tx *pebblebulk.PebbleBulk) error {
+
 	if dr.Pb == nil || dr.Pb.Db == nil {
-        return fmt.Errorf("pebble database instance is nil")
-    }
+		return fmt.Errorf("pebble database instance is nil")
+	}
 	var wg sync.WaitGroup
 	tableChannels := make(map[string]chan *benchtop.Row)
 	metadataChan := make(chan struct {
-		table          *BSONTable
+		table          *JSONTable
 		fieldIndexKeys [][]byte
 		metadata       map[string]benchtop.RowLoc
 		err            error
 	}, 100)
-
 
 	startTableGoroutine := func(tableName string) {
 		snapshot := dr.Pb.Db.NewSnapshot()
@@ -422,11 +419,11 @@ func (dr *BSONDriver) BulkLoad(inputs chan *benchtop.Row, tx *pebblebulk.PebbleB
 		tableChannels[tableName] = ch
 		wg.Add(1)
 		go func() {
-   			defer func() {
-      			snapshot.Close()
-                wg.Done()
-            }()
-   			var fieldIndexKeys [][]byte
+			defer func() {
+				snapshot.Close()
+				wg.Done()
+			}()
+			var fieldIndexKeys [][]byte
 			metadata := make(map[string]benchtop.RowLoc)
 			var localErr *multierror.Error
 
@@ -438,14 +435,14 @@ func (dr *BSONDriver) BulkLoad(inputs chan *benchtop.Row, tx *pebblebulk.PebbleB
 				if err != nil {
 					localErr = multierror.Append(localErr, fmt.Errorf("failed to create table %s: %v", tableName, err))
 					metadataChan <- struct {
-						table          *BSONTable
+						table          *JSONTable
 						fieldIndexKeys [][]byte
 						metadata       map[string]benchtop.RowLoc
 						err            error
 					}{nil, nil, nil, localErr.ErrorOrNil()}
 					return
 				}
-				table = newTable.(*BSONTable)
+				table = newTable.(*JSONTable)
 				dr.Lock.Lock()
 				dr.Tables[tableName] = table
 				dr.Lock.Unlock()
@@ -517,10 +514,10 @@ func (dr *BSONDriver) BulkLoad(inputs chan *benchtop.Row, tx *pebblebulk.PebbleB
 				batchData := make([]byte, totalLen)
 				pos := 0
 				for i, bData := range bDatas {
-					binary.LittleEndian.PutUint64(batchData[pos:pos + ROW_OFFSET_HSIZE], offsets[i+1])
-					binary.LittleEndian.PutUint32(batchData[pos + ROW_OFFSET_HSIZE: pos + ROW_HSIZE], uint32(len(bData)))
+					binary.LittleEndian.PutUint64(batchData[pos:pos+ROW_OFFSET_HSIZE], offsets[i+1])
+					binary.LittleEndian.PutUint32(batchData[pos+ROW_OFFSET_HSIZE:pos+ROW_HSIZE], uint32(len(bData)))
 					pos += ROW_HSIZE + len(bData)
-					copy(batchData[pos - len(bData):pos], bData)
+					copy(batchData[pos-len(bData):pos], bData)
 				}
 
 				_, err = table.handle.Write(batchData)
@@ -538,7 +535,7 @@ func (dr *BSONDriver) BulkLoad(inputs chan *benchtop.Row, tx *pebblebulk.PebbleB
 			}
 
 			metadataChan <- struct {
-				table          *BSONTable
+				table          *JSONTable
 				fieldIndexKeys [][]byte
 				metadata       map[string]benchtop.RowLoc
 				err            error

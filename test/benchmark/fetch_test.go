@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	"github.com/bmeg/benchtop"
-	"github.com/bmeg/benchtop/bsontable"
+	"github.com/bmeg/benchtop/jsontable"
 	"github.com/bmeg/benchtop/test/fixtures"
 	"github.com/bmeg/benchtop/util"
 )
@@ -22,14 +22,14 @@ func BenchmarkFetch(b *testing.B) {
 
 	b.Log("BenchmarkScaleWriteBson start")
 
-	compactbsonDriver, err := bsontable.NewBSONDriver(fetchname)
+	compactbsonDriver, err := jsontable.NewJSONDriver(fetchname)
 	if err != nil {
 		b.Fatal(err)
 	}
 
 	columns := []benchtop.ColumnDef{{Key: "data", Type: benchtop.Bytes}}
 
-	compactbsonTable, err := compactbsonDriver.New(fetchname, columns)
+	compactjsonTable, err := compactbsonDriver.New(fetchname, columns)
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -48,17 +48,17 @@ func BenchmarkFetch(b *testing.B) {
 	}()
 
 	b.Log("start load")
-	if err := compactbsonTable.Load(inputChan); err != nil {
+	if err := compactjsonTable.Load(inputChan); err != nil {
 		b.Fatal(err)
 	}
 	b.Log("Load completed successfully")
 
-	keys, err := compactbsonTable.Keys()
+	keys, err := compactjsonTable.Keys()
 	if err != nil {
 		b.Fatal(err)
 	}
 
-	outStruct := compactbsonTable.Fetch(keys, 5)
+	outStruct := compactjsonTable.Fetch(keys, 5)
 	keyCount := 0
 	for _ = range outStruct {
 		//b.Log("KEY: ", keys)

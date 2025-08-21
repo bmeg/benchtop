@@ -3,7 +3,7 @@ package keys
 import (
 	"fmt"
 
-	"github.com/bmeg/benchtop/bsontable"
+	"github.com/bmeg/benchtop/jsontable"
 	"github.com/spf13/cobra"
 )
 
@@ -17,7 +17,7 @@ var Cmd = &cobra.Command{
 		dbPath := args[0]
 		tableName := args[1]
 
-		driver, err := bsontable.NewBSONDriver(dbPath)
+		driver, err := jsontable.NewJSONDriver(dbPath)
 		if err != nil {
 			return err
 		}
