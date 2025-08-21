@@ -11,8 +11,8 @@ import (
 	"github.com/bmeg/benchtop/pebblebulk"
 	"github.com/bmeg/grip/log"
 	"github.com/bmeg/jsonpath"
+	"github.com/bytedance/sonic"
 	"github.com/cockroachdb/pebble"
-	"go.mongodb.org/mongo-driver/bson"
 )
 
 type RowData struct {
@@ -147,7 +147,7 @@ func (b *JSONTable) readFromFile(offset uint64) (map[string]any, error) {
 		return nil, err
 	}
 
-	// Read BSON block size
+	// Read JSON block size
 	sizeBytes := []byte{0x00, 0x00, 0x00, 0x00}
 	_, err = file.Read(sizeBytes)
 	if err != nil {
@@ -162,7 +162,7 @@ func (b *JSONTable) readFromFile(offset uint64) (map[string]any, error) {
 		return nil, err
 	}
 	var m *RowData = nil
-	bson.Unmarshal(rowData, m)
+	sonic.ConfigFastest.Unmarshal(rowData, m)
 	out, err := b.unpackData(true, false, m)
 	if err != nil {
 		return nil, err
@@ -170,7 +170,7 @@ func (b *JSONTable) readFromFile(offset uint64) (map[string]any, error) {
 	return out.(map[string]any), nil
 }
 
-func (b *JSONTable) writeBsonEntry(offset int64, bData []byte) (int, error) {
+func (b *JSONTable) writeJsonEntry(offset int64, bData []byte) (int, error) {
 	// make next offset equal to existing offset + length of data
 	buffer := make([]byte, 12)
 	binary.LittleEndian.PutUint64(buffer[:8], uint64(offset)+uint64(len(bData))+12)
@@ -183,7 +183,7 @@ func (b *JSONTable) writeBsonEntry(offset int64, bData []byte) (int, error) {
 
 	n, err := b.handle.Write(bData)
 	if err != nil {
-		return 0, fmt.Errorf("write BSON error: %v", err)
+		return 0, fmt.Errorf("write JSON error: %v", err)
 	}
 	return n, nil
 }

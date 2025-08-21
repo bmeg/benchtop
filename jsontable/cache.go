@@ -55,26 +55,3 @@ func (dr *JSONDriver) PreloadCache() error {
 	}
 	return err
 }
-
-/*
- * Old slow Cache Loading function. Will keep this here until it is clear that new cache loading function works as expected.
- func (dr *BSONDriver) PreloadCache() error {
-	L_Start := time.Now()
-	err := dr.Pb.View(func(it *pebblebulk.PebbleIterator) error {
-		prefix := []byte{benchtop.PosPrefix}
-		for it.Seek(prefix); it.Valid() && bytes.HasPrefix(it.Key(), prefix); it.Next() {
-			tableId, id := benchtop.ParsePosKey(it.Key())
-			val, err := it.Value()
-			if err != nil {
-				log.Errorf("Err on it.Value() in PreloadCache")
-			}
-			offset, size := benchtop.ParsePosValue(val)
-			dr.PageCache.Set(string(id), benchtop.RowLoc{Offset: offset, Size: size, Label: tableId})
-		}
-		return nil
-	})
-	if err == nil {
-		log.Debugf("Successfully loaded RowLoc cache in %d seconds", (time.Now().Second() - L_Start.Second()))
-	}
-	return err
-}*/

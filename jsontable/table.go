@@ -95,7 +95,7 @@ func (b *JSONTable) AddRow(elem benchtop.Row) (*benchtop.RowLoc, error) {
 	}
 
 	log.Debugln("WRITE ENTRY: ", offset, len(bData))
-	writesize, err := b.writeBsonEntry(offset, bData)
+	writesize, err := b.writeJsonEntry(offset, bData)
 	if err != nil {
 		log.Errorf("write handler err in Load: bulkSet: %s", err)
 		return nil, err
@@ -178,7 +178,7 @@ func (b *JSONTable) Scan(loadData bool, filter benchtop.RowFilter) chan any {
 		handle := <-b.FilePool
 		_, err := handle.Seek(0, io.SeekStart)
 		if err != nil {
-			log.Errorln("Error in bsontable scan func", err)
+			log.Errorln("Error in jsontable scan func", err)
 			return
 		}
 
@@ -205,16 +205,16 @@ func (b *JSONTable) Scan(loadData bool, filter benchtop.RowFilter) chan any {
 				continue
 			}
 
-			bsonStart := offset + ROW_HSIZE
-			bsonEnd := bsonStart + int(bSize)
-			if bsonEnd > len(m) {
+			jsonStart := offset + ROW_HSIZE
+			jsonEnd := jsonStart + int(bSize)
+			if jsonEnd > len(m) {
 				log.Debugf("Incomplete record at end of file at offset %d", offset)
 				break
 			}
 
-			rowData := m[bsonStart:bsonEnd]
+			rowData := m[jsonStart:jsonEnd]
 
-			err = b.processBSONRowData(rowData, loadData, filter, outChan)
+			err = b.processJSONRowData(rowData, loadData, filter, outChan)
 			if err != nil {
 				log.Debugf("Skipping malformed row at offset %d: %v", offset, err)
 			}
@@ -228,7 +228,7 @@ func (b *JSONTable) Scan(loadData bool, filter benchtop.RowFilter) chan any {
 // processBSONRowData handles the parsing of row bytes,
 // applying filters, and sending the result to the output channel.
 // It returns an error if the row is malformed or cannot be processed.
-func (b *JSONTable) processBSONRowData(
+func (b *JSONTable) processJSONRowData(
 	rowData []byte,
 	loadData bool,
 	filter benchtop.RowFilter,
@@ -319,20 +319,20 @@ func (b *JSONTable) Compact() error {
 			continue
 		}
 
-		bsonStart := offset + 12
-		bsonEnd := bsonStart + int(bSize)
-		if bsonEnd > len(m) {
-			return fmt.Errorf("incomplete BSON data at offset %d, size %d", offset, bSize)
+		jsonStart := offset + 12
+		jsonEnd := jsonStart + int(bSize)
+		if jsonEnd > len(m) {
+			return fmt.Errorf("incomplete JSON data at offset %d, size %d", offset, bSize)
 		}
 
-		rowData := m[bsonStart:bsonEnd]
+		rowData := m[jsonStart:jsonEnd]
 		var mRow RowData
 		err = sonic.ConfigFastest.Unmarshal(rowData, &mRow)
 		if err != nil {
 			if err == io.EOF {
-				return fmt.Errorf("BSON data for row at offset %d, size %d was incomplete: %w", offset, bSize, err)
+				return fmt.Errorf("JSON data for row at offset %d, size %d was incomplete: %w", offset, bSize, err)
 			}
-			return fmt.Errorf("failed to decode BSON row at offset %d, size %d: %w", offset, bSize, err)
+			return fmt.Errorf("failed to decode JSON row at offset %d, size %d: %w", offset, bSize, err)
 		}
 
 		node, err := sonic.Get(rowData, "1")
@@ -354,7 +354,7 @@ func (b *JSONTable) Compact() error {
 		}
 		_, err = writer.Write(rowData)
 		if err != nil {
-			return fmt.Errorf("failed writing BSON row at offset %d: %w", newOffset, err)
+			return fmt.Errorf("failed writing JSON row at offset %d: %w", newOffset, err)
 		}
 
 		flushCounter++
@@ -470,11 +470,11 @@ func (b *JSONTable) Load(inputs chan benchtop.Row) error {
 			)
 			if err != nil {
 				errs = multierror.Append(errs, err)
-				log.Errorf("bson Marshall err in Load: bulkSet: %s", err)
+				log.Errorf("json Marshall err in Load: bulkSet: %s", err)
 			}
 
 			// make Next offset equal to existing offset + length of data
-			writeSize, err := b.writeBsonEntry(offset, bData)
+			writeSize, err := b.writeJsonEntry(offset, bData)
 			if err != nil {
 				errs = multierror.Append(errs, err)
 				log.Errorf("write handler err in Load: bulkSet: %s", err)

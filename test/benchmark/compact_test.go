@@ -17,20 +17,20 @@ const (
 	NumDeleteKeys = 200
 )
 
-func BenchmarkCompactBson(b *testing.B) {
-	var compactbsoname = "test.bson" + util.RandomString(5)
-	defer os.RemoveAll(compactbsoname)
+func BenchmarkCompactJson(b *testing.B) {
+	var compactjsoname = "test.json" + util.RandomString(5)
+	defer os.RemoveAll(compactjsoname)
 
-	b.Log("BenchmarkScaleWriteBson start")
+	b.Log("BenchmarkScaleWriteJson start")
 
-	compactbsonDriver, err := jsontable.NewJSONDriver(compactbsoname)
+	compactjsonDriver, err := jsontable.NewJSONDriver(compactjsoname)
 	if err != nil {
 		b.Fatal(err)
 	}
 
-	columns := []benchtop.ColumnDef{{Key: "data", Type: benchtop.Bytes}}
+	columns := []benchtop.ColumnDef{{Key: "data"}}
 
-	compactbsonTable, err := compactbsonDriver.New(compactbsoname, columns)
+	compactjsonTable, err := compactjsonDriver.New(compactjsoname, columns)
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -49,12 +49,12 @@ func BenchmarkCompactBson(b *testing.B) {
 	}()
 
 	b.Log("start load")
-	if err := compactbsonTable.Load(inputChan); err != nil {
+	if err := compactjsonTable.Load(inputChan); err != nil {
 		b.Fatal(err)
 	}
 	b.Log("Load completed successfully")
 
-	keys, err := compactbsonTable.Keys()
+	keys, err := compactjsonTable.Keys()
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -68,7 +68,7 @@ func BenchmarkCompactBson(b *testing.B) {
 	deleted := 0
 	for key := range keys {
 		if _, exists := randomIndexSet[count]; exists {
-			if err := compactbsonTable.DeleteRow(key.Key); err != nil {
+			if err := compactjsonTable.DeleteRow(key.Key); err != nil {
 				b.Fatal(err)
 			}
 			deleted++
@@ -80,11 +80,11 @@ func BenchmarkCompactBson(b *testing.B) {
 	b.Log("start compact")
 	b.ResetTimer()
 
-	if err := compactbsonTable.Compact(); err != nil {
+	if err := compactjsonTable.Compact(); err != nil {
 		b.Fatal(err)
 	}
 
-	keysAfterCompact, err := compactbsonTable.Keys()
+	keysAfterCompact, err := compactjsonTable.Keys()
 	if err != nil {
 		b.Fatal(err)
 	}

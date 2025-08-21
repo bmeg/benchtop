@@ -17,19 +17,19 @@ const (
 )
 
 func BenchmarkFetch(b *testing.B) {
-	var fetchname = "test.bson" + util.RandomString(5)
-	defer os.RemoveAll(fetchname) // Clean up
+	var fetchname = "test.json" + util.RandomString(5)
+	defer os.RemoveAll(fetchname)
 
-	b.Log("BenchmarkScaleWriteBson start")
+	b.Log("BenchmarkScaleWriteJson start")
 
-	compactbsonDriver, err := jsontable.NewJSONDriver(fetchname)
+	compactjsonDriver, err := jsontable.NewJSONDriver(fetchname)
 	if err != nil {
 		b.Fatal(err)
 	}
 
-	columns := []benchtop.ColumnDef{{Key: "data", Type: benchtop.Bytes}}
+	columns := []benchtop.ColumnDef{{Key: "data"}}
 
-	compactjsonTable, err := compactbsonDriver.New(fetchname, columns)
+	compactjsonTable, err := compactjsonDriver.New(fetchname, columns)
 	if err != nil {
 		b.Fatal(err)
 	}

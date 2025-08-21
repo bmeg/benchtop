@@ -38,7 +38,7 @@ func TestInsert(t *testing.T) {
 		t.Error(err)
 	}
 
-	table, err := driver.New("VECTORS", []benchtop.ColumnDef{{Key: "embedding", Type: benchtop.VectorArray}})
+	table, err := driver.New("VECTORS", []benchtop.ColumnDef{{Key: "embedding"}})
 	if err != nil {
 		t.Error(err)
 	}

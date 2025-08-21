@@ -37,8 +37,8 @@ func TestOpenClose(t *testing.T) {
 	}
 
 	_, err = dr.New("table_1", []benchtop.ColumnDef{
-		{Key: "field1", Type: benchtop.Double},
-		{Key: "other", Type: benchtop.String},
+		{Key: "field1"},
+		{Key: "other"},
 	})
 
 	if err != nil {
@@ -70,8 +70,8 @@ func TestInsert(t *testing.T) {
 		t.Error(err)
 	}
 	ts, err := dr.New("table_1", []benchtop.ColumnDef{
-		{Key: "field1", Type: benchtop.Double},
-		{Key: "other", Type: benchtop.String},
+		{Key: "field1"},
+		{Key: "other"},
 	})
 	if err != nil {
 		t.Error(err)
@@ -142,8 +142,8 @@ func TestDeleteTable(t *testing.T) {
 	}
 
 	_, err = dr.New("table_1", []benchtop.ColumnDef{
-		{Key: "field1", Type: benchtop.Double},
-		{Key: "other", Type: benchtop.String},
+		{Key: "field1"},
+		{Key: "other"},
 	})
 	if err != nil {
 		t.Error(err)

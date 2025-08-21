@@ -13,35 +13,35 @@ import (
 	"github.com/cockroachdb/pebble"
 )
 
-var Bsonname = "test.bson" + util.RandomString(5)
+var Jsonname = "test.json" + util.RandomString(5)
 var jsonTable *jsontable.JSONTable
-var bsonDriver *jsontable.JSONDriver
+var jsonDriver *jsontable.JSONDriver
 
 const (
 	scalenumKeys   = 100000
 	scalevalueSize = 5024
 )
 
-func BenchmarkScaleWriteBson(b *testing.B) {
-	b.Log("BenchmarkScaleWriteBson start")
+func BenchmarkScaleWriteJson(b *testing.B) {
+	b.Log("BenchmarkScaleWriteJson start")
 
 	var err error
-	if bsonDriver == nil {
-		driver, err := jsontable.NewJSONDriver(Bsonname)
+	if jsonDriver == nil {
+		driver, err := jsontable.NewJSONDriver(Jsonname)
 		if err != nil {
 			b.Fatal(err)
 		}
 		var ok bool
-		bsonDriver, ok = driver.(*jsontable.JSONDriver)
+		jsonDriver, ok = driver.(*jsontable.JSONDriver)
 		if !ok {
-			b.Fatal("Failed to assert type *benchtop.BSONDriver")
+			b.Fatal("Failed to assert type *benchtop.JSONDriver")
 		}
 	}
 
-	columns := []benchtop.ColumnDef{{Key: "data", Type: benchtop.Bytes}}
+	columns := []benchtop.ColumnDef{{Key: "data"}}
 
 	if jsonTable == nil {
-		table, err := bsonDriver.New(Bsonname, columns)
+		table, err := jsonDriver.New(Jsonname, columns)
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -49,7 +49,7 @@ func BenchmarkScaleWriteBson(b *testing.B) {
 		var ok bool
 		jsonTable, ok = table.(*jsontable.JSONTable)
 		if !ok {
-			b.Fatal("Failed to assert type *benchtop.BSONDriver")
+			b.Fatal("Failed to assert type *benchtop.JSONDriver")
 		}
 	}
 
@@ -73,21 +73,21 @@ func BenchmarkScaleWriteBson(b *testing.B) {
 	}
 }
 
-func BenchmarkRandomReadBson(b *testing.B) {
+func BenchmarkRandomReadJson(b *testing.B) {
 	var err error
-	if bsonDriver == nil {
-		driver, err := jsontable.NewJSONDriver(Bsonname)
+	if jsonDriver == nil {
+		driver, err := jsontable.NewJSONDriver(Jsonname)
 		if err != nil {
 			b.Fatal(err)
 		}
 		var ok bool
-		bsonDriver, ok = driver.(*jsontable.JSONDriver)
+		jsonDriver, ok = driver.(*jsontable.JSONDriver)
 		if !ok {
-			b.Fatal("Failed to assert type *benchtop.BSONDriver")
+			b.Fatal("Failed to assert type *benchtop.JSONDriver")
 		}
 	}
 
-	ot, err := bsonDriver.Get(Bsonname)
+	ot, err := jsonDriver.Get(Jsonname)
 	if err != nil {
 		b.Log(err)
 	}
@@ -126,20 +126,20 @@ func BenchmarkRandomReadBson(b *testing.B) {
 
 }
 
-func BenchmarkRandomKeysBson(b *testing.B) {
+func BenchmarkRandomKeysJson(b *testing.B) {
 	var err error
-	if bsonDriver == nil {
-		driver, err := jsontable.NewJSONDriver(Bsonname)
+	if jsonDriver == nil {
+		driver, err := jsontable.NewJSONDriver(Jsonname)
 		if err != nil {
 			b.Fatal(err)
 		}
 		var ok bool
-		bsonDriver, ok = driver.(*jsontable.JSONDriver)
+		jsonDriver, ok = driver.(*jsontable.JSONDriver)
 		if !ok {
-			b.Fatal("Failed to assert type *benchtop.BSONDriver")
+			b.Fatal("Failed to assert type *benchtop.JSONDriver")
 		}
 	}
-	ot, err := bsonDriver.Get(Bsonname)
+	ot, err := jsonDriver.Get(Jsonname)
 	if err != nil {
 		b.Log(err)
 	}
@@ -161,6 +161,6 @@ func BenchmarkRandomKeysBson(b *testing.B) {
 		count++
 	}
 	b.Log("READS: ", len(selectedValues), "COUNT: ", count)
-	os.RemoveAll(Bsonname)
+	os.RemoveAll(Jsonname)
 
 }

@@ -92,8 +92,8 @@ func TestScan(t *testing.T) {
 	}
 
 	ts, err := dr.New("table_1", []benchtop.ColumnDef{
-		{Key: "field1", Type: benchtop.Double},
-		{Key: "name", Type: benchtop.String},
+		{Key: "field1"},
+		{Key: "name"},
 	})
 	if err != nil {
 		t.Error(err)

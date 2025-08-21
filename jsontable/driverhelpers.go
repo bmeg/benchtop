@@ -6,7 +6,7 @@ import (
 	"github.com/bmeg/benchtop"
 	"github.com/bmeg/benchtop/pebblebulk"
 	"github.com/bmeg/grip/log"
-	"go.mongodb.org/mongo-driver/bson"
+	"github.com/bytedance/sonic"
 )
 
 // Specify a table type prefix to differentiate between edge tables and vertex tables
@@ -46,7 +46,7 @@ func (dr *JSONDriver) getTableInfo(name string) (benchtop.TableInfo, error) {
 		return benchtop.TableInfo{}, err
 	}
 	tinfo := benchtop.TableInfo{}
-	bson.Unmarshal(value, &tinfo)
+	sonic.ConfigFastest.Unmarshal(value, &tinfo)
 	closer.Close()
 	return tinfo, nil
 }

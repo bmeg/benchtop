@@ -1,29 +1,5 @@
 package benchtop
 
-import (
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/bson/bsontype"
-)
-
-type OperatorType string
-
-const (
-	OP_EQ         OperatorType = "=="
-	OP_NEQ        OperatorType = "!="
-	OP_GT         OperatorType = ">"
-	OP_LT         OperatorType = "<"
-	OP_GTE        OperatorType = ">="
-	OP_LTE        OperatorType = "<="
-	OP_INSIDE     OperatorType = "INSIDE"
-	OP_OUTSIDE    OperatorType = "OUTSIDE"
-	OP_BETWEEN    OperatorType = "BETWEEN"
-	OP_WITHIN     OperatorType = "WITHIN"
-	OP_WITHOUT    OperatorType = "WITHOUT"
-	OP_CONTAINS   OperatorType = "CONTAINS"
-	OP_STARTSWITH OperatorType = "STARTSWITH"
-	OP_ENDSWITH   OperatorType = "ENDSWITH"
-)
-
 type TableInfo struct {
 	FileName string      `json:"fileName"`
 	Columns  []ColumnDef `json:"columns"`
@@ -33,9 +9,22 @@ type TableInfo struct {
 }
 
 type ColumnDef struct {
-	Key  string    `json:"key"`
-	Type FieldType `json:"type"`
+	Key string `json:"key"`
+	// Type FieldType `json:"type"` Remove this for now since not using bson anymore
 }
+
+/*
+	 Keep this code as a reminder for what the table field type architecture when bson was used
+		 type FieldType bsontype.Type
+
+		 const (
+			Double      FieldType = FieldType(bson.TypeDouble)
+			Int64       FieldType = FieldType(bson.TypeInt64)
+			String      FieldType = FieldType(bson.TypeString)
+			Bytes       FieldType = FieldType(bson.TypeBinary)
+			VectorArray FieldType = FieldType(bson.TypeArray)
+		 )
+*/
 
 type TableDriver interface {
 	New(name string, columns []ColumnDef) (TableStore, error)
@@ -93,13 +82,3 @@ type TableStore interface {
 	Compact() error
 	Close()
 }
-
-type FieldType bsontype.Type
-
-const (
-	Double      FieldType = FieldType(bson.TypeDouble)
-	Int64       FieldType = FieldType(bson.TypeInt64)
-	String      FieldType = FieldType(bson.TypeString)
-	Bytes       FieldType = FieldType(bson.TypeBinary)
-	VectorArray FieldType = FieldType(bson.TypeArray)
-)

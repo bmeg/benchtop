@@ -85,7 +85,7 @@ func NewJSONDriver(path string) (benchtop.TableDriver, error) {
 	return driver, nil
 }
 
-func LoadBSONDriver(path string) (benchtop.TableDriver, error) {
+func LoadJSONDriver(path string) (benchtop.TableDriver, error) {
 	db, err := pebble.Open(path, &pebble.Options{})
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %v", err)
@@ -125,21 +125,21 @@ func LoadBSONDriver(path string) (benchtop.TableDriver, error) {
 			driver.Close()
 			return nil, fmt.Errorf("failed to load table %s: %v", tableName, err)
 		}
-		bsonTable, ok := table.(*JSONTable)
+		jsonTable, ok := table.(*JSONTable)
 		if !ok {
 			driver.Close()
 			log.Errorf("invalid table type for %s", tableName)
 			return nil, fmt.Errorf("invalid table type for %s", tableName)
 		}
 		// Pb is already set in Get, but ensure consistency if needed
-		bsonTable.Pb = &pebblebulk.PebbleKV{
+		jsonTable.Pb = &pebblebulk.PebbleKV{
 			Db:           db,
 			InsertCount:  0,
 			CompactLimit: uint32(1000),
 		}
 		driver.Lock.Lock()
-		driver.LabelLookup[bsonTable.TableId] = tableName[2:]
-		driver.Tables[tableName] = bsonTable
+		driver.LabelLookup[jsonTable.TableId] = tableName[2:]
+		driver.Tables[tableName] = jsonTable
 		driver.Lock.Unlock()
 	}
 
@@ -274,7 +274,7 @@ func (dr *JSONDriver) Close() {
 	dr.Lock.Lock()
 	defer dr.Lock.Unlock()
 
-	log.Infoln("Closing BSONDriver...")
+	log.Infoln("Closing JSONDriver...")
 	for tableName, table := range dr.Tables {
 		table.handleLock.Lock()
 		if table.handle != nil {
@@ -301,7 +301,7 @@ func (dr *JSONDriver) Close() {
 	}
 	dr.Pb = nil
 	dr.Fields = make(map[string]map[string]struct{})
-	log.Infof("Successfully closed BSONDriver for path %s", dr.base)
+	log.Infof("Successfully closed JSONDriver for path %s", dr.base)
 	return
 }
 
@@ -323,7 +323,7 @@ func (dr *JSONDriver) Get(name string) (benchtop.TableStore, error) {
 	nkey := benchtop.NewTableKey([]byte(name))
 	value, closer, err := dr.db.Get(nkey)
 	if err != nil {
-		log.Errorln("BSONDriver Get: ", err)
+		log.Errorln("JSONDriver Get: ", err)
 		return nil, err
 	}
 	defer closer.Close()

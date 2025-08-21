@@ -50,15 +50,15 @@ Written using [Pebble](https://github.com/cockroachdb/)
 |type|t|<[]byte> |
 |Desc|prefix|user ID|
 
-The user ID is provided by the user, but should be checked to ensure it is unique. 
+The user ID is provided by the user, but should be checked to ensure it is unique.
 
 **Value**
 |bytes|0:4|4:...|
 |-|-|-------|
 |type|[]byte|
-|Desc|BSON formatted Column definitions|
+|Desc|Json formatted Column definitions|
 
-First is the Table system ID, which is used as a prefix during key lookup. Then rest 
+First is the Table system ID, which is used as a prefix during key lookup. Then rest
 of the bytes describe a list of columns and their data types.
 
 #### Table ID
@@ -68,7 +68,7 @@ of the bytes describe a list of columns and their data types.
 |type|T|uint32|
 |Desc|prefix|system table ID|
 
-The generated ID for a table. 
+The generated ID for a table.
 
 **Value**
 |bytes|0:4|4:...|
@@ -94,4 +94,4 @@ These map the user specified ID to a data block specified with offset and size.
 
 
 ### Data file format
-Sequentially written [BSON](https://bsonspec.org/) entries.
+Sequentially written [JSON](https://www.json.org/json-en.html/) entries.

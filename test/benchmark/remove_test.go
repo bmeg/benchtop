@@ -19,18 +19,18 @@ const (
 )
 
 func BenchmarkRemove(b *testing.B) {
-	var removename = "test.bson" + util.RandomString(5)
+	var removename = "test.json" + util.RandomString(5)
 	defer os.RemoveAll(removename) // Clean up
-	b.Log("BenchmarkScaleWriteBson start")
+	b.Log("BenchmarkScaleWriteJson start")
 
-	compactbsonDriver, err := jsontable.NewJSONDriver(removename)
+	compactjsonDriver, err := jsontable.NewJSONDriver(removename)
 	if err != nil {
 		b.Fatal(err)
 	}
 
-	columns := []benchtop.ColumnDef{{Key: "data", Type: benchtop.Bytes}}
+	columns := []benchtop.ColumnDef{{Key: "data"}}
 
-	compactjsonTable, err := compactbsonDriver.New(removename, columns)
+	compactjsonTable, err := compactjsonDriver.New(removename, columns)
 	if err != nil {
 		b.Fatal(err)
 	}
