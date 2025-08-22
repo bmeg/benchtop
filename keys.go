@@ -26,7 +26,6 @@ var FieldPrefix = []byte{'F'}
 // The '0x1F' invisible character unit seperator not supposed to appear in ASCII text
 var FieldSep = []byte{0x1F}
 
-
 func FieldKey(field string, label string, value any, rowID []byte) []byte {
 	/* creates a full field key for optimizing the beginning of a query */
 	valueBytes, err := json.Marshal(value)
@@ -38,7 +37,7 @@ func FieldKey(field string, label string, value any, rowID []byte) []byte {
 			FieldPrefix,   // Static prefix
 			[]byte(field), // table field
 			[]byte(label), // label
-			valueBytes,    // BSON-encoded value
+			valueBytes,    // JSON-encoded value
 			rowID,
 		},
 		FieldSep,

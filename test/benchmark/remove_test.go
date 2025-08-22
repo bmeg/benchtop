@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	"github.com/bmeg/benchtop"
-	"github.com/bmeg/benchtop/bsontable"
+	"github.com/bmeg/benchtop/jsontable"
 	"github.com/bmeg/benchtop/test/fixtures"
 	"github.com/bmeg/benchtop/util"
 	"github.com/bmeg/grip/log"
@@ -19,18 +19,18 @@ const (
 )
 
 func BenchmarkRemove(b *testing.B) {
-	var removename = "test.bson" + util.RandomString(5)
+	var removename = "test.json" + util.RandomString(5)
 	defer os.RemoveAll(removename) // Clean up
-	b.Log("BenchmarkScaleWriteBson start")
+	b.Log("BenchmarkScaleWriteJson start")
 
-	compactbsonDriver, err := bsontable.NewBSONDriver(removename)
+	compactjsonDriver, err := jsontable.NewJSONDriver(removename)
 	if err != nil {
 		b.Fatal(err)
 	}
 
-	columns := []benchtop.ColumnDef{{Key: "data", Type: benchtop.Bytes}}
+	columns := []benchtop.ColumnDef{{Key: "data"}}
 
-	compactbsonTable, err := compactbsonDriver.New(removename, columns)
+	compactjsonTable, err := compactjsonDriver.New(removename, columns)
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -49,12 +49,12 @@ func BenchmarkRemove(b *testing.B) {
 	}()
 
 	b.Log("start load")
-	if err := compactbsonTable.Load(inputChan); err != nil {
+	if err := compactjsonTable.Load(inputChan); err != nil {
 		b.Fatal(err)
 	}
 	b.Log("Load completed successfully")
 
-	bT, _ := compactbsonTable.(*bsontable.BSONTable)
+	bT, _ := compactjsonTable.(*jsontable.JSONTable)
 	pKey := benchtop.NewPosKey(bT.TableId, []byte("key_5"))
 	val, closer, err := bT.Pb.Db.Get(pKey)
 	if err != nil {
@@ -66,30 +66,30 @@ func BenchmarkRemove(b *testing.B) {
 	closer.Close()
 	offset, size := benchtop.ParsePosValue(val)
 
-	data, err := compactbsonTable.GetRow(benchtop.RowLoc{Offset: offset, Size: size, Label: 0})
+	data, err := compactjsonTable.GetRow(benchtop.RowLoc{Offset: offset, Size: size, Label: 0})
 	b.Log("DATA BEFORE: ", data)
 
 	if len(data) == 0 {
 		b.Fatal("Expected data to be in key_5 but none was found")
 	}
 
-	keys, err := compactbsonTable.Keys()
+	keys, err := compactjsonTable.Keys()
 	if err != nil {
 		b.Fatal(err)
 	}
 
-	outStruct := compactbsonTable.Remove(keys, 5)
+	outStruct := compactjsonTable.Remove(keys, 5)
 	keyCount := 0
 	for _ = range outStruct {
 		keyCount++
 	}
 
-	keys, err = compactbsonTable.Keys()
+	keys, err = compactjsonTable.Keys()
 	if err != nil {
 		b.Fatal(err)
 	}
 
-	data, err = compactbsonTable.GetRow(benchtop.RowLoc{Offset: offset, Size: size, Label: 0})
+	data, err = compactjsonTable.GetRow(benchtop.RowLoc{Offset: offset, Size: size, Label: 0})
 	b.Log("DATA AFTER: ", data)
 	if len(data) != 0 {
 		b.Fatalf("Expected data to be empty for key_5 but %#v was found\n", data)
@@ -99,7 +99,7 @@ func BenchmarkRemove(b *testing.B) {
 		b.Error("Unexpected Key: ", key)
 	}
 
-	scaChan := compactbsonTable.Scan(true, nil)
+	scaChan := compactjsonTable.Scan(true, nil)
 	for elem := range scaChan {
 		fmt.Println("ELEM: ", elem)
 	}

@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	"github.com/bmeg/benchtop"
-	"github.com/bmeg/benchtop/bsontable"
+	"github.com/bmeg/benchtop/jsontable"
 	"github.com/bmeg/benchtop/util"
 	"github.com/bmeg/grip/log"
 	"github.com/cockroachdb/pebble"
@@ -31,14 +31,14 @@ func TestOpenClose(t *testing.T) {
 	name := "test.data" + util.RandomString(5)
 	defer os.RemoveAll(name)
 
-	dr, err := bsontable.NewBSONDriver(name)
+	dr, err := jsontable.NewJSONDriver(name)
 	if err != nil {
 		t.Error(err)
 	}
 
 	_, err = dr.New("table_1", []benchtop.ColumnDef{
-		{Key: "field1", Type: benchtop.Double},
-		{Key: "other", Type: benchtop.String},
+		{Key: "field1"},
+		{Key: "other"},
 	})
 
 	if err != nil {
@@ -46,7 +46,7 @@ func TestOpenClose(t *testing.T) {
 	}
 	dr.Close()
 
-	or, err := bsontable.NewBSONDriver(name)
+	or, err := jsontable.NewJSONDriver(name)
 	if err != nil {
 		t.Error(err)
 	}
@@ -65,19 +65,19 @@ func TestInsert(t *testing.T) {
 	dbname := "test.data" + util.RandomString(5)
 	defer os.RemoveAll(dbname)
 
-	dr, err := bsontable.NewBSONDriver(dbname)
+	dr, err := jsontable.NewJSONDriver(dbname)
 	if err != nil {
 		t.Error(err)
 	}
 	ts, err := dr.New("table_1", []benchtop.ColumnDef{
-		{Key: "field1", Type: benchtop.Double},
-		{Key: "other", Type: benchtop.String},
+		{Key: "field1"},
+		{Key: "other"},
 	})
 	if err != nil {
 		t.Error(err)
 	}
 
-	bT, _ := ts.(*bsontable.BSONTable)
+	bT, _ := ts.(*jsontable.JSONTable)
 	for k, r := range data {
 		loc, err := bT.AddRow(benchtop.Row{Id: []byte(k), TableName: "table_1", Data: r})
 		if err != nil {
@@ -136,14 +136,14 @@ func TestDeleteTable(t *testing.T) {
 	name := "test.data" + util.RandomString(5)
 	defer os.RemoveAll(name)
 
-	dr, err := bsontable.NewBSONDriver(name)
+	dr, err := jsontable.NewJSONDriver(name)
 	if err != nil {
 		t.Error(err)
 	}
 
 	_, err = dr.New("table_1", []benchtop.ColumnDef{
-		{Key: "field1", Type: benchtop.Double},
-		{Key: "other", Type: benchtop.String},
+		{Key: "field1"},
+		{Key: "other"},
 	})
 	if err != nil {
 		t.Error(err)
@@ -156,7 +156,7 @@ func TestDeleteTable(t *testing.T) {
 
 	dr.Close()
 
-	or, err := bsontable.NewBSONDriver(name)
+	or, err := jsontable.NewJSONDriver(name)
 	if err != nil {
 		t.Error(err)
 	}

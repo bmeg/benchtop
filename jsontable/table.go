@@ -1,4 +1,4 @@
-package bsontable
+package jsontable
 
 import (
 	"bufio"
@@ -23,7 +23,7 @@ import (
 	"github.com/cockroachdb/pebble"
 )
 
-type BSONTable struct {
+type JSONTable struct {
 	Pb        *pebblebulk.PebbleKV
 	db        *pebble.DB
 	columns   []benchtop.ColumnDef
@@ -39,7 +39,7 @@ type BSONTable struct {
 	FileName string
 }
 
-func (b *BSONTable) Init(poolSize int) error {
+func (b *JSONTable) Init(poolSize int) error {
 	b.FilePool = make(chan *os.File, poolSize)
 	for i := range poolSize {
 		file, err := os.Open(b.Path)
@@ -57,11 +57,11 @@ func (b *BSONTable) Init(poolSize int) error {
 	return nil
 }
 
-func (b *BSONTable) GetColumnDefs() []benchtop.ColumnDef {
+func (b *JSONTable) GetColumnDefs() []benchtop.ColumnDef {
 	return b.columns
 }
 
-func (b *BSONTable) Close() {
+func (b *JSONTable) Close() {
 	if b.FilePool != nil {
 		for len(b.FilePool) > 0 {
 			if file, ok := <-b.FilePool; ok {
@@ -77,7 +77,7 @@ func (b *BSONTable) Close() {
 ////////////////////////////////////////////////////////////////
 Unary single effect operations
 */
-func (b *BSONTable) AddRow(elem benchtop.Row) (*benchtop.RowLoc, error) {
+func (b *JSONTable) AddRow(elem benchtop.Row) (*benchtop.RowLoc, error) {
 
 	bData, err := sonic.ConfigFastest.Marshal(
 		b.packData(elem.Data, string(elem.Id)),
@@ -95,7 +95,7 @@ func (b *BSONTable) AddRow(elem benchtop.Row) (*benchtop.RowLoc, error) {
 	}
 
 	log.Debugln("WRITE ENTRY: ", offset, len(bData))
-	writesize, err := b.writeBsonEntry(offset, bData)
+	writesize, err := b.writeJsonEntry(offset, bData)
 	if err != nil {
 		log.Errorf("write handler err in Load: bulkSet: %s", err)
 		return nil, err
@@ -108,7 +108,7 @@ func (b *BSONTable) AddRow(elem benchtop.Row) (*benchtop.RowLoc, error) {
 	}, nil
 }
 
-func (b *BSONTable) GetRow(loc benchtop.RowLoc) (map[string]any, error) {
+func (b *JSONTable) GetRow(loc benchtop.RowLoc) (map[string]any, error) {
 
 	file := <-b.FilePool
 	defer func() {
@@ -137,7 +137,7 @@ func (b *BSONTable) GetRow(loc benchtop.RowLoc) (map[string]any, error) {
 	return out.(map[string]any), nil
 }
 
-func (b *BSONTable) DeleteRow(name []byte) error {
+func (b *JSONTable) DeleteRow(name []byte) error {
 	offset, _, err := b.GetBlockPos(name)
 	if err != nil {
 		return err
@@ -155,7 +155,7 @@ func (b *BSONTable) DeleteRow(name []byte) error {
 ////////////////////////////////////////////////////////////////
 Start of bulk, chan based functions
 */
-func (b *BSONTable) Keys() (chan benchtop.Index, error) {
+func (b *JSONTable) Keys() (chan benchtop.Index, error) {
 	out := make(chan benchtop.Index, 10)
 	go func() {
 		defer close(out)
@@ -171,14 +171,14 @@ func (b *BSONTable) Keys() (chan benchtop.Index, error) {
 	return out, nil
 }
 
-func (b *BSONTable) Scan(loadData bool, filter benchtop.RowFilter) chan any {
+func (b *JSONTable) Scan(loadData bool, filter benchtop.RowFilter) chan any {
 	outChan := make(chan any, 100)
 	go func() {
 		defer close(outChan)
 		handle := <-b.FilePool
 		_, err := handle.Seek(0, io.SeekStart)
 		if err != nil {
-			log.Errorln("Error in bsontable scan func", err)
+			log.Errorln("Error in jsontable scan func", err)
 			return
 		}
 
@@ -205,16 +205,16 @@ func (b *BSONTable) Scan(loadData bool, filter benchtop.RowFilter) chan any {
 				continue
 			}
 
-			bsonStart := offset + ROW_HSIZE
-			bsonEnd := bsonStart + int(bSize)
-			if bsonEnd > len(m) {
+			jsonStart := offset + ROW_HSIZE
+			jsonEnd := jsonStart + int(bSize)
+			if jsonEnd > len(m) {
 				log.Debugf("Incomplete record at end of file at offset %d", offset)
 				break
 			}
 
-			rowData := m[bsonStart:bsonEnd]
+			rowData := m[jsonStart:jsonEnd]
 
-			err = b.processBSONRowData(rowData, loadData, filter, outChan)
+			err = b.processJSONRowData(rowData, loadData, filter, outChan)
 			if err != nil {
 				log.Debugf("Skipping malformed row at offset %d: %v", offset, err)
 			}
@@ -228,7 +228,7 @@ func (b *BSONTable) Scan(loadData bool, filter benchtop.RowFilter) chan any {
 // processBSONRowData handles the parsing of row bytes,
 // applying filters, and sending the result to the output channel.
 // It returns an error if the row is malformed or cannot be processed.
-func (b *BSONTable) processBSONRowData(
+func (b *JSONTable) processJSONRowData(
 	rowData []byte,
 	loadData bool,
 	filter benchtop.RowFilter,
@@ -271,7 +271,7 @@ func (b *BSONTable) processBSONRowData(
 
 // Compact, Fetch, Load, And Remove methods are not currently being used in grip.
 // Compact should be introduced into grip in a future PR since the heavy load and delete design approach that we are taking
-func (b *BSONTable) Compact() error {
+func (b *JSONTable) Compact() error {
 	const flushThreshold = 1000
 	flushCounter := 0
 	b.handleLock.Lock()
@@ -319,20 +319,20 @@ func (b *BSONTable) Compact() error {
 			continue
 		}
 
-		bsonStart := offset + 12
-		bsonEnd := bsonStart + int(bSize)
-		if bsonEnd > len(m) {
-			return fmt.Errorf("incomplete BSON data at offset %d, size %d", offset, bSize)
+		jsonStart := offset + 12
+		jsonEnd := jsonStart + int(bSize)
+		if jsonEnd > len(m) {
+			return fmt.Errorf("incomplete JSON data at offset %d, size %d", offset, bSize)
 		}
 
-		rowData := m[bsonStart:bsonEnd]
+		rowData := m[jsonStart:jsonEnd]
 		var mRow RowData
 		err = sonic.ConfigFastest.Unmarshal(rowData, &mRow)
 		if err != nil {
 			if err == io.EOF {
-				return fmt.Errorf("BSON data for row at offset %d, size %d was incomplete: %w", offset, bSize, err)
+				return fmt.Errorf("JSON data for row at offset %d, size %d was incomplete: %w", offset, bSize, err)
 			}
-			return fmt.Errorf("failed to decode BSON row at offset %d, size %d: %w", offset, bSize, err)
+			return fmt.Errorf("failed to decode JSON row at offset %d, size %d: %w", offset, bSize, err)
 		}
 
 		node, err := sonic.Get(rowData, "1")
@@ -354,7 +354,7 @@ func (b *BSONTable) Compact() error {
 		}
 		_, err = writer.Write(rowData)
 		if err != nil {
-			return fmt.Errorf("failed writing BSON row at offset %d: %w", newOffset, err)
+			return fmt.Errorf("failed writing JSON row at offset %d: %w", newOffset, err)
 		}
 
 		flushCounter++
@@ -413,7 +413,7 @@ func (b *BSONTable) Compact() error {
 	return nil
 }
 
-func (b *BSONTable) Fetch(inputs chan benchtop.Index, workers int) <-chan benchtop.BulkResponse {
+func (b *JSONTable) Fetch(inputs chan benchtop.Index, workers int) <-chan benchtop.BulkResponse {
 	results := make(chan benchtop.BulkResponse, workers)
 	var wg sync.WaitGroup
 	go func() {
@@ -453,7 +453,7 @@ func (b *BSONTable) Fetch(inputs chan benchtop.Index, workers int) <-chan bencht
 	return results
 }
 
-func (b *BSONTable) Load(inputs chan benchtop.Row) error {
+func (b *JSONTable) Load(inputs chan benchtop.Row) error {
 	var errs *multierror.Error
 	b.handleLock.Lock()
 	defer b.handleLock.Unlock()
@@ -470,11 +470,11 @@ func (b *BSONTable) Load(inputs chan benchtop.Row) error {
 			)
 			if err != nil {
 				errs = multierror.Append(errs, err)
-				log.Errorf("bson Marshall err in Load: bulkSet: %s", err)
+				log.Errorf("json Marshall err in Load: bulkSet: %s", err)
 			}
 
 			// make Next offset equal to existing offset + length of data
-			writeSize, err := b.writeBsonEntry(offset, bData)
+			writeSize, err := b.writeJsonEntry(offset, bData)
 			if err != nil {
 				errs = multierror.Append(errs, err)
 				log.Errorf("write handler err in Load: bulkSet: %s", err)
@@ -492,7 +492,7 @@ func (b *BSONTable) Load(inputs chan benchtop.Row) error {
 
 }
 
-func (b *BSONTable) Remove(inputs chan benchtop.Index, workers int) <-chan benchtop.BulkResponse {
+func (b *JSONTable) Remove(inputs chan benchtop.Index, workers int) <-chan benchtop.BulkResponse {
 	results := make(chan benchtop.BulkResponse, workers)
 	batchDeletes := make(chan benchtop.Index, workers)
 

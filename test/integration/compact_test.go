@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	"github.com/bmeg/benchtop"
-	"github.com/bmeg/benchtop/bsontable"
+	"github.com/bmeg/benchtop/jsontable"
 	"github.com/bmeg/benchtop/test/fixtures"
 	"github.com/bmeg/benchtop/util"
 )
@@ -14,20 +14,20 @@ func TestCompact(t *testing.T) {
 	dbname := "test_compact.data" + util.RandomString(5)
 	defer os.RemoveAll(dbname)
 
-	dr, err := bsontable.NewBSONDriver(dbname)
+	dr, err := jsontable.NewJSONDriver(dbname)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	ts, err := dr.New("table_1", []benchtop.ColumnDef{
-		{Key: "field1", Type: benchtop.Double},
-		{Key: "name", Type: benchtop.String},
+		{Key: "field1"},
+		{Key: "name"},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	bT, _ := ts.(*bsontable.BSONTable)
+	bT, _ := ts.(*jsontable.JSONTable)
 	for k, r := range fixtures.ScanData {
 		loc, err := bT.AddRow(benchtop.Row{Id: []byte(k), TableName: "table_1", Data: r})
 		if err != nil {
@@ -51,7 +51,7 @@ func TestCompact(t *testing.T) {
 					t.Fatal(err)
 				}
 
-					beforeStat, err := os.Stat(dbname + "/TABLES/" + table.(*bsontable.BSONTable).FileName)
+					beforeStat, err := os.Stat(dbname + "/TABLES/" + table.(*jsontable.BSONTable).FileName)
 					if err != nil {
 						t.Fatal(err)
 					}
