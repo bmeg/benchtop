@@ -20,11 +20,25 @@ var PosPrefix = byte('P')
 
 // Field
 // key: F
-// used for indexing specific field values in kvgraph
+// used for indexing specific field values
 var FieldPrefix = []byte{'F'}
+
+// ReverseField Index
+// key: R
+// used for reverse indexing specific field keys in order to be able to efficiently delete indices
+var RFieldPrefix = []byte{'R'}
 
 // The '0x1F' invisible character unit seperator not supposed to appear in ASCII text
 var FieldSep = []byte{0x1F}
+
+func RFieldKey(label, field, rowID string) []byte {
+	return bytes.Join([][]byte{
+		RFieldPrefix,
+		[]byte(label),
+		[]byte(field),
+		[]byte(rowID),
+	}, FieldSep)
+}
 
 func FieldKey(field string, label string, value any, rowID []byte) []byte {
 	/* creates a full field key for optimizing the beginning of a query */

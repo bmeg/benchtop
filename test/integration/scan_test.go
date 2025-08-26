@@ -174,7 +174,11 @@ func TestScan(t *testing.T) {
 		t.Errorf("Expecting 6 items returned but got %d", scanChanLen3)
 	}
 
-	err = bT.DeleteRow([]byte("key4"))
+	offset, size, err := bT.GetBlockPos([]byte("key4"))
+	if err != nil {
+		t.Error(err)
+	}
+	err = bT.DeleteRow(benchtop.RowLoc{Offset: offset, Size: size, Label: bT.TableId}, []byte("key4"))
 	if err != nil {
 		t.Error(err)
 	}

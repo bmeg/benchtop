@@ -73,7 +73,11 @@ func TestDelete(t *testing.T) {
 	i := 0
 	for k := range keys {
 		if i%3 == 0 {
-			err := bT.DeleteRow(k.Key)
+			offset, size, err := bT.GetBlockPos(k.Key)
+			if err != nil {
+				t.Error(err)
+			}
+			err = bT.DeleteRow(benchtop.RowLoc{Offset: offset, Size: size, Label: bT.TableId}, k.Key)
 			if err != nil {
 				t.Errorf("delete %s error: %s", string(k.Key), err)
 			}

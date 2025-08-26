@@ -71,7 +71,7 @@ type TableStore interface {
 	GetColumnDefs() []ColumnDef
 	AddRow(elem Row) (*RowLoc, error)
 	GetRow(loc RowLoc) (map[string]any, error)
-	DeleteRow(key []byte) error
+	DeleteRow(loc RowLoc, id []byte) error
 
 	Fetch(inputs chan Index, workers int) <-chan BulkResponse
 	Remove(inputs chan Index, workers int) <-chan BulkResponse
