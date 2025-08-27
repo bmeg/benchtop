@@ -64,11 +64,17 @@ func BenchmarkCompactJson(b *testing.B) {
 		b.Fatal(err)
 	}
 
+	bT, _ := compactjsonTable.(*jsontable.JSONTable)
+
 	count := 0
 	deleted := 0
 	for key := range keys {
 		if _, exists := randomIndexSet[count]; exists {
-			if err := compactjsonTable.DeleteRow(key.Key); err != nil {
+			offset, size, err := bT.GetBlockPos(key.Key)
+			if err != nil {
+				b.Error(err)
+			}
+			if err := compactjsonTable.DeleteRow(benchtop.RowLoc{Offset: offset, Size: size, Label: bT.TableId}, key.Key); err != nil {
 				b.Fatal(err)
 			}
 			deleted++

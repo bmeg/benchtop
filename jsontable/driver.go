@@ -28,7 +28,7 @@ const ROW_OFFSET_HSIZE = 8
 type JSONDriver struct {
 	base       string
 	Lock       sync.RWMutex
-	PebbleLock sync.Mutex
+	PebbleLock sync.RWMutex
 	db         *pebble.DB
 	Pb         *pebblebulk.PebbleKV
 
@@ -65,7 +65,7 @@ func NewJSONDriver(path string) (benchtop.TableDriver, error) {
 		}),
 		Fields:      map[string]map[string]struct{}{},
 		Lock:        sync.RWMutex{},
-		PebbleLock:  sync.Mutex{},
+		PebbleLock:  sync.RWMutex{},
 		LabelLookup: map[uint16]string{},
 	}
 
@@ -107,7 +107,7 @@ func LoadJSONDriver(path string) (benchtop.TableDriver, error) {
 		},
 		Fields:     map[string]map[string]struct{}{},
 		Lock:       sync.RWMutex{},
-		PebbleLock: sync.Mutex{},
+		PebbleLock: sync.RWMutex{},
 		PageCache: otter.Must(&otter.Options[string, benchtop.RowLoc]{
 			MaximumSize: 10000000,
 		}),
@@ -398,6 +398,8 @@ func (dr *JSONDriver) Delete(name string) error {
 
 // BulkLoad
 // tx: set null to initialize pebble bulk write context
+// BulkLoad
+// tx: set null to initialize pebble bulk write context
 func (dr *JSONDriver) BulkLoad(inputs chan *benchtop.Row, tx *pebblebulk.PebbleBulk) error {
 
 	if dr.Pb == nil || dr.Pb.Db == nil {
@@ -405,11 +407,20 @@ func (dr *JSONDriver) BulkLoad(inputs chan *benchtop.Row, tx *pebblebulk.PebbleB
 	}
 	var wg sync.WaitGroup
 	tableChannels := make(map[string]chan *benchtop.Row)
+
+	// New struct to hold the individual elements of a field key
+	type fieldKeyElements struct {
+		field     string
+		tableName string
+		val       any
+		rowId     string
+	}
+
 	metadataChan := make(chan struct {
-		table          *JSONTable
-		fieldIndexKeys [][]byte
-		metadata       map[string]benchtop.RowLoc
-		err            error
+		table                 *JSONTable
+		fieldIndexKeyElements []fieldKeyElements // Changed to the new struct
+		metadata              map[string]benchtop.RowLoc
+		err                   error
 	}, 100)
 
 	startTableGoroutine := func(tableName string) {
@@ -423,7 +434,7 @@ func (dr *JSONDriver) BulkLoad(inputs chan *benchtop.Row, tx *pebblebulk.PebbleB
 				snapshot.Close()
 				wg.Done()
 			}()
-			var fieldIndexKeys [][]byte
+			var fieldIndexKeyElements []fieldKeyElements // Changed variable name
 			metadata := make(map[string]benchtop.RowLoc)
 			var localErr *multierror.Error
 
@@ -435,10 +446,10 @@ func (dr *JSONDriver) BulkLoad(inputs chan *benchtop.Row, tx *pebblebulk.PebbleB
 				if err != nil {
 					localErr = multierror.Append(localErr, fmt.Errorf("failed to create table %s: %v", tableName, err))
 					metadataChan <- struct {
-						table          *JSONTable
-						fieldIndexKeys [][]byte
-						metadata       map[string]benchtop.RowLoc
-						err            error
+						table                 *JSONTable
+						fieldIndexKeyElements []fieldKeyElements
+						metadata              map[string]benchtop.RowLoc
+						err                   error
 					}{nil, nil, nil, localErr.ErrorOrNil()}
 					return
 				}
@@ -467,7 +478,13 @@ func (dr *JSONDriver) BulkLoad(inputs chan *benchtop.Row, tx *pebblebulk.PebbleB
 					if fieldsExist {
 						for field := range dr.Fields[tableName] {
 							if val := PathLookup(row.Data, field); val != nil {
-								fieldIndexKeys = append(fieldIndexKeys, benchtop.FieldKey(field, tableName, val, row.Id))
+								// Append the individual key elements to the new slice
+								fieldIndexKeyElements = append(fieldIndexKeyElements, fieldKeyElements{
+									field:     field,
+									tableName: tableName,
+									val:       val,
+									rowId:     string(row.Id),
+								})
 							}
 						}
 					}
@@ -535,11 +552,11 @@ func (dr *JSONDriver) BulkLoad(inputs chan *benchtop.Row, tx *pebblebulk.PebbleB
 			}
 
 			metadataChan <- struct {
-				table          *JSONTable
-				fieldIndexKeys [][]byte
-				metadata       map[string]benchtop.RowLoc
-				err            error
-			}{table, fieldIndexKeys, metadata, localErr.ErrorOrNil()}
+				table                 *JSONTable
+				fieldIndexKeyElements []fieldKeyElements
+				metadata              map[string]benchtop.RowLoc
+				err                   error
+			}{table, fieldIndexKeyElements, metadata, localErr.ErrorOrNil()}
 		}()
 	}
 
@@ -569,8 +586,22 @@ func (dr *JSONDriver) BulkLoad(inputs chan *benchtop.Row, tx *pebblebulk.PebbleB
 				if meta.table == nil {
 					continue
 				}
-				for _, key := range meta.fieldIndexKeys {
-					err := tx.Set(key, []byte{}, nil)
+
+				for _, keyElements := range meta.fieldIndexKeyElements {
+					forwardKey := benchtop.FieldKey(keyElements.field, keyElements.tableName, keyElements.val, []byte(keyElements.rowId))
+					err := tx.Set(forwardKey, []byte{}, nil)
+					if err != nil {
+						errs = multierror.Append(errs, err)
+					}
+
+					BVal, err := sonic.ConfigFastest.Marshal(keyElements.val)
+					if err != nil {
+						errs = multierror.Append(errs, err)
+					}
+					err = tx.Set(benchtop.RFieldKey(
+						keyElements.tableName, keyElements.field, keyElements.rowId,
+					),
+						BVal, nil)
 					if err != nil {
 						errs = multierror.Append(errs, err)
 					}

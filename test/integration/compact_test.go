@@ -37,7 +37,11 @@ func TestCompact(t *testing.T) {
 
 	}
 
-	err = ts.DeleteRow([]byte("key4"))
+	offset, size, err := bT.GetBlockPos([]byte("key4"))
+	if err != nil {
+		t.Error(err)
+	}
+	err = ts.DeleteRow(benchtop.RowLoc{Offset: offset, Size: size, Label: bT.TableId}, []byte("key4"))
 	if err != nil {
 		t.Fatal(err)
 	}

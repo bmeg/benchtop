@@ -6,6 +6,7 @@ import (
 
 	"github.com/bmeg/benchtop"
 	"github.com/bmeg/grip/log"
+	"github.com/bytedance/sonic"
 
 	"github.com/bmeg/benchtop/filters"
 	"github.com/bmeg/benchtop/pebblebulk"
@@ -29,24 +30,52 @@ func (dr *JSONDriver) AddField(label, field string) error {
 			log.Errorf("Err attempting to add field %v", err)
 			return err
 		}
+		err = dr.db.Set(
+			bytes.Join([][]byte{
+				benchtop.RFieldPrefix,
+				[]byte(label),
+				[]byte(field),
+			}, benchtop.FieldSep),
+			[]byte{},
+			nil,
+		)
+		if err != nil {
+			log.Errorf("Err attempting to add field %v", err)
+			return err
+		}
+
 	} else {
 		log.Debugf("Found table %s writing indices for field %s", label, field)
 		err := dr.Pb.BulkWrite(func(tx *pebblebulk.PebbleBulk) error {
 			var filter benchtop.RowFilter = nil
 			for r := range foundTable.Scan(true, filter) {
+				fieldValue := PathLookup(r.(map[string]any), field)
+				rowId, ok := r.(map[string]any)["_id"].(string)
+				if !ok {
+					return fmt.Errorf("_id field not found or is not string in map %s", r)
+				}
 				err := tx.Set(
 					benchtop.FieldKey(
 						field,
 						label,
-						PathLookup(
-							r.(map[string]any), field),
-						[]byte(r.(map[string]any)["_id"].(string)),
+						fieldValue,
+						[]byte(rowId),
 					),
 					[]byte{},
 					nil,
 				)
 				if err != nil {
 					return err
+				}
+				if fieldValue != nil {
+					byteFV, err := sonic.ConfigFastest.Marshal(fieldValue)
+					if err != nil {
+						return err
+					}
+					err = tx.Set(benchtop.RFieldKey(label, field, rowId), byteFV, nil)
+					if err != nil {
+						return err
+					}
 				}
 			}
 			return nil
@@ -65,7 +94,7 @@ func (dr *JSONDriver) AddField(label, field string) error {
 		return fmt.Errorf("index label '%s' field '%s' already exists", label, field)
 	}
 	innerMap[field] = struct{}{}
-	log.Debugln("Fields: ", dr.Fields)
+	log.Debugln("List Fields: ", dr.Fields)
 
 	return nil
 }
@@ -81,15 +110,25 @@ func (dr *JSONDriver) RemoveField(label string, field string) error {
 		}
 	}
 
-	key := benchtop.FieldLabelKey(field, label)
+	FieldPrefix := benchtop.FieldLabelKey(field, label)
+	RFieldKeyPrefix := bytes.Join([][]byte{
+		benchtop.RFieldPrefix,
+		[]byte(label),
+		[]byte(field),
+	}, benchtop.FieldSep)
 
-	log.Infof("Deleting prefix: %q", key)
 	// Perform deletion in a bulk write transaction
 	err := dr.Pb.BulkWrite(func(tx *pebblebulk.PebbleBulk) error {
-		return tx.DeletePrefix(key)
+		if err := tx.DeletePrefix(FieldPrefix); err != nil {
+			return fmt.Errorf("delete field prefix failed: %w", err)
+		}
+		if err := tx.DeletePrefix(RFieldKeyPrefix); err != nil {
+			return fmt.Errorf("delete row index prefix failed: %w", err)
+		}
+		return nil
 	})
 	if err != nil {
-		return fmt.Errorf("delete range failed: %w", err)
+		return err
 	}
 	return nil
 }
@@ -146,6 +185,78 @@ func (dr *JSONDriver) ListFields() []FieldInfo {
 		}
 	}
 	return out
+}
+
+func (dr *JSONDriver) DeleteRowField(label, field, rowID string) error {
+	/* Deletes a singular row index field */
+	dr.Lock.Lock()
+	defer dr.Lock.Unlock()
+
+	// Check if the table exists
+	_, ok := dr.Tables[label]
+	if !ok {
+		log.Errorf("Table '%s' does not exist", label)
+		return fmt.Errorf("table '%s' does not exist", label)
+	}
+
+	// Check if the field exists
+	innerMap, existsLabel := dr.Fields[label]
+	if !existsLabel || innerMap == nil {
+		log.Errorf("No fields defined for table '%s'", label)
+		return fmt.Errorf("no fields defined for table '%s'", label)
+	}
+	if _, existsField := innerMap[field]; !existsField {
+		log.Errorf("Field '%s' does not exist in table '%s'", field, label)
+		return fmt.Errorf("field '%s' does not exist in table '%s'", field, label)
+	}
+
+	// Get the field value from the reverse index
+	rowIndexKey := benchtop.RFieldKey(label, field, rowID)
+	var fieldValueBytes []byte
+	err := dr.Pb.View(func(it *pebblebulk.PebbleIterator) error {
+		var err error
+		if it.Seek(rowIndexKey); it.Valid() && bytes.Equal(it.Key(), rowIndexKey) {
+			fieldValueBytes, err = it.Value()
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		log.Errorf("Error finding reverse index for row '%s' in table '%s' for field '%s': %v", rowID, label, field, err)
+		return err
+	}
+
+	// If no reverse index entry exists, no index to delete
+	if fieldValueBytes == nil {
+		log.Debugf("No index entry for row '%s' in table '%s' for field '%s'", rowID, label, field)
+		return nil
+	}
+
+	var fieldValue any
+	if err := sonic.ConfigFastest.Unmarshal(fieldValueBytes, &fieldValue); err != nil {
+		log.Errorf("Error deserializing field value for row '%s' in table '%s' for field '%s': %v", rowID, label, field, err)
+		return err
+	}
+	fmt.Println("FIELD VALUE ANY: ", fieldValue)
+
+	// Delete both the forward and reverse index entries
+	err = dr.Pb.BulkWrite(func(tx *pebblebulk.PebbleBulk) error {
+		if err := tx.Delete(benchtop.FieldKey(field, label, fieldValue, []byte(rowID)), nil); err != nil {
+			return err
+		}
+		if err := tx.Delete(rowIndexKey, nil); err != nil {
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		log.Errorf("Error deleting index for field '%s' in table '%s' for row '%s': %v", field, label, rowID, err)
+		return err
+	}
+	log.Debugf("Successfully deleted index for field '%s' in table '%s' for row '%s'", field, label, rowID)
+	return nil
 }
 
 func (dr *JSONDriver) RowIdsByHas(fltField string, fltValue any, fltOp gripql.Condition) chan string {

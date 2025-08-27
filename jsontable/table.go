@@ -42,9 +42,8 @@ type JSONTable struct {
 func (b *JSONTable) Init(poolSize int) error {
 	b.FilePool = make(chan *os.File, poolSize)
 	for i := range poolSize {
-		file, err := os.Open(b.Path)
+		file, err := os.OpenFile(b.Path, os.O_RDWR, 0666)
 		if err != nil {
-			// Close already opened files
 			for range i {
 				if file, ok := <-b.FilePool; ok {
 					file.Close()
@@ -94,7 +93,7 @@ func (b *JSONTable) AddRow(elem benchtop.Row) (*benchtop.RowLoc, error) {
 		return nil, err
 	}
 
-	log.Debugln("WRITE ENTRY: ", offset, len(bData))
+	//log.Debugln("WRITE ENTRY: ", offset, len(bData))
 	writesize, err := b.writeJsonEntry(offset, bData)
 	if err != nil {
 		log.Errorf("write handler err in Load: bulkSet: %s", err)
@@ -137,17 +136,30 @@ func (b *JSONTable) GetRow(loc benchtop.RowLoc) (map[string]any, error) {
 	return out.(map[string]any), nil
 }
 
-func (b *JSONTable) DeleteRow(name []byte) error {
-	offset, _, err := b.GetBlockPos(name)
+func (b *JSONTable) MarkDeleteTable(loc benchtop.RowLoc) error {
+	// Since we're not explicitly 'adding' to a part of the file, should be able
+	// to get away with no lock here since the space is just 'marked' as empty
+	file := <-b.FilePool
+	defer func() {
+		b.FilePool <- file
+	}()
+	if _, err := file.WriteAt([]byte{0x00, 0x00, 0x00, 0x00}, int64(loc.Offset+ROW_OFFSET_HSIZE)); err != nil {
+		return fmt.Errorf("writeAt failed: %w", err)
+	}
+	return nil
+}
+
+func (b *JSONTable) DeleteRow(loc benchtop.RowLoc, id []byte) error {
+	b.handleLock.Lock()
+	defer b.handleLock.Unlock()
+
+	if _, err := b.handle.WriteAt([]byte{0x00, 0x00, 0x00, 0x00}, int64(loc.Offset+ROW_OFFSET_HSIZE)); err != nil {
+		return fmt.Errorf("writeAt failed: %w", err)
+	}
+	err := b.db.Delete(benchtop.NewPosKey(b.TableId, id), nil)
 	if err != nil {
 		return err
 	}
-	b.handleLock.Lock()
-	if _, err := b.handle.WriteAt([]byte{0x00, 0x00, 0x00, 0x00}, int64(offset+12)); err != nil {
-		return fmt.Errorf("writeAt failed: %w", err)
-	}
-	b.handleLock.Unlock()
-	b.db.Delete(benchtop.NewPosKey(b.TableId, name), nil)
 	return nil
 }
 
@@ -213,7 +225,6 @@ func (b *JSONTable) Scan(loadData bool, filter benchtop.RowFilter) chan any {
 			}
 
 			rowData := m[jsonStart:jsonEnd]
-
 			err = b.processJSONRowData(rowData, loadData, filter, outChan)
 			if err != nil {
 				log.Debugf("Skipping malformed row at offset %d: %v", offset, err)
