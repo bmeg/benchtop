@@ -7,7 +7,6 @@ import (
 )
 
 func TestIDParse(t *testing.T) {
-
 	id := "key-0001"
 	key := benchtop.NewTableKey([]byte(id))
 	pID := benchtop.ParseTableKey(key)
@@ -15,11 +14,10 @@ func TestIDParse(t *testing.T) {
 	if id != string(pID) {
 		t.Errorf("%s != %s", string(id), string(pID))
 	}
-
 }
 
 func TestPosKeyParse(t *testing.T) {
-	tableId := uint32(5)
+	tableId := uint16(5)
 	name := []byte("MyKey")
 
 	key := benchtop.NewPosKey(tableId, name)

@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	"github.com/bmeg/benchtop"
-	"github.com/bmeg/benchtop/bsontable"
+	"github.com/bmeg/benchtop/jsontable"
 	"github.com/bmeg/benchtop/util"
 )
 
@@ -14,14 +14,14 @@ func TestDelete(t *testing.T) {
 	dbname := "test.data" + util.RandomString(5)
 	defer os.RemoveAll(dbname)
 
-	dr, err := bsontable.NewBSONDriver(dbname)
+	dr, err := jsontable.NewJSONDriver(dbname)
 	if err != nil {
 		t.Error(err)
 	}
 
 	ts, err := dr.New("table_1", []benchtop.ColumnDef{
-		{Key: "data", Type: benchtop.Int64},
-		{Key: "id", Type: benchtop.String},
+		{Key: "data"},
+		{Key: "id"},
 	})
 
 	if err != nil {
@@ -29,24 +29,33 @@ func TestDelete(t *testing.T) {
 	}
 
 	totalCount := 100
+	bT, _ := ts.(*jsontable.JSONTable)
 	for i := 0; i < totalCount; i++ {
 		key := fmt.Sprintf("key_%d", i)
-		err := ts.AddRow(benchtop.Row{Id: []byte(key), Data: map[string]any{
+		loc, err := bT.AddRow(benchtop.Row{Id: []byte(key), Data: map[string]any{
 			"id":   key,
 			"data": i,
 		}})
 		if err != nil {
 			t.Error(err)
 		}
+		err = bT.AddTableEntryInfo(nil, []byte(key), *loc)
+		if err != nil {
+			t.Error(err)
+		}
 	}
 
 	count := 0
-	r, err := ts.Keys()
+	r, err := bT.Keys()
 	if err != nil {
 		t.Error(err)
 	}
 	for i := range r {
-		_, err := ts.GetRow(i.Key)
+		offset, size, err := bT.GetBlockPos(i.Key)
+		if err != nil {
+			t.Error(err)
+		}
+		_, err = bT.GetRow(benchtop.RowLoc{Offset: offset, Size: size, Label: uint16(0)})
 		if err != nil {
 			t.Errorf("Get %s error: %s", string(i.Key), err)
 		}
@@ -56,29 +65,37 @@ func TestDelete(t *testing.T) {
 		t.Errorf("incorrect return count %d", count)
 	}
 
-	deleteCount := 0
-	keys, _ := ts.Keys()
+	var deleteCount = 0
+	keys, err := bT.Keys()
+	if err != nil {
+		t.Error(err)
+	}
 	i := 0
 	for k := range keys {
 		if i%3 == 0 {
-			err := ts.DeleteRow(k.Key)
+			offset, size, err := bT.GetBlockPos(k.Key)
+			if err != nil {
+				t.Error(err)
+			}
+			err = bT.DeleteRow(benchtop.RowLoc{Offset: offset, Size: size, Label: bT.TableId}, k.Key)
 			if err != nil {
 				t.Errorf("delete %s error: %s", string(k.Key), err)
 			}
 			deleteCount++
-			i++
 		}
+		i++
 	}
 
 	count = 0
-	r, _ = ts.Keys()
+	r, err = bT.Keys()
+	if err != nil {
+		t.Error(err)
+	}
 	for range r {
 		count++
 	}
-
 	if totalCount-deleteCount != count {
 		t.Errorf("incorrect return count after delete %d != %d", count, totalCount-deleteCount)
 	}
-
 	defer dr.Close()
 }

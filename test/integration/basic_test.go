@@ -6,8 +6,10 @@ import (
 	"testing"
 
 	"github.com/bmeg/benchtop"
-	"github.com/bmeg/benchtop/bsontable"
+	"github.com/bmeg/benchtop/jsontable"
 	"github.com/bmeg/benchtop/util"
+	"github.com/bmeg/grip/log"
+	"github.com/cockroachdb/pebble"
 )
 
 var data = map[string]map[string]any{
@@ -29,14 +31,14 @@ func TestOpenClose(t *testing.T) {
 	name := "test.data" + util.RandomString(5)
 	defer os.RemoveAll(name)
 
-	dr, err := bsontable.NewBSONDriver(name)
+	dr, err := jsontable.NewJSONDriver(name)
 	if err != nil {
 		t.Error(err)
 	}
 
 	_, err = dr.New("table_1", []benchtop.ColumnDef{
-		{Key: "field1", Type: benchtop.Double},
-		{Key: "other", Type: benchtop.String},
+		{Key: "field1"},
+		{Key: "other"},
 	})
 
 	if err != nil {
@@ -44,7 +46,7 @@ func TestOpenClose(t *testing.T) {
 	}
 	dr.Close()
 
-	or, err := bsontable.NewBSONDriver(name)
+	or, err := jsontable.NewJSONDriver(name)
 	if err != nil {
 		t.Error(err)
 	}
@@ -63,30 +65,43 @@ func TestInsert(t *testing.T) {
 	dbname := "test.data" + util.RandomString(5)
 	defer os.RemoveAll(dbname)
 
-	dr, err := bsontable.NewBSONDriver(dbname)
+	dr, err := jsontable.NewJSONDriver(dbname)
 	if err != nil {
 		t.Error(err)
 	}
-
 	ts, err := dr.New("table_1", []benchtop.ColumnDef{
-		{Key: "field1", Type: benchtop.Double},
-		{Key: "other", Type: benchtop.String},
+		{Key: "field1"},
+		{Key: "other"},
 	})
-
 	if err != nil {
 		t.Error(err)
 	}
 
+	bT, _ := ts.(*jsontable.JSONTable)
 	for k, r := range data {
-		err := ts.AddRow(benchtop.Row{Id: []byte(k), Data: r})
+		loc, err := bT.AddRow(benchtop.Row{Id: []byte(k), TableName: "table_1", Data: r})
+		if err != nil {
+			t.Error(err)
+		}
+		err = bT.AddTableEntryInfo(nil, []byte(k), *loc)
 		if err != nil {
 			t.Error(err)
 		}
 	}
 
 	for k := range data {
-		post, err := ts.GetRow([]byte(k))
-		fmt.Printf("%#v\n", post)
+		pKey := benchtop.NewPosKey(bT.TableId, []byte(k))
+		val, closer, err := bT.Pb.Db.Get(pKey)
+		if err != nil {
+			if err != pebble.ErrNotFound {
+				log.Errorf("Err on dr.Pb.Get for key %s in CacheLoader: %v", k, err)
+			}
+			log.Errorln("ERR: ", err)
+		}
+		offset, size := benchtop.ParsePosValue(val)
+		closer.Close()
+
+		post, err := ts.GetRow(benchtop.RowLoc{Offset: offset, Size: size, Label: 0})
 		if err != nil {
 			t.Error(err)
 		}
@@ -114,8 +129,6 @@ func TestInsert(t *testing.T) {
 	if oCount != len(data) {
 		t.Errorf("Incorrect key count %d != %d", oCount, len(data))
 	}
-
-	ts.Compact()
 	defer dr.Close()
 }
 
@@ -123,14 +136,14 @@ func TestDeleteTable(t *testing.T) {
 	name := "test.data" + util.RandomString(5)
 	defer os.RemoveAll(name)
 
-	dr, err := bsontable.NewBSONDriver(name)
+	dr, err := jsontable.NewJSONDriver(name)
 	if err != nil {
 		t.Error(err)
 	}
 
 	_, err = dr.New("table_1", []benchtop.ColumnDef{
-		{Key: "field1", Type: benchtop.Double},
-		{Key: "other", Type: benchtop.String},
+		{Key: "field1"},
+		{Key: "other"},
 	})
 	if err != nil {
 		t.Error(err)
@@ -143,7 +156,7 @@ func TestDeleteTable(t *testing.T) {
 
 	dr.Close()
 
-	or, err := bsontable.NewBSONDriver(name)
+	or, err := jsontable.NewJSONDriver(name)
 	if err != nil {
 		t.Error(err)
 	}

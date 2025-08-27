@@ -7,7 +7,7 @@ import (
 	"strings"
 
 	"github.com/bmeg/benchtop"
-	"github.com/bmeg/benchtop/bsontable"
+	"github.com/bmeg/benchtop/jsontable"
 	"github.com/bmeg/benchtop/util"
 
 	"github.com/schollz/progressbar/v3"
@@ -19,7 +19,7 @@ func main() {
 	file := flag.Arg(0)
 	dbPath := flag.Arg(1)
 
-	db, err := bsontable.NewBSONDriver(dbPath)
+	db, err := jsontable.NewJSONDriver(dbPath)
 	if err != nil {
 		fmt.Printf("Error: %s", err)
 		return

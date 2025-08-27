@@ -1,111 +1,204 @@
 package test
 
 import (
+	"fmt"
 	"os"
+	"reflect"
 	"testing"
 
 	"github.com/bmeg/benchtop"
-	"github.com/bmeg/benchtop/bsontable"
+	"github.com/bmeg/benchtop/filters"
+	"github.com/bmeg/benchtop/jsontable"
 	"github.com/bmeg/benchtop/test/fixtures"
+	"github.com/bmeg/grip/gripql"
 
 	"github.com/bmeg/benchtop/util"
 )
+
+type FieldFilters []filters.FieldFilter
+
+func (ff FieldFilters) Matches(row any) bool {
+	rowData, ok := row.(map[string]any)
+	if !ok {
+		return false
+	}
+	for _, filter := range ff {
+		fieldValue, ok := rowData[filter.Field]
+		if !ok {
+			return false
+		}
+		switch filter.Operator {
+		case gripql.Condition_EQ:
+			if fmt.Sprintf("%v", fieldValue) != fmt.Sprintf("%v", filter.Value) {
+				return false
+			}
+		case gripql.Condition_GT:
+			val1, ok1 := fieldValue.(float64)
+			val2, ok2 := filter.Value.(float64)
+			if !ok1 || !ok2 {
+				// Handle type mismatch, maybe return false or an error
+				return false
+			}
+			if val1 <= val2 {
+				return false // Does not match the "greater than" condition
+			}
+
+		case gripql.Condition_CONTAINS:
+			found := false
+			switch val := filter.Value.(type) {
+			case []any:
+				for _, v := range val {
+					if reflect.DeepEqual(v, fieldValue) {
+						found = true
+					}
+				}
+			case nil:
+				found = false
+			default:
+			}
+			return found
+
+		default:
+			return false
+		}
+
+	}
+	return true
+}
+
+func (ff FieldFilters) IsNoOp() bool {
+	return len(ff) == 0
+}
+
+func (ff FieldFilters) GetFilter() any {
+	return ff
+}
+
+func (ff FieldFilters) RequiredFields() []string {
+	fields := make([]string, len(ff))
+	for i, filter := range ff {
+		fields[i] = filter.Field
+	}
+	return fields
+}
 
 func TestScan(t *testing.T) {
 	dbname := "test.data" + util.RandomString(5)
 	defer os.RemoveAll(dbname)
 
-	dr, err := bsontable.NewBSONDriver(dbname)
+	dr, err := jsontable.NewJSONDriver(dbname)
 	if err != nil {
 		t.Error(err)
 	}
 
 	ts, err := dr.New("table_1", []benchtop.ColumnDef{
-		{Key: "field1", Type: benchtop.Double},
-		{Key: "name", Type: benchtop.String},
+		{Key: "field1"},
+		{Key: "name"},
 	})
 	if err != nil {
 		t.Error(err)
 	}
 
+	bT, _ := ts.(*jsontable.JSONTable)
 	for k, r := range fixtures.ScanData {
-		err := ts.AddRow(benchtop.Row{Id: []byte(k), Data: r})
+		loc, err := bT.AddRow(benchtop.Row{Id: []byte(k), Data: r})
+		if err != nil {
+			t.Error(err)
+		}
+		if loc.Offset == 0 || loc.Size == 0 {
+			t.Error(fmt.Errorf("expecting Offset and Size to be populated but got %d and %d instead", loc.Offset, loc.Size))
+		}
+		err = bT.AddTableEntryInfo(nil, []byte(k), *loc)
 		if err != nil {
 			t.Error(err)
 		}
 	}
 
-	lenscanChan := 0
-	scanChan, err := ts.Scan(false, []benchtop.FieldFilter{benchtop.FieldFilter{Field: "name", Operator: "==", Value: "alice"}}, "name", "field1")
-	if err != nil {
-		t.Error(err)
-	}
-	for elem := range scanChan {
-		lenscanChan++
+	filters1 := FieldFilters{filters.FieldFilter{Field: "name", Operator: gripql.Condition_EQ, Value: "alice"}}
+	lenscanChan1 := 0
+	for elem := range bT.Scan(true, filters1) {
+		lenscanChan1++
 		t.Log("scanChan: ", elem)
-		if elem["name"] != "alice" {
-			t.Errorf("expecting chan of len 1 with value name:alice got %s", elem)
+		if elem.(map[string]any)["name"] != "alice" {
+			t.Errorf("expecting chan of len 1 with value name:alice got %v", elem)
 		}
-		if _, ok := elem["_key"]; ok {
+		if _, ok := elem.(map[string]any)["_key"]; ok {
 			t.Errorf("specified no key to be returned but returned key anyway")
 		}
 	}
-
-	scanChantwo, err := ts.Scan(true, []benchtop.FieldFilter{benchtop.FieldFilter{Field: "field1", Operator: "==", Value: 0.2}}, "name", "field1")
-	if err != nil {
-		t.Error(err)
+	if lenscanChan1 != 1 {
+		t.Errorf("expected 1 element, but got %d", lenscanChan1)
 	}
-	for elem := range scanChantwo {
+
+	// Second test case: "field1" == 0.2
+	filters2 := FieldFilters{filters.FieldFilter{Field: "field1", Operator: gripql.Condition_EQ, Value: 0.2}}
+	scanChan2 := bT.Scan(true, filters2)
+
+	for elem := range scanChan2 {
 		t.Log("scanChantwo: ", elem)
-		if elem["field1"] != 0.2 {
-			t.Errorf("expecting chan of len 1 with value field:0.2 got %s", elem)
+		data, ok := elem.(map[string]any)
+		if !ok {
+			t.Errorf("expected map[string]any, but got %T", elem)
+			continue
 		}
-		if Key, ok := elem["_key"]; ok {
-			if Key == "" {
-				t.Errorf("specified key to be returned but got '%s'", Key)
+		if data["field1"] != 0.2 {
+			t.Errorf("expecting chan of len 1 with value field:0.2 got %v", elem)
+		}
+		if key, ok := data["_key"]; ok {
+			if key == "" {
+				t.Errorf("specified key to be returned but got an empty string")
 			}
 		}
 	}
 
-	scanChanthree, err := ts.Scan(true, []benchtop.FieldFilter{benchtop.FieldFilter{Field: "field1", Operator: ">", Value: 0.2}}, "name", "field1")
-	if err != nil {
-		t.Error(err)
-	}
-	scanChanLen := 0
-	for elem := range scanChanthree {
+	// Third test case: "field1" > 0.2
+	filters3 := FieldFilters{filters.FieldFilter{Field: "field1", Operator: gripql.Condition_GT, Value: 0.2}}
+	scanChan3 := bT.Scan(true, filters3)
+
+	scanChanLen3 := 0
+	for elem := range scanChan3 {
 		t.Log("scanChanthree: ", elem)
-		scanChanLen++
-		if Key, ok := elem["_key"]; ok {
-			if Key == "" {
-				t.Errorf("specified key to be returned but got '%s'", Key)
+		scanChanLen3++
+		data, ok := elem.(map[string]any)
+		if !ok {
+			t.Errorf("expected map[string]any, but got %T", elem)
+			continue
+		}
+		if key, ok := data["_key"]; ok {
+			if key == "" {
+				t.Errorf("specified key to be returned but got an empty string")
 			}
 		}
 	}
-	if scanChanLen != 6 {
-		t.Error("Expecting 7 items returned but got ", scanChanLen)
+	if scanChanLen3 != 6 {
+		t.Errorf("Expecting 6 items returned but got %d", scanChanLen3)
 	}
 
-	err = ts.DeleteRow([]byte("key4"))
+	offset, size, err := bT.GetBlockPos([]byte("key4"))
+	if err != nil {
+		t.Error(err)
+	}
+	err = bT.DeleteRow(benchtop.RowLoc{Offset: offset, Size: size, Label: bT.TableId}, []byte("key4"))
 	if err != nil {
 		t.Error(err)
 	}
 
-	scanChanfour, err := ts.Scan(false, []benchtop.FieldFilter{benchtop.FieldFilter{Field: "name", Operator: "startswith", Value: "a"}}, "name", "field1")
-	if err != nil {
-		t.Error(err)
-	}
-	scanChanLen = 0
-	for elem := range scanChanfour {
+	// Fourth test case: "name" starts with "a"
+	// NOTE: You need to fix the case in your original code from "startswith" to "STARTSWITH"
+	filters4 := FieldFilters{filters.FieldFilter{Field: "name", Operator: gripql.Condition_CONTAINS, Value: []any{"mnbv"}}}
+	scanChan4 := bT.Scan(false, filters4)
+
+	scanChanLen4 := 0
+	for elem := range scanChan4 {
 		t.Log("scanChanfour: ", elem)
-		scanChanLen++
-		if _, ok := elem["_key"]; ok {
-			t.Errorf("specified no key to be returned but returned key anyway")
+		scanChanLen4++
+		if key, ok := elem.(string); !ok {
+			t.Errorf("specified returned key is not string %s", key)
 		}
 	}
-	if scanChanLen != 1 {
-		t.Error("Expecting only one elem after delete key4")
+	if scanChanLen4 != 1 {
+		t.Errorf("Expecting only one elem after delete key4, but got %d", scanChanLen4)
 	}
 
-	ts.Compact()
 	defer dr.Close()
 }

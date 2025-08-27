@@ -5,7 +5,7 @@ import (
 	"log"
 
 	"github.com/bmeg/benchtop"
-	"github.com/bmeg/benchtop/bsontable"
+	"github.com/bmeg/benchtop/jsontable"
 	"github.com/bmeg/benchtop/util"
 	"github.com/schollz/progressbar/v3"
 	"github.com/spf13/cobra"
@@ -24,7 +24,7 @@ var Cmd = &cobra.Command{
 		tableName := args[1]
 		filePath := args[2]
 
-		driver, err := bsontable.NewBSONDriver(dbPath)
+		driver, err := jsontable.NewJSONDriver(dbPath)
 		if err != nil {
 			return err
 		}

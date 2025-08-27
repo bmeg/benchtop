@@ -4,26 +4,26 @@ import (
 	"testing"
 
 	"github.com/bmeg/benchtop"
-	"go.mongodb.org/mongo-driver/bson"
+	"github.com/bytedance/sonic"
 )
 
 func TestMarshal(t *testing.T) {
 
 	tinfo := benchtop.TableInfo{
 		Columns: []benchtop.ColumnDef{
-			{Key: "columnA", Type: benchtop.String},
+			{Key: "columnA"},
 		},
-		Id: 42,
+		TableId: 42,
 	}
 
-	md, err := bson.Marshal(tinfo)
+	md, err := sonic.ConfigFastest.Marshal(tinfo)
 	if err != nil {
 		t.Errorf("error: %s", err)
 	}
 
 	out := benchtop.TableInfo{}
 
-	err = bson.Unmarshal(md, &out)
+	err = sonic.ConfigFastest.Unmarshal(md, &out)
 	if err != nil {
 		t.Errorf("error: %s", err)
 	}
@@ -34,9 +34,6 @@ func TestMarshal(t *testing.T) {
 
 	for i := range tinfo.Columns {
 		if tinfo.Columns[i].Key != out.Columns[i].Key {
-			t.Errorf("invalid unmarshal")
-		}
-		if tinfo.Columns[i].Type != out.Columns[i].Type {
 			t.Errorf("invalid unmarshal")
 		}
 	}

@@ -14,6 +14,13 @@ const (
 	maxWriterBuffer = 3 << 30
 )
 
+type PebbleKV struct {
+	Db           *pebble.DB
+	InsertCount  uint32
+	CompactLimit uint32
+	mu           sync.Mutex
+}
+
 type PebbleBulk struct {
 	Db              *pebble.DB
 	Batch           *pebble.Batch
@@ -21,12 +28,6 @@ type PebbleBulk struct {
 	CurSize         int
 	mu              sync.Mutex
 	totalInserts    uint32
-}
-
-type PebbleKV struct {
-	Db           *pebble.DB
-	InsertCount  uint32
-	CompactLimit uint32
 }
 
 func (pb *PebbleBulk) Set(id []byte, val []byte, opts *pebble.WriteOptions) error {
@@ -103,6 +104,35 @@ func (pb *PebbleBulk) Close() error {
 func (pb *PebbleBulk) DeletePrefix(prefix []byte) error {
 	nextPrefix := append(prefix, 0xFF)
 	return pb.Db.DeleteRange(prefix, nextPrefix, nil)
+}
+
+func (pb *PebbleBulk) DeleteRange(start, end []byte, opts *pebble.WriteOptions) error {
+	pb.mu.Lock()
+	defer pb.mu.Unlock()
+	if pb.Batch == nil {
+		pb.Batch = pb.Db.NewBatch()
+	}
+
+	if pb.Lowest == nil || bytes.Compare(start, pb.Lowest) < 0 {
+		pb.Lowest = util.CopyBytes(start)
+	}
+	if pb.Highest == nil || bytes.Compare(end, pb.Highest) > 0 {
+		pb.Highest = util.CopyBytes(end)
+	}
+
+	err := pb.Batch.DeleteRange(start, end, opts)
+	if err != nil {
+		return err
+	}
+
+	if pb.CurSize > maxWriterBuffer {
+		if err := pb.Batch.Commit(nil); err != nil {
+			return err
+		}
+		pb.Batch.Reset()
+		pb.CurSize = 0
+	}
+	return nil
 }
 
 type PebbleIterator struct {
