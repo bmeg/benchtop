@@ -17,7 +17,6 @@ import (
 	"github.com/bmeg/benchtop/pebblebulk"
 	"github.com/bmeg/grip/log"
 	"github.com/edsrzf/mmap-go"
-	multierror "github.com/hashicorp/go-multierror"
 
 	"github.com/bytedance/sonic"
 	"github.com/cockroachdb/pebble"
@@ -107,7 +106,7 @@ func (b *JSONTable) AddRow(elem benchtop.Row) (*benchtop.RowLoc, error) {
 	}, nil
 }
 
-func (b *JSONTable) GetRow(loc benchtop.RowLoc) (map[string]any, error) {
+func (b *JSONTable) GetRow(loc *benchtop.RowLoc) (map[string]any, error) {
 
 	file := <-b.FilePool
 	defer func() {
@@ -149,7 +148,7 @@ func (b *JSONTable) MarkDeleteTable(loc benchtop.RowLoc) error {
 	return nil
 }
 
-func (b *JSONTable) DeleteRow(loc benchtop.RowLoc, id []byte) error {
+func (b *JSONTable) DeleteRow(loc *benchtop.RowLoc, id []byte) error {
 	b.handleLock.Lock()
 	defer b.handleLock.Unlock()
 
@@ -422,146 +421,6 @@ func (b *JSONTable) Compact() error {
 	}
 
 	return nil
-}
-
-func (b *JSONTable) Fetch(inputs chan benchtop.Index, workers int) <-chan benchtop.BulkResponse {
-	results := make(chan benchtop.BulkResponse, workers)
-	var wg sync.WaitGroup
-	go func() {
-		for entry := range inputs {
-			wg.Add(1)
-			go func(index benchtop.Index) {
-				defer wg.Done()
-				val, closer, err := b.db.Get(benchtop.NewPosKey(b.TableId, index.Key))
-				if err != nil {
-					results <- benchtop.BulkResponse{Key: index.Key, Data: nil, Err: func() string {
-						if err != nil {
-							return err.Error()
-						}
-						return ""
-					}()}
-					return
-				}
-				defer closer.Close()
-
-				data, err := b.readFromFile(binary.LittleEndian.Uint64(val))
-				if err != nil {
-					data = nil
-				}
-
-				results <- benchtop.BulkResponse{Key: index.Key, Data: data, Err: func() string {
-					if err != nil {
-						return err.Error()
-					}
-					return ""
-				}()}
-
-			}(entry)
-		}
-		wg.Wait()
-		close(results)
-	}()
-	return results
-}
-
-func (b *JSONTable) Load(inputs chan benchtop.Row) error {
-	var errs *multierror.Error
-	b.handleLock.Lock()
-	defer b.handleLock.Unlock()
-	offset, err := b.handle.Seek(0, io.SeekEnd)
-	if err != nil {
-		return err
-	}
-
-	err = b.Pb.BulkWrite(func(tx *pebblebulk.PebbleBulk) error {
-		for entry := range inputs {
-
-			bData, err := sonic.Marshal(
-				b.packData(entry.Data, string(entry.Id)),
-			)
-			if err != nil {
-				errs = multierror.Append(errs, err)
-				log.Errorf("json Marshall err in Load: bulkSet: %s", err)
-			}
-
-			// make Next offset equal to existing offset + length of data
-			writeSize, err := b.writeJsonEntry(offset, bData)
-			if err != nil {
-				errs = multierror.Append(errs, err)
-				log.Errorf("write handler err in Load: bulkSet: %s", err)
-			}
-			b.AddTableEntryInfo(tx, entry.Id, benchtop.RowLoc{Offset: uint64(offset), Size: uint64(writeSize)})
-			offset += int64(writeSize) + 8
-		}
-		return nil
-	})
-	if err != nil {
-		log.Errorf("Err: %s", err)
-		errs = multierror.Append(errs, err)
-	}
-	return errs.ErrorOrNil()
-
-}
-
-func (b *JSONTable) Remove(inputs chan benchtop.Index, workers int) <-chan benchtop.BulkResponse {
-	results := make(chan benchtop.BulkResponse, workers)
-	batchDeletes := make(chan benchtop.Index, workers)
-
-	go func() {
-		for index := range batchDeletes {
-			err := b.db.Delete(benchtop.NewPosKey(b.TableId, index.Key), nil)
-			if err != nil {
-				results <- benchtop.BulkResponse{Key: index.Key, Data: nil, Err: func() string {
-					if err != nil {
-						return err.Error()
-					}
-					return ""
-				}()}
-			}
-		}
-
-		close(results)
-	}()
-
-	var wg sync.WaitGroup
-	go func() {
-		defer close(batchDeletes)
-		for index := range inputs {
-			wg.Add(1)
-			go func(index benchtop.Index) {
-				defer wg.Done()
-
-				val, closer, err := b.db.Get(benchtop.NewPosKey(b.TableId, index.Key))
-				if err != nil {
-					results <- benchtop.BulkResponse{Key: index.Key, Data: nil, Err: func() string {
-						if err != nil {
-							return err.Error()
-						}
-						return ""
-					}()}
-					return
-				}
-				defer closer.Close()
-
-				offset := binary.LittleEndian.Uint64(val)
-				if err := b.markDelete(offset); err != nil {
-					results <- benchtop.BulkResponse{Key: index.Key, Data: nil, Err: func() string {
-						if err != nil {
-							return err.Error()
-						}
-						return ""
-					}()}
-					return
-				}
-
-				batchDeletes <- index
-				results <- benchtop.BulkResponse{Key: index.Key, Data: nil, Err: ""}
-			}(index)
-		}
-		wg.Wait()
-	}()
-
-	return results
 }
 
 func ConvertJSONPathToArray(path string) ([]any, error) {

@@ -39,7 +39,7 @@ func TestDelete(t *testing.T) {
 		if err != nil {
 			t.Error(err)
 		}
-		err = bT.AddTableEntryInfo(nil, []byte(key), *loc)
+		err = bT.AddTableEntryInfo(nil, []byte(key), loc)
 		if err != nil {
 			t.Error(err)
 		}
@@ -51,11 +51,11 @@ func TestDelete(t *testing.T) {
 		t.Error(err)
 	}
 	for i := range r {
-		offset, size, err := bT.GetBlockPos(i.Key)
+		loc, err := bT.GetBlockPos(i.Key)
 		if err != nil {
 			t.Error(err)
 		}
-		_, err = bT.GetRow(benchtop.RowLoc{Offset: offset, Size: size, Label: uint16(0)})
+		_, err = bT.GetRow(loc)
 		if err != nil {
 			t.Errorf("Get %s error: %s", string(i.Key), err)
 		}
@@ -73,11 +73,11 @@ func TestDelete(t *testing.T) {
 	i := 0
 	for k := range keys {
 		if i%3 == 0 {
-			offset, size, err := bT.GetBlockPos(k.Key)
+			loc, err := bT.GetBlockPos(k.Key)
 			if err != nil {
 				t.Error(err)
 			}
-			err = bT.DeleteRow(benchtop.RowLoc{Offset: offset, Size: size, Label: bT.TableId}, k.Key)
+			err = bT.DeleteRow(loc, k.Key)
 			if err != nil {
 				t.Errorf("delete %s error: %s", string(k.Key), err)
 			}

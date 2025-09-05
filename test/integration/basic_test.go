@@ -83,7 +83,7 @@ func TestInsert(t *testing.T) {
 		if err != nil {
 			t.Error(err)
 		}
-		err = bT.AddTableEntryInfo(nil, []byte(k), *loc)
+		err = bT.AddTableEntryInfo(nil, []byte(k), loc)
 		if err != nil {
 			t.Error(err)
 		}
@@ -98,10 +98,10 @@ func TestInsert(t *testing.T) {
 			}
 			log.Errorln("ERR: ", err)
 		}
-		offset, size := benchtop.ParsePosValue(val)
+		loc := benchtop.DecodeRowLoc(val)
 		closer.Close()
 
-		post, err := ts.GetRow(benchtop.RowLoc{Offset: offset, Size: size, Label: 0})
+		post, err := ts.GetRow(loc)
 		if err != nil {
 			t.Error(err)
 		}

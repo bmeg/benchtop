@@ -27,8 +27,8 @@ func (b *JSONTable) packData(entry map[string]any, key string) *RowData {
 	}
 }
 
-func (b *JSONTable) AddTableEntryInfo(tx *pebblebulk.PebbleBulk, rowId []byte, rowLoc benchtop.RowLoc) error {
-	value := benchtop.NewPosValue(rowLoc.Offset, rowLoc.Size)
+func (b *JSONTable) AddTableEntryInfo(tx *pebblebulk.PebbleBulk, rowId []byte, rowLoc *benchtop.RowLoc) error {
+	value := benchtop.EncodeRowLoc(rowLoc)
 	posKey := benchtop.NewPosKey(b.TableId, rowId)
 	if tx != nil {
 		err := tx.Set(posKey, value, nil)
@@ -84,19 +84,16 @@ func (b *JSONTable) unpackData(loadData bool, retId bool, doc *RowData) (any, er
 
 }
 
-func (b *JSONTable) GetBlockPos(id []byte) (offset uint64, size uint64, err error) {
-	log.Debugln("TABLE ID: ", b.TableId, "ID: ", string(id))
+func (b *JSONTable) GetBlockPos(id []byte) (loc *benchtop.RowLoc, err error) {
 	val, closer, err := b.db.Get(benchtop.NewPosKey(b.TableId, id))
 	if err != nil {
 		if err != pebble.ErrNotFound {
 			log.Errorln("getBlockPos Err: ", err)
 		}
-		return 0, 0, err
+		return nil, err
 	}
-
-	offset, size = benchtop.ParsePosValue(val)
 	defer closer.Close()
-	return offset, size, nil
+	return benchtop.DecodeRowLoc(val), nil
 }
 
 func (b *JSONTable) setDataIndices(inputs chan benchtop.Index) {
@@ -104,7 +101,7 @@ func (b *JSONTable) setDataIndices(inputs chan benchtop.Index) {
 		b.AddTableEntryInfo(
 			nil,
 			index.Key,
-			benchtop.RowLoc{
+			&benchtop.RowLoc{
 				Offset: index.Position,
 				Size:   index.Size,
 			},

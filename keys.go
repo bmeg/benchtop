@@ -115,13 +115,18 @@ func NewPosKeyPrefix(table uint16) []byte {
 	return out[:]
 }
 
-func NewPosValue(offset uint64, size uint64) []byte {
-	var out [64]byte
-	binary.LittleEndian.PutUint64(out[:], offset)
-	binary.LittleEndian.PutUint64(out[8:], size)
+func EncodeRowLoc(loc *RowLoc) []byte {
+	var out [18]byte
+	binary.LittleEndian.PutUint16(out[0:], loc.SegmentID)
+	binary.LittleEndian.PutUint64(out[2:], loc.Offset)
+	binary.LittleEndian.PutUint64(out[10:], loc.Size)
 	return out[:]
 }
 
-func ParsePosValue(v []byte) (offset uint64, size uint64) {
-	return binary.LittleEndian.Uint64(v), binary.LittleEndian.Uint64(v[8:])
+func DecodeRowLoc(v []byte) *RowLoc {
+	return &RowLoc{
+		SegmentID: binary.LittleEndian.Uint16(v),
+		Offset:    binary.LittleEndian.Uint64(v[2:]),
+		Size:      binary.LittleEndian.Uint64(v[10:]),
+	}
 }

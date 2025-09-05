@@ -64,9 +64,9 @@ func BenchmarkRemove(b *testing.B) {
 		log.Errorln("ERR: ", err)
 	}
 	closer.Close()
-	offset, size := benchtop.ParsePosValue(val)
 
-	data, err := compactjsonTable.GetRow(benchtop.RowLoc{Offset: offset, Size: size, Label: 0})
+	loc := benchtop.DecodeRowLoc(val)
+	data, err := compactjsonTable.GetRow(loc)
 	b.Log("DATA BEFORE: ", data)
 
 	if len(data) == 0 {
@@ -89,7 +89,7 @@ func BenchmarkRemove(b *testing.B) {
 		b.Fatal(err)
 	}
 
-	data, err = compactjsonTable.GetRow(benchtop.RowLoc{Offset: offset, Size: size, Label: 0})
+	data, err = compactjsonTable.GetRow(loc)
 	b.Log("DATA AFTER: ", data)
 	if len(data) != 0 {
 		b.Fatalf("Expected data to be empty for key_5 but %#v was found\n", data)

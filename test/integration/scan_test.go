@@ -108,7 +108,7 @@ func TestScan(t *testing.T) {
 		if loc.Offset == 0 || loc.Size == 0 {
 			t.Error(fmt.Errorf("expecting Offset and Size to be populated but got %d and %d instead", loc.Offset, loc.Size))
 		}
-		err = bT.AddTableEntryInfo(nil, []byte(k), *loc)
+		err = bT.AddTableEntryInfo(nil, []byte(k), loc)
 		if err != nil {
 			t.Error(err)
 		}
@@ -174,11 +174,11 @@ func TestScan(t *testing.T) {
 		t.Errorf("Expecting 6 items returned but got %d", scanChanLen3)
 	}
 
-	offset, size, err := bT.GetBlockPos([]byte("key4"))
+	loc, err := bT.GetBlockPos([]byte("key4"))
 	if err != nil {
 		t.Error(err)
 	}
-	err = bT.DeleteRow(benchtop.RowLoc{Offset: offset, Size: size, Label: bT.TableId}, []byte("key4"))
+	err = bT.DeleteRow(loc, []byte("key4"))
 	if err != nil {
 		t.Error(err)
 	}

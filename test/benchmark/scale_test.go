@@ -111,10 +111,10 @@ func BenchmarkRandomReadJson(b *testing.B) {
 				}
 				log.Errorln("ERR: ", err)
 			}
-			offset, size := benchtop.ParsePosValue(val)
+			loc := benchtop.DecodeRowLoc(val)
 			closer.Close()
 
-			rOw, err := bT.GetRow(benchtop.RowLoc{Offset: offset, Size: size, Label: 0})
+			rOw, err := bT.GetRow(loc)
 			if err != nil {
 				b.Fatal(err)
 			}

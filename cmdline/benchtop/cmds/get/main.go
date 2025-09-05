@@ -41,11 +41,9 @@ var Cmd = &cobra.Command{
 				}
 				log.Errorln("ERR: ", err)
 			}
-			fmt.Println("VAL: ", val)
-			offset, size := benchtop.ParsePosValue(val)
 			closer.Close()
 
-			data, err := table.GetRow(benchtop.RowLoc{Offset: offset, Size: size})
+			data, err := table.GetRow(benchtop.DecodeRowLoc(val))
 			if err == nil {
 				out, err := json.Marshal(data)
 				if err != nil {

@@ -33,15 +33,15 @@ func TestCompact(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		err = bT.AddTableEntryInfo(nil, []byte(k), *loc)
+		err = bT.AddTableEntryInfo(nil, []byte(k), loc)
 
 	}
 
-	offset, size, err := bT.GetBlockPos([]byte("key4"))
+	loc, err := bT.GetBlockPos([]byte("key4"))
 	if err != nil {
 		t.Error(err)
 	}
-	err = ts.DeleteRow(benchtop.RowLoc{Offset: offset, Size: size, Label: bT.TableId}, []byte("key4"))
+	err = ts.DeleteRow(loc, []byte("key4"))
 	if err != nil {
 		t.Fatal(err)
 	}

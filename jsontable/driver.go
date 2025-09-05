@@ -32,8 +32,9 @@ type JSONDriver struct {
 	db         *pebble.DB
 	Pb         *pebblebulk.PebbleKV
 
-	PageCache  *otter.Cache[string, benchtop.RowLoc]
-	PageLoader otter.LoaderFunc[string, benchtop.RowLoc]
+	PageCache      *otter.Cache[string, *benchtop.RowLoc]
+	PageLoader     otter.LoaderFunc[string, *benchtop.RowLoc]
+	BulkPageLoader otter.BulkLoaderFunc[string, *benchtop.RowLoc]
 
 	Tables      map[string]*JSONTable
 	LabelLookup map[uint16]string
@@ -60,7 +61,7 @@ func NewJSONDriver(path string) (benchtop.TableDriver, error) {
 			InsertCount:  0,
 			CompactLimit: uint32(1000),
 		},
-		PageCache: otter.Must(&otter.Options[string, benchtop.RowLoc]{
+		PageCache: otter.Must(&otter.Options[string, *benchtop.RowLoc]{
 			MaximumSize: 10_000_000,
 		}),
 		Fields:      map[string]map[string]struct{}{},
@@ -69,19 +70,43 @@ func NewJSONDriver(path string) (benchtop.TableDriver, error) {
 		LabelLookup: map[uint16]string{},
 	}
 
-	driver.PageLoader = otter.LoaderFunc[string, benchtop.RowLoc](func(ctx context.Context, key string) (benchtop.RowLoc, error) {
+	driver.PageLoader = otter.LoaderFunc[string, *benchtop.RowLoc](func(ctx context.Context, key string) (*benchtop.RowLoc, error) {
 		log.Debugln("Cache miss, loading from pebble: ", key)
 		val, closer, err := driver.Pb.Db.Get([]byte(key))
 		if err != nil {
 			if err != pebble.ErrNotFound {
 				log.Errorf("Err on dr.Pb.Get for key %s in CacheLoader: %v", key, err)
 			}
-			return benchtop.RowLoc{}, err
+			return &benchtop.RowLoc{}, err
 		}
-		offset, size := benchtop.ParsePosValue(val)
 		closer.Close()
-		return benchtop.RowLoc{Offset: offset, Size: size}, nil
+		return benchtop.DecodeRowLoc(val), nil
 	})
+
+	driver.BulkPageLoader = otter.BulkLoaderFunc[string, *benchtop.RowLoc](func(ctx context.Context, keys []string) (map[string]*benchtop.RowLoc, error) {
+		prefix := []byte{benchtop.PosPrefix}
+		result := make(map[string]*benchtop.RowLoc, len(keys))
+		err := driver.Pb.View(func(it *pebblebulk.PebbleIterator) error {
+			for it.Seek(prefix); it.Valid() && bytes.HasPrefix(it.Key(), prefix); it.Next() {
+				tableId, id := benchtop.ParsePosKey(it.Key())
+				val, err := it.Value()
+				if err != nil {
+					log.Errorf("Err on it.Value() in bulkLoader: %v", err)
+					continue
+				}
+				loc := benchtop.DecodeRowLoc(val)
+				loc.Label = tableId
+				result[string(id)] = loc
+
+			}
+			return nil
+		})
+		if err != nil {
+			return nil, err
+		}
+		return result, nil
+	})
+
 	return driver, nil
 }
 
@@ -108,7 +133,7 @@ func LoadJSONDriver(path string) (benchtop.TableDriver, error) {
 		Fields:     map[string]map[string]struct{}{},
 		Lock:       sync.RWMutex{},
 		PebbleLock: sync.RWMutex{},
-		PageCache: otter.Must(&otter.Options[string, benchtop.RowLoc]{
+		PageCache: otter.Must(&otter.Options[string, *benchtop.RowLoc]{
 			MaximumSize: 10000000,
 		}),
 		LabelLookup: map[uint16]string{},
@@ -143,18 +168,41 @@ func LoadJSONDriver(path string) (benchtop.TableDriver, error) {
 		driver.Lock.Unlock()
 	}
 
-	driver.PageLoader = otter.LoaderFunc[string, benchtop.RowLoc](func(ctx context.Context, key string) (benchtop.RowLoc, error) {
+	driver.PageLoader = otter.LoaderFunc[string, *benchtop.RowLoc](func(ctx context.Context, key string) (*benchtop.RowLoc, error) {
 		log.Debugln("Cache miss, loading from pebble: ", key)
 		val, closer, err := driver.Pb.Db.Get([]byte(key))
 		if err != nil {
 			if err != pebble.ErrNotFound {
 				log.Errorf("Err on dr.Pb.Get for key %s in CacheLoader: %v", key, err)
 			}
-			return benchtop.RowLoc{}, err
+			return &benchtop.RowLoc{}, err
 		}
-		offset, size := benchtop.ParsePosValue(val)
-		defer closer.Close()
-		return benchtop.RowLoc{Offset: offset, Size: size}, nil
+		closer.Close()
+		return benchtop.DecodeRowLoc(val), nil
+	})
+
+	driver.BulkPageLoader = otter.BulkLoaderFunc[string, *benchtop.RowLoc](func(ctx context.Context, keys []string) (map[string]*benchtop.RowLoc, error) {
+		prefix := []byte{benchtop.PosPrefix}
+		result := make(map[string]*benchtop.RowLoc, len(keys))
+		err := driver.Pb.View(func(it *pebblebulk.PebbleIterator) error {
+			for it.Seek(prefix); it.Valid() && bytes.HasPrefix(it.Key(), prefix); it.Next() {
+				tableId, id := benchtop.ParsePosKey(it.Key())
+				val, err := it.Value()
+				if err != nil {
+					log.Errorf("Err on it.Value() in bulkLoader: %v", err)
+					continue
+				}
+				loc := benchtop.DecodeRowLoc(val)
+				loc.Label = tableId
+				result[string(id)] = loc
+
+			}
+			return nil
+		})
+		if err != nil {
+			return nil, err
+		}
+		return result, nil
 	})
 
 	driver.Lock.RLock()
@@ -419,7 +467,7 @@ func (dr *JSONDriver) BulkLoad(inputs chan *benchtop.Row, tx *pebblebulk.PebbleB
 	metadataChan := make(chan struct {
 		table                 *JSONTable
 		fieldIndexKeyElements []fieldKeyElements // Changed to the new struct
-		metadata              map[string]benchtop.RowLoc
+		metadata              map[string]*benchtop.RowLoc
 		err                   error
 	}, 100)
 
@@ -435,7 +483,7 @@ func (dr *JSONDriver) BulkLoad(inputs chan *benchtop.Row, tx *pebblebulk.PebbleB
 				wg.Done()
 			}()
 			var fieldIndexKeyElements []fieldKeyElements // Changed variable name
-			metadata := make(map[string]benchtop.RowLoc)
+			metadata := make(map[string]*benchtop.RowLoc)
 			var localErr *multierror.Error
 
 			dr.Lock.RLock()
@@ -448,7 +496,7 @@ func (dr *JSONDriver) BulkLoad(inputs chan *benchtop.Row, tx *pebblebulk.PebbleB
 					metadataChan <- struct {
 						table                 *JSONTable
 						fieldIndexKeyElements []fieldKeyElements
-						metadata              map[string]benchtop.RowLoc
+						metadata              map[string]*benchtop.RowLoc
 						err                   error
 					}{nil, nil, nil, localErr.ErrorOrNil()}
 					return
@@ -547,14 +595,14 @@ func (dr *JSONDriver) BulkLoad(inputs chan *benchtop.Row, tx *pebblebulk.PebbleB
 
 				// Record metadata for each record in the batch
 				for i, id := range ids {
-					metadata[id] = benchtop.RowLoc{Offset: offsets[i], Size: uint64(len(bDatas[i])), Label: table.TableId}
+					metadata[id] = &benchtop.RowLoc{Offset: offsets[i], Size: uint64(len(bDatas[i])), Label: table.TableId}
 				}
 			}
 
 			metadataChan <- struct {
 				table                 *JSONTable
 				fieldIndexKeyElements []fieldKeyElements
-				metadata              map[string]benchtop.RowLoc
+				metadata              map[string]*benchtop.RowLoc
 				err                   error
 			}{table, fieldIndexKeyElements, metadata, localErr.ErrorOrNil()}
 		}()

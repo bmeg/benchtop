@@ -35,12 +35,12 @@ func TestPosValueParse(t *testing.T) {
 	pos := uint64(12345)
 	size := uint64(2028)
 
-	k := benchtop.NewPosValue(pos, size)
-	pPos, pSize := benchtop.ParsePosValue(k)
-	if pos != pPos {
-		t.Errorf("%d != %d", pos, pPos)
+	k := benchtop.EncodeRowLoc(&benchtop.RowLoc{SegmentID: 0, Offset: pos, Size: size})
+	loc := benchtop.DecodeRowLoc(k)
+	if pos != loc.Offset {
+		t.Errorf("%d != %d", pos, loc.Offset)
 	}
-	if size != pSize {
-		t.Errorf("%d != %d", size, pSize)
+	if size != loc.Size {
+		t.Errorf("%d != %d", size, loc.Size)
 	}
 }

@@ -55,9 +55,10 @@ type BulkResponse struct {
 }
 
 type RowLoc struct {
-	Offset uint64
-	Size   uint64
-	Label  uint16
+	SegmentID uint16
+	Offset    uint64
+	Size      uint64
+	Label     uint16
 }
 
 type RowFilter interface {
@@ -70,8 +71,8 @@ type RowFilter interface {
 type TableStore interface {
 	GetColumnDefs() []ColumnDef
 	AddRow(elem Row) (*RowLoc, error)
-	GetRow(loc RowLoc) (map[string]any, error)
-	DeleteRow(loc RowLoc, id []byte) error
+	GetRow(loc *RowLoc) (map[string]any, error)
+	DeleteRow(loc *RowLoc, id []byte) error
 
 	Fetch(inputs chan Index, workers int) <-chan BulkResponse
 	Remove(inputs chan Index, workers int) <-chan BulkResponse
