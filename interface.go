@@ -26,6 +26,31 @@ type ColumnDef struct {
 		 )
 */
 
+type Row struct {
+	Id        []byte
+	TableName string
+	Data      map[string]any
+}
+
+type Index struct {
+	Key []byte
+	Loc RowLoc
+}
+
+type RowLoc struct {
+	TableId uint16
+	Section uint16 // Sectioning allows for smaller Offset, Size
+	Offset  uint32 // Max offset, size is 4GB
+	Size    uint32
+}
+
+type RowFilter interface {
+	Matches(row any) bool
+	GetFilter() any
+	IsNoOp() bool
+	RequiredFields() []string
+}
+
 type TableDriver interface {
 	New(name string, columns []ColumnDef) (TableStore, error)
 	Get(name string) (TableStore, error)
@@ -36,48 +61,13 @@ type TableDriver interface {
 	Close()
 }
 
-type Row struct {
-	Id        []byte
-	TableName string
-	Data      map[string]any
-}
-
-type Index struct {
-	Key      []byte
-	Position uint64
-	Size     uint64
-}
-
-type BulkResponse struct {
-	Key  []byte
-	Data map[string]any
-	Err  string
-}
-
-type RowLoc struct {
-	SegmentID uint16
-	Offset    uint64
-	Size      uint64
-	Label     uint16
-}
-
-type RowFilter interface {
-	Matches(row any) bool
-	GetFilter() any
-	IsNoOp() bool
-	RequiredFields() []string
-}
-
 type TableStore interface {
 	GetColumnDefs() []ColumnDef
 	AddRow(elem Row) (*RowLoc, error)
 	GetRow(loc *RowLoc) (map[string]any, error)
 	DeleteRow(loc *RowLoc, id []byte) error
 
-	Fetch(inputs chan Index, workers int) <-chan BulkResponse
-	Remove(inputs chan Index, workers int) <-chan BulkResponse
 	Scan(key bool, filter RowFilter) chan any
-	Load(chan Row) error
 	Keys() (chan Index, error)
 
 	Compact() error

@@ -28,6 +28,17 @@ func FileExists(path string) bool {
 	return err != os.ErrNotExist
 }
 
+func DirExists(path string) (bool, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return info.IsDir(), nil
+}
+
 func CopyBytes(in []byte) []byte {
 	out := make([]byte, len(in))
 	copy(out, in)

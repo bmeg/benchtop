@@ -89,7 +89,7 @@ These map the user specified ID to a data block specified with offset and size.
 **Value**
 |bytes|0:8|8:16|
 |-|-|---------|
-|type|uint64|uint64|
+|type|uint32|uint32|
 |Desc|offset|size|
 
 
