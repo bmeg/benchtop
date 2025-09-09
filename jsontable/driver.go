@@ -2,7 +2,6 @@ package jsontable
 
 import (
 	"bytes"
-	"context"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -12,35 +11,28 @@ import (
 	"time"
 
 	"github.com/bmeg/benchtop"
+	"github.com/bmeg/benchtop/jsontable/cache"
 	"github.com/bmeg/benchtop/pebblebulk"
 	"github.com/bmeg/benchtop/util"
 	"github.com/bmeg/grip/log"
 	"github.com/bytedance/sonic"
-	"github.com/cockroachdb/pebble"
 	"github.com/hashicorp/go-multierror"
-	"github.com/maypok86/otter/v2"
 )
-
-const BATCH_SIZE = 1000
 
 type JSONDriver struct {
 	base       string
 	Lock       sync.RWMutex
 	PebbleLock sync.RWMutex
-	db         *pebble.DB
-	Pb         *pebblebulk.PebbleKV
-
-	PageCache      *otter.Cache[string, *benchtop.RowLoc]
-	PageLoader     otter.LoaderFunc[string, *benchtop.RowLoc]
-	BulkPageLoader otter.BulkLoaderFunc[string, *benchtop.RowLoc]
+	Pkv        *pebblebulk.PebbleKV
+	LocCache   *cache.JSONCache
 
 	Tables      map[string]*JSONTable
 	LabelLookup map[uint16]string
-	Fields      map[string]map[string]struct{}
+	Fields      map[string]map[string]any
 }
 
 func NewJSONDriver(path string) (benchtop.TableDriver, error) {
-	db, err := pebble.Open(path, &pebble.Options{})
+	Pkv, err := pebblebulk.NewPebbleKV(path)
 	if err != nil {
 		return nil, err
 	}
@@ -52,101 +44,66 @@ func NewJSONDriver(path string) (benchtop.TableDriver, error) {
 	fmt.Println("TABLE DIR: ", tableDir, exist)
 	if !exist {
 		if err := os.Mkdir(tableDir, 0700); err != nil {
-			db.Close()
+			Pkv.Db.Close()
 			return nil, fmt.Errorf("failed to create TABLES directory: %v", err)
 		}
 	}
 
 	driver := &JSONDriver{
 		base:   path,
-		db:     db,
 		Tables: map[string]*JSONTable{},
-		Pb: &pebblebulk.PebbleKV{
-			Db:           db,
+		Pkv: &pebblebulk.PebbleKV{
+			Db:           Pkv.Db,
 			InsertCount:  0,
 			CompactLimit: uint32(1000),
 		},
-		PageCache: otter.Must(&otter.Options[string, *benchtop.RowLoc]{
-			MaximumSize: 10_000_000,
-		}),
-		Fields:      map[string]map[string]struct{}{},
+		LocCache: cache.NewJSONCache(Pkv),
+
+		Fields:      map[string]map[string]any{},
 		Lock:        sync.RWMutex{},
 		PebbleLock:  sync.RWMutex{},
 		LabelLookup: map[uint16]string{},
 	}
 
-	driver.PageLoader = otter.LoaderFunc[string, *benchtop.RowLoc](func(ctx context.Context, key string) (*benchtop.RowLoc, error) {
-		log.Debugln("Cache miss, loading from pebble: ", key)
-		val, closer, err := driver.Pb.Db.Get([]byte(key))
-		if err != nil {
-			if err != pebble.ErrNotFound {
-				log.Errorf("Err on dr.Pb.Get for key %s in CacheLoader: %v", key, err)
-			}
-			return &benchtop.RowLoc{}, err
-		}
-		closer.Close()
-		return benchtop.DecodeRowLoc(val), nil
-	})
-
-	driver.BulkPageLoader = otter.BulkLoaderFunc[string, *benchtop.RowLoc](func(ctx context.Context, keys []string) (map[string]*benchtop.RowLoc, error) {
-		prefix := []byte{benchtop.PosPrefix}
-		result := make(map[string]*benchtop.RowLoc, len(keys))
-		err := driver.Pb.View(func(it *pebblebulk.PebbleIterator) error {
-			for it.Seek(prefix); it.Valid() && bytes.HasPrefix(it.Key(), prefix); it.Next() {
-				tableId, id := benchtop.ParsePosKey(it.Key())
-				val, err := it.Value()
-				if err != nil {
-					log.Errorf("Err on it.Value() in bulkLoader: %v", err)
-					continue
-				}
-				loc := benchtop.DecodeRowLoc(val)
-				loc.TableId = tableId
-				result[string(id)] = loc
-			}
-			return nil
-		})
-		if err != nil {
-			return nil, err
-		}
-		return result, nil
-	})
-
 	return driver, nil
 }
 
+// Update LoadJSONDriver to use DirExists
 func LoadJSONDriver(path string) (benchtop.TableDriver, error) {
-	db, err := pebble.Open(path, &pebble.Options{})
+	pKv, err := pebblebulk.NewPebbleKV(path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %v", err)
 	}
 
 	tableDir := filepath.Join(path, "TABLES")
-	if !util.FileExists(tableDir) {
-		db.Close()
+	exist, err := util.DirExists(tableDir)
+	if err != nil {
+		pKv.Close()
+		return nil, err
+	}
+	if !exist {
+		pKv.Close()
 		return nil, fmt.Errorf("TABLES directory not found at %s", tableDir)
 	}
 
 	driver := &JSONDriver{
 		base:   path,
-		db:     db,
 		Tables: map[string]*JSONTable{},
-		Pb: &pebblebulk.PebbleKV{
-			Db:           db,
+		Pkv: &pebblebulk.PebbleKV{
+			Db:           pKv.Db,
 			InsertCount:  0,
 			CompactLimit: uint32(1000),
 		},
-		Fields:     map[string]map[string]struct{}{},
-		Lock:       sync.RWMutex{},
-		PebbleLock: sync.RWMutex{},
-		PageCache: otter.Must(&otter.Options[string, *benchtop.RowLoc]{
-			MaximumSize: 10_000_000,
-		}),
+		LocCache:    cache.NewJSONCache(pKv),
+		Fields:      map[string]map[string]any{},
+		Lock:        sync.RWMutex{},
+		PebbleLock:  sync.RWMutex{},
 		LabelLookup: map[uint16]string{},
 	}
 
 	err = driver.LoadFields()
 	if err != nil {
-		db.Close()
+		pKv.Close()
 		return nil, err
 	}
 
@@ -167,43 +124,8 @@ func LoadJSONDriver(path string) (benchtop.TableDriver, error) {
 		driver.Lock.Unlock()
 	}
 
-	driver.PageLoader = otter.LoaderFunc[string, *benchtop.RowLoc](func(ctx context.Context, key string) (*benchtop.RowLoc, error) {
-		log.Debugln("Cache miss, loading from pebble: ", key)
-		val, closer, err := driver.Pb.Db.Get([]byte(key))
-		if err != nil {
-			if err != pebble.ErrNotFound {
-				log.Errorf("Err on dr.Pb.Get for key %s in CacheLoader: %v", key, err)
-			}
-			return &benchtop.RowLoc{}, err
-		}
-		closer.Close()
-		return benchtop.DecodeRowLoc(val), nil
-	})
-
-	driver.BulkPageLoader = otter.BulkLoaderFunc[string, *benchtop.RowLoc](func(ctx context.Context, keys []string) (map[string]*benchtop.RowLoc, error) {
-		prefix := []byte{benchtop.PosPrefix}
-		result := make(map[string]*benchtop.RowLoc, len(keys))
-		err := driver.Pb.View(func(it *pebblebulk.PebbleIterator) error {
-			for it.Seek(prefix); it.Valid() && bytes.HasPrefix(it.Key(), prefix); it.Next() {
-				_, id := benchtop.ParsePosKey(it.Key())
-				val, err := it.Value()
-				if err != nil {
-					log.Errorf("Err on it.Value() in bulkLoader: %v", err)
-					continue
-				}
-				loc := benchtop.DecodeRowLoc(val)
-				result[string(id)] = loc
-			}
-			return nil
-		})
-		if err != nil {
-			return nil, err
-		}
-		return result, nil
-	})
-
 	driver.Lock.RLock()
-	err = driver.PreloadCache()
+	err = driver.LocCache.PreloadCache()
 	driver.Lock.RUnlock()
 	if err != nil {
 		return nil, err
@@ -237,13 +159,7 @@ func (dr *JSONDriver) New(name string, columns []benchtop.ColumnDef) (benchtop.T
 		Path:      tPath,
 		Name:      name,
 		FileName:  tPath, // Base name for partition/section files
-		db:        dr.db,
-		Pb: &pebblebulk.PebbleKV{
-			Db:           dr.db,
-			InsertCount:  0,
-			CompactLimit: uint32(1000),
-		},
-		TableId: newId,
+		TableId:   newId,
 	}
 	for n, d := range columns {
 		out.columnMap[d.Key] = n
@@ -271,7 +187,7 @@ func (dr *JSONDriver) New(name string, columns []benchtop.ColumnDef) (benchtop.T
 	}
 
 	if err := out.Init(10); err != nil {
-		log.Errorln("TABLE INIT ERR: %v", err)
+		log.Errorf("TABLE INIT ERR: %v", err)
 		return nil, fmt.Errorf("failed to init table %s: %v", name, err)
 	}
 
@@ -280,10 +196,39 @@ func (dr *JSONDriver) New(name string, columns []benchtop.ColumnDef) (benchtop.T
 	return out, nil
 }
 
+func (dr *JSONDriver) SetIndices(inputs chan benchtop.Index) {
+	dr.Pkv.BulkWrite(func(tx *pebblebulk.PebbleBulk) error {
+		for index := range inputs {
+			dr.AddTableEntryInfo(
+				tx,
+				index.Key,
+				&index.Loc,
+			)
+		}
+		return nil
+	})
+}
+
+func (dr *JSONDriver) ListTableKeys(tableId uint16) (chan benchtop.Index, error) {
+	out := make(chan benchtop.Index, 10)
+	go func() {
+		defer close(out)
+		prefix := benchtop.NewPosKeyPrefix(tableId)
+		dr.Pkv.View(func(it *pebblebulk.PebbleIterator) error {
+			for it.Seek(prefix); it.Valid() && bytes.HasPrefix(it.Key(), prefix); it.Next() {
+				_, value := benchtop.ParsePosKey(it.Key())
+				out <- benchtop.Index{Key: value}
+			}
+			return nil
+		})
+	}()
+	return out, nil
+}
+
 func (dr *JSONDriver) List() []string {
 	out := []string{}
 	prefix := []byte{benchtop.TablePrefix}
-	dr.Pb.View(func(it *pebblebulk.PebbleIterator) error {
+	dr.Pkv.View(func(it *pebblebulk.PebbleIterator) error {
 		for it.Seek(prefix); it.Valid() && bytes.HasPrefix(it.Key(), prefix); it.Next() {
 			value := benchtop.ParseTableKey(it.Key())
 			out = append(out, string(value))
@@ -301,18 +246,17 @@ func (dr *JSONDriver) Close() {
 	for tableName, table := range dr.Tables {
 		table.Close() // Closes all section handles and file pools
 		log.Debugf("Closed table %s", tableName)
-		table.Pb = nil
 	}
 	dr.Tables = make(map[string]*JSONTable)
-	if dr.db != nil {
-		if closeErr := dr.db.Close(); closeErr != nil {
+	if dr.Pkv.Db != nil {
+		if closeErr := dr.Pkv.Db.Close(); closeErr != nil {
 			log.Errorf("Error closing Pebble database: %v", closeErr)
 		}
-		dr.db = nil
+		dr.Pkv.Db = nil
 		time.Sleep(50 * time.Millisecond)
 	}
-	dr.Pb = nil
-	dr.Fields = make(map[string]map[string]struct{})
+	dr.Pkv = nil
+	dr.Fields = make(map[string]map[string]any)
 	log.Infof("Successfully closed JSONDriver for path %s", dr.base)
 }
 
@@ -332,7 +276,7 @@ func (dr *JSONDriver) Get(name string) (benchtop.TableStore, error) {
 	}
 
 	nkey := benchtop.NewTableKey([]byte(name))
-	value, closer, err := dr.db.Get(nkey)
+	value, closer, err := dr.Pkv.Db.Get(nkey)
 	if err != nil {
 		log.Errorln("JSONDriver Get: ", err)
 		return nil, err
@@ -347,17 +291,11 @@ func (dr *JSONDriver) Get(name string) (benchtop.TableStore, error) {
 	tPath := filepath.Join(dr.base, "TABLES", string(tinfo.FileName))
 	out := &JSONTable{
 		columns:   tinfo.Columns,
-		db:        dr.db,
 		columnMap: map[string]int{},
 		TableId:   tinfo.TableId,
 		Path:      tPath,
 		FileName:  tPath,
 		Name:      name,
-		Pb: &pebblebulk.PebbleKV{
-			Db:           dr.db,
-			InsertCount:  0,
-			CompactLimit: uint32(1000),
-		},
 	}
 	for n, d := range out.columns {
 		out.columnMap[d.Key] = n
@@ -400,7 +338,7 @@ func (dr *JSONDriver) Delete(name string) error {
 //
 //	and row location metadata. If nil, an error will be returned.
 func (dr *JSONDriver) BulkLoad(inputs chan *benchtop.Row, tx *pebblebulk.PebbleBulk) error {
-	if dr.Pb == nil || dr.Pb.Db == nil {
+	if dr.Pkv == nil || dr.Pkv.Db == nil {
 		return fmt.Errorf("pebble database instance is nil")
 	}
 
@@ -431,7 +369,7 @@ func (dr *JSONDriver) BulkLoad(inputs chan *benchtop.Row, tx *pebblebulk.PebbleB
 		wg.Add(1)
 
 		go func() {
-			snapshot := dr.Pb.Db.NewSnapshot()
+			snapshot := dr.Pkv.Db.NewSnapshot()
 			defer func() {
 				snapshot.Close()
 				wg.Done()
@@ -547,8 +485,9 @@ func (dr *JSONDriver) BulkLoad(inputs chan *benchtop.Row, tx *pebblebulk.PebbleB
 					sec.Lock.Lock()
 					if sec.LiveBytes+totalDataSize > table.MaxSectionSize {
 						sec.Lock.Unlock() // Unlock old section
-						newSec := table.createNewSection(partitionId)
-						if newSec == nil {
+
+						newSec, err := table.createNewSection(partitionId)
+						if err != nil {
 							localErr = multierror.Append(localErr, fmt.Errorf("failed to create new section for partition %d", partitionId))
 							continue
 						}
@@ -568,7 +507,7 @@ func (dr *JSONDriver) BulkLoad(inputs chan *benchtop.Row, tx *pebblebulk.PebbleB
 					currentPos, currentOffset := 0, uint32(startOffset)
 					for i, bData := range bDatas {
 						nextOffset := currentOffset + ROW_HSIZE + uint32(len(bData))
-						binary.LittleEndian.PutUint32(batchPayload[currentPos:currentPos+int(ROW_OFFSET_HSIZE)], uint32(nextOffset))
+						binary.LittleEndian.PutUint32(batchPayload[currentPos:currentPos+int(ROW_OFFSET_HSIZE)], nextOffset)
 						binary.LittleEndian.PutUint32(batchPayload[currentPos+int(ROW_OFFSET_HSIZE):currentPos+int(ROW_HSIZE)], uint32(len(bData)))
 						copy(batchPayload[currentPos+int(ROW_HSIZE):], bData)
 
@@ -576,7 +515,7 @@ func (dr *JSONDriver) BulkLoad(inputs chan *benchtop.Row, tx *pebblebulk.PebbleB
 						allMetadata[rowIds[i]] = &benchtop.RowLoc{
 							TableId: table.TableId,
 							Section: sec.ID,
-							Offset:  uint32(currentOffset),
+							Offset:  currentOffset,
 							Size:    uint32(len(bData)),
 						}
 						currentOffset = nextOffset
@@ -650,8 +589,8 @@ func (dr *JSONDriver) BulkLoad(inputs chan *benchtop.Row, tx *pebblebulk.PebbleB
 
 				// Write row location entries.
 				for id, m := range meta.metadata {
-					dr.PageCache.Set(id, m)
-					meta.table.AddTableEntryInfo(tx, []byte(id), m)
+					dr.LocCache.Set(id, m)
+					dr.AddTableEntryInfo(tx, []byte(id), m)
 				}
 			}
 			return nil

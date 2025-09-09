@@ -54,6 +54,7 @@ type RowFilter interface {
 type TableDriver interface {
 	New(name string, columns []ColumnDef) (TableStore, error)
 	Get(name string) (TableStore, error)
+	ListTableKeys(tableId uint16) (chan Index, error)
 	GetAllColNames() chan string
 	GetLabels(edges bool, removePrefix bool) chan string
 	List() []string
@@ -68,7 +69,6 @@ type TableStore interface {
 	DeleteRow(loc *RowLoc, id []byte) error
 
 	Scan(key bool, filter RowFilter) chan any
-	Keys() (chan Index, error)
 
 	Compact() error
 	Close()

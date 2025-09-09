@@ -5,8 +5,6 @@ import (
 
 	"github.com/bmeg/benchtop"
 	"github.com/bmeg/benchtop/jsontable/tpath"
-	"github.com/bmeg/benchtop/pebblebulk"
-	"github.com/bmeg/grip/log"
 	"github.com/bmeg/jsonpath"
 	"github.com/cockroachdb/pebble"
 )
@@ -24,7 +22,8 @@ func (b *JSONTable) packData(entry map[string]any, key string) *RowData {
 }
 
 func (b *JSONTable) getTableEntryInfo(snap *pebble.Snapshot, id []byte) (*benchtop.RowLoc, error) {
-	// Really only want to see if anything was returned or not
+	// Really only want to see if anything was returned or not. Since this doesn't interact
+	// with the pebble indices, keep it in JSONTable
 	_, closer, err := snap.Get(benchtop.NewPosKey(b.TableId, id))
 	if err == pebble.ErrNotFound {
 		return nil, nil
@@ -34,23 +33,6 @@ func (b *JSONTable) getTableEntryInfo(snap *pebble.Snapshot, id []byte) (*bencht
 	}
 	defer closer.Close()
 	return &benchtop.RowLoc{}, nil
-}
-
-func (b *JSONTable) AddTableEntryInfo(tx *pebblebulk.PebbleBulk, rowId []byte, rowLoc *benchtop.RowLoc) error {
-	value := benchtop.EncodeRowLoc(rowLoc)
-	posKey := benchtop.NewPosKey(b.TableId, rowId)
-	if tx != nil {
-		err := tx.Set(posKey, value, nil)
-		if err != nil {
-			return err
-		}
-	} else {
-		err := b.Pb.Db.Set(posKey, value, nil)
-		if err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 func PathLookup(v map[string]any, path string) any {
@@ -77,33 +59,4 @@ func (b *JSONTable) unpackData(loadData bool, retId bool, doc *RowData) (any, er
 		doc.Data["_id"] = doc.Key
 	}
 	return doc.Data, nil
-
-}
-
-func (b *JSONTable) GetBlockPos(id []byte) (loc *benchtop.RowLoc, err error) {
-	val, closer, err := b.db.Get(benchtop.NewPosKey(b.TableId, id))
-	if err != nil {
-		if err != pebble.ErrNotFound {
-			log.Errorln("getBlockPos Err: ", err)
-		}
-		return nil, err
-	}
-	defer closer.Close()
-	return benchtop.DecodeRowLoc(val), nil
-}
-
-func (b *JSONTable) setDataIndices(inputs chan benchtop.Index) {
-	b.Pb.BulkWrite(func(tx *pebblebulk.PebbleBulk) error {
-		for index := range inputs {
-			b.AddTableEntryInfo(
-				tx,
-				index.Key,
-				&benchtop.RowLoc{
-					Offset: index.Loc.Offset,
-					Size:   index.Loc.Size,
-				},
-			)
-		}
-		return nil
-	})
 }

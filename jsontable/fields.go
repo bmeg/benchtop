@@ -21,7 +21,7 @@ func (dr *JSONDriver) AddField(label, field string) error {
 	if !ok {
 		log.Debugf("Creating index '%s' for table '%s' that has not been written yet", field, label)
 		// If the table doesn't yet exist, write the index Key stub.
-		err := dr.db.Set(
+		err := dr.Pkv.Set(
 			benchtop.FieldKey(field, label, nil, nil),
 			[]byte{},
 			nil,
@@ -30,7 +30,7 @@ func (dr *JSONDriver) AddField(label, field string) error {
 			log.Errorf("Err attempting to add field %v", err)
 			return err
 		}
-		err = dr.db.Set(
+		err = dr.Pkv.Set(
 			bytes.Join([][]byte{
 				benchtop.RFieldPrefix,
 				[]byte(label),
@@ -46,7 +46,7 @@ func (dr *JSONDriver) AddField(label, field string) error {
 
 	} else {
 		log.Debugf("Found table %s writing indices for field %s", label, field)
-		err := dr.Pb.BulkWrite(func(tx *pebblebulk.PebbleBulk) error {
+		err := dr.Pkv.BulkWrite(func(tx *pebblebulk.PebbleBulk) error {
 			var filter benchtop.RowFilter = nil
 			for r := range foundTable.Scan(true, filter) {
 				fieldValue := PathLookup(r.(map[string]any), field)
@@ -87,7 +87,7 @@ func (dr *JSONDriver) AddField(label, field string) error {
 
 	innerMap, existsLabel := dr.Fields[label]
 	if !existsLabel {
-		innerMap = make(map[string]struct{})
+		innerMap = make(map[string]any)
 		dr.Fields[label] = innerMap
 	}
 	if _, existsField := innerMap[field]; existsField {
@@ -118,7 +118,7 @@ func (dr *JSONDriver) RemoveField(label string, field string) error {
 	}, benchtop.FieldSep)
 
 	// Perform deletion in a bulk write transaction
-	err := dr.Pb.BulkWrite(func(tx *pebblebulk.PebbleBulk) error {
+	err := dr.Pkv.BulkWrite(func(tx *pebblebulk.PebbleBulk) error {
 		if err := tx.DeletePrefix(FieldPrefix); err != nil {
 			return fmt.Errorf("delete field prefix failed: %w", err)
 		}
@@ -141,11 +141,11 @@ func (dr *JSONDriver) LoadFields() error {
 	dr.Lock.Lock()
 	defer dr.Lock.Unlock()
 	count := 0
-	err := dr.Pb.View(func(it *pebblebulk.PebbleIterator) error {
+	err := dr.Pkv.View(func(it *pebblebulk.PebbleIterator) error {
 		for it.Seek(fPrefix); it.Valid() && bytes.HasPrefix(it.Key(), fPrefix); it.Next() {
 			field, label, _, _ := benchtop.FieldKeyParse(it.Key())
 			if _, exists := dr.Fields[label]; !exists {
-				dr.Fields[label] = make(map[string]struct{})
+				dr.Fields[label] = make(map[string]any)
 			}
 			if _, exists := dr.Fields[label][field]; !exists {
 				dr.Fields[label][field] = struct{}{}
@@ -213,7 +213,7 @@ func (dr *JSONDriver) DeleteRowField(label, field, rowID string) error {
 	// Get the field value from the reverse index
 	rowIndexKey := benchtop.RFieldKey(label, field, rowID)
 	var fieldValueBytes []byte
-	err := dr.Pb.View(func(it *pebblebulk.PebbleIterator) error {
+	err := dr.Pkv.View(func(it *pebblebulk.PebbleIterator) error {
 		var err error
 		if it.Seek(rowIndexKey); it.Valid() && bytes.Equal(it.Key(), rowIndexKey) {
 			fieldValueBytes, err = it.Value()
@@ -242,7 +242,7 @@ func (dr *JSONDriver) DeleteRowField(label, field, rowID string) error {
 	fmt.Println("FIELD VALUE ANY: ", fieldValue)
 
 	// Delete both the forward and reverse index entries
-	err = dr.Pb.BulkWrite(func(tx *pebblebulk.PebbleBulk) error {
+	err = dr.Pkv.BulkWrite(func(tx *pebblebulk.PebbleBulk) error {
 		if err := tx.Delete(benchtop.FieldKey(field, label, fieldValue, []byte(rowID)), nil); err != nil {
 			return err
 		}
@@ -271,7 +271,7 @@ func (dr *JSONDriver) RowIdsByHas(fltField string, fltValue any, fltOp gripql.Co
 	out := make(chan string, 100)
 	go func() {
 		defer close(out)
-		err := dr.Pb.View(func(it *pebblebulk.PebbleIterator) error {
+		err := dr.Pkv.View(func(it *pebblebulk.PebbleIterator) error {
 			for it.Seek(prefix); it.Valid() && bytes.HasPrefix(it.Key(), prefix); it.Next() {
 				_, _, value, rowID := benchtop.FieldKeyParse(it.Key())
 				if filters.ApplyFilterCondition(
@@ -301,7 +301,7 @@ func (dr *JSONDriver) RowIdsByLabelFieldValue(fltLabel string, fltField string, 
 	out := make(chan string, 100)
 	go func() {
 		defer close(out)
-		err := dr.Pb.View(func(it *pebblebulk.PebbleIterator) error {
+		err := dr.Pkv.View(func(it *pebblebulk.PebbleIterator) error {
 			for it.Seek(prefix); it.Valid() && bytes.HasPrefix(it.Key(), prefix); it.Next() {
 				_, _, value, rowID := benchtop.FieldKeyParse(it.Key())
 				if filters.ApplyFilterCondition(

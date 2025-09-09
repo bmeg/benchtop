@@ -18,7 +18,7 @@ func (dr *JSONDriver) GetAllColNames() chan string {
 	go func() {
 		defer close(out)
 		prefix := []byte{benchtop.TablePrefix}
-		dr.Pb.View(func(it *pebblebulk.PebbleIterator) error {
+		dr.Pkv.View(func(it *pebblebulk.PebbleIterator) error {
 			for it.Seek(prefix); it.Valid() && bytes.HasPrefix(it.Key(), prefix); it.Next() {
 				info, err := dr.getTableInfo(string(it.Key()))
 				if err != nil {
@@ -42,7 +42,7 @@ func (dr *JSONDriver) GetLabels(edges bool, removePrefix bool) chan string {
 	go func() {
 		defer close(out)
 		prefix := []byte{benchtop.TablePrefix}
-		dr.Pb.View(func(it *pebblebulk.PebbleIterator) error {
+		dr.Pkv.View(func(it *pebblebulk.PebbleIterator) error {
 			for it.Seek(prefix); it.Valid() && bytes.HasPrefix(it.Key(), prefix); it.Next() {
 				strKey := string(benchtop.ParseTableKey(it.Key()))
 				if (edges && strKey[:2] == "e_") || (!edges && strKey[:2] == "v_") {
