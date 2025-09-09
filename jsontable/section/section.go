@@ -6,12 +6,6 @@ import (
 	"sync"
 )
 
-const (
-	SECTION_FILE_SUFFIX string = ".partition"
-	SECTION_ID_MULT     uint16 = 16384
-	HEADER_SIZE         uint32 = 8
-)
-
 // Section represents a physical file within a partition
 type Section struct {
 	ID          uint16        // Global unique section ID (for RowLoc)
@@ -26,10 +20,11 @@ type Section struct {
 	Active      bool          // True unless compacted/merged
 }
 
-func (s *Section) WriteJsonEntryToSection(payload []byte) (uint32, error) {
+func (s *Section) WriteJsonEntryToSection(payload []byte) error {
 	_, err := s.Handle.Write(payload)
 	if err != nil {
-		return 0, fmt.Errorf("failed to write payload: %w", err)
+		return fmt.Errorf("failed to write payload: %w", err)
 	}
-	return uint32(len(payload)) - HEADER_SIZE, nil
+
+	return nil
 }

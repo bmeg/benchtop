@@ -431,20 +431,21 @@ func (dr *JSONDriver) BulkLoad(inputs chan *benchtop.Row, tx *pebblebulk.PebbleB
 					}
 					if info == nil { // Row is new
 						newRows = append(newRows, row)
-						if fields, ok := dr.Fields[tableName]; ok {
-							for field := range fields {
-								if val := tpath.PathLookup(row.Data, field); val != nil { // Assumes PathLookup exists
-									allFieldIndexKeyElements = append(allFieldIndexKeyElements, fieldKeyElements{
-										field:     field,
-										tableName: tableName,
-										val:       val,
-										rowId:     string(row.Id),
-									})
-								}
+					}
+					if fields, ok := dr.Fields[tableName]; ok {
+						for field := range fields {
+							if val := tpath.PathLookup(row.Data, field); val != nil { // Assumes PathLookup exists
+								allFieldIndexKeyElements = append(allFieldIndexKeyElements, fieldKeyElements{
+									field:     field,
+									tableName: tableName,
+									val:       val,
+									rowId:     string(row.Id),
+								})
 							}
 						}
 					}
 				}
+
 				if len(newRows) == 0 {
 					continue
 				}

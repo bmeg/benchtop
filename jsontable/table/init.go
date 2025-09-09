@@ -22,7 +22,6 @@ func (b *JSONTable) Init(poolSize int) error {
 	}
 	b.Sections = map[uint16]*section.Section{}
 	b.PartitionMap = map[uint8][]uint16{}
-	b.MaxSectionSize = MaxSectionSize
 	b.MaxConcurrentSections = uint8(runtime.NumCPU())
 
 	dir := filepath.Dir(b.FileName)
@@ -40,8 +39,8 @@ func (b *JSONTable) Init(poolSize int) error {
 	}
 	var secList []secInfo
 	for _, f := range files {
-		if strings.HasPrefix(f.Name(), base+section.SECTION_FILE_SUFFIX) {
-			parts := strings.Split(strings.TrimPrefix(f.Name(), base+section.SECTION_FILE_SUFFIX), ".section")
+		if strings.HasPrefix(f.Name(), base+SECTION_FILE_SUFFIX) {
+			parts := strings.Split(strings.TrimPrefix(f.Name(), base+SECTION_FILE_SUFFIX), ".section")
 			if len(parts) != 2 {
 				continue
 			}
@@ -71,7 +70,7 @@ func (b *JSONTable) Init(poolSize int) error {
 
 	// Build Sections and PartitionMap
 	for _, s := range secList {
-		secId := uint16(s.pId)*section.SECTION_ID_MULT + uint16(s.localSecId)
+		secId := uint16(s.pId)*SECTION_ID_MULT + uint16(s.localSecId)
 		secPath := filepath.Join(dir, s.fileName)
 
 		sec := &section.Section{

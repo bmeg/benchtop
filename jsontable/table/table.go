@@ -23,8 +23,11 @@ import (
 )
 
 const (
-	MaxSectionSize             = 1 << 29 // 512MB
-	CompactionThreshold        = 0.2     // 20% deleted rows triggers compaction
+	SECTION_FILE_SUFFIX string = ".partition"
+	SECTION_ID_MULT     uint16 = 16384
+	MAX_SECTION_SIZE           = 1 << 29 // 512MB
+	MAX_COMPACT_RATIO          = 0.2     // 20% deleted rows triggers compaction
+	FLUSH_THRESHOLD            = 1000
 )
 
 type JSONTable struct {
@@ -74,15 +77,17 @@ func (b *JSONTable) Close() {
 }
 
 func (b *JSONTable) AddRow(elem benchtop.Row) (*benchtop.RowLoc, error) {
+	// partitionId returned as uint8
 	partitionId := b.PartitionFunc(elem.Id)
-	if partitionId < 0 || partitionId >= uint8(b.NumPartitions) {
+	if int(partitionId) < 0 || partitionId >= uint8(b.NumPartitions) {
 		return nil, fmt.Errorf("invalid partition ID: %d", partitionId)
 	}
 
+	// Ensure partition has at least one section
 	if len(b.PartitionMap[uint8(partitionId)]) == 0 {
 		b.SectionLock.Lock()
-		defer b.SectionLock.Unlock()
 		_, err := b.CreateNewSection(partitionId)
+		b.SectionLock.Unlock()
 		if err != nil {
 			return nil, err
 		}
@@ -94,41 +99,59 @@ func (b *JSONTable) AddRow(elem benchtop.Row) (*benchtop.RowLoc, error) {
 		return nil, fmt.Errorf("section %d not found", secId)
 	}
 
-	// Step 3: Check size, create new section if needed
-	sec.Lock.Lock()
-	if sec.LiveBytes > b.MaxSectionSize {
-		sec.Lock.Unlock()
-		_, err := b.CreateNewSection(partitionId)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create new section for partition %d", partitionId)
-		}
-		sec.Lock.Lock()
-	}
-	defer sec.Lock.Unlock()
-
-	// Step 4: Marshal and write data to section file
+	// Marshal the row payload first so we can compute total size and check section boundaries
 	bData, err := sonic.ConfigFastest.Marshal(b.PackData(elem.Data, string(elem.Id)))
 	if err != nil {
 		return nil, err
 	}
-	offset, err := sec.Handle.Seek(0, io.SeekEnd) // Append to end
+	var totalDataSize uint32 = uint32(len(bData)) + benchtop.ROW_HSIZE
+
+	// Step: lock the section; if it doesn't have room for this entry, create new section
+	sec.Lock.Lock()
+	if sec.LiveBytes+totalDataSize > b.MaxSectionSize {
+		// unlock the old section before creating a new one
+		sec.Lock.Unlock()
+
+		newSec, err := b.CreateNewSection(partitionId)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create new section for partition %d", partitionId)
+		}
+		sec = newSec
+		sec.Lock.Lock()
+	}
+	// we now hold sec.Lock
+	defer sec.Lock.Unlock()
+
+	// Seek to end to get append offset
+	offset64, err := sec.Handle.Seek(0, io.SeekEnd)
 	if err != nil {
 		return nil, err
 	}
+	offset := uint32(offset64) // be careful if >4GB
 
-	writesize, err := sec.WriteJsonEntryToSection(NewSecPayload(uint32(offset), bData))
+	// Compute nextOffset like the bulk writer does: currentOffset + header + data
+	nextOffset := offset + uint32(benchtop.ROW_HSIZE) + uint32(len(bData))
+
+	// Create payload using nextOffset (not current offset) — matches the batch writer format.
+	// If NewSecPayload expects (currentOffset, data) you can change to that, but
+	// to match your BulkLoad approach we pass nextOffset.
+	payload := NewSecPayload(nextOffset, bData)
+
+	// Write the entry
+	err = sec.WriteJsonEntryToSection(payload)
 	if err != nil {
 		log.Errorf("write handler err in AddRow: %v", err)
 		return nil, err
 	}
 
-	// Step 5: Update stats and RowLoc
+	// Update stats and return RowLoc using starting offset and size (size is data length)
 	sec.TotalRows++
-	sec.LiveBytes += (writesize + benchtop.ROW_HSIZE)
+	sec.LiveBytes += totalDataSize
+
 	loc := &benchtop.RowLoc{
 		Section: sec.ID,
-		Offset:  uint32(offset),
-		Size:    writesize,
+		Offset:  offset,
+		Size:    uint32(len(bData)),
 		TableId: b.TableId,
 	}
 	return loc, nil
@@ -140,7 +163,7 @@ func (b *JSONTable) CreateNewSection(partitionId uint8) (*section.Section, error
 
 	secId := uint16(len(b.Sections))               // Global unique ID
 	localSecId := len(b.PartitionMap[partitionId]) // Local to partition
-	path := fmt.Sprintf("%s%s%d.section%d", b.FileName, section.SECTION_FILE_SUFFIX, partitionId, localSecId)
+	path := fmt.Sprintf("%s%s%d.section%d", b.FileName, SECTION_FILE_SUFFIX, partitionId, localSecId)
 	handle, err := os.Create(path)
 	if err != nil {
 		log.Errorf("Failed to create section file %s: %v", path, err)
@@ -172,8 +195,9 @@ func (b *JSONTable) CreateNewSection(partitionId uint8) (*section.Section, error
 func NewSecPayload(offset uint32, data []byte) []byte {
 	dataLen := uint32(len(data))
 	payload := make([]byte, benchtop.ROW_HSIZE+dataLen)
-	binary.LittleEndian.PutUint32(payload[:benchtop.ROW_OFFSET_HSIZE], offset+benchtop.ROW_HSIZE)
-	binary.LittleEndian.PutUint32(payload[benchtop.ROW_OFFSET_HSIZE:], dataLen)
+	nextOffset := offset + benchtop.ROW_HSIZE + dataLen
+	binary.LittleEndian.PutUint32(payload[:benchtop.ROW_OFFSET_HSIZE], nextOffset)
+	binary.LittleEndian.PutUint32(payload[benchtop.ROW_OFFSET_HSIZE:benchtop.ROW_HSIZE], dataLen)
 	copy(payload[benchtop.ROW_HSIZE:], data)
 	return payload
 }
@@ -269,8 +293,8 @@ func (b *JSONTable) Scan(loadData bool, filter benchtop.RowFilter) chan any {
 				handle := <-sec.FilePool
 				defer func() {
 					<-sem
-					wg.Done()
 					sec.FilePool <- handle
+					wg.Done()
 				}()
 
 				fileInfo, err := handle.Stat()
@@ -310,9 +334,15 @@ func (b *JSONTable) Scan(loadData bool, filter benchtop.RowFilter) chan any {
 						continue
 					}
 
+					/*if bSize == 0 || bSize == nextOffset-benchtop.ROW_HSIZE {
+						offset = nextOffset
+						continue
+					}*/
+
 					jsonStart := offset + benchtop.ROW_HSIZE
 					jsonEnd := jsonStart + bSize
 					// Ensure the row data fits within the file
+					fmt.Println("START: ", jsonStart, "END: ", jsonEnd, "SEC: ", sec.ID)
 					if jsonEnd > uint32(len(m)) {
 						log.Debugf("Incomplete record at section %d, offset %d", sec.ID, offset)
 						break
@@ -332,7 +362,11 @@ func (b *JSONTable) Scan(loadData bool, filter benchtop.RowFilter) chan any {
 			}(sec)
 		}
 	}
-	go func() { wg.Wait(); close(outChan) }()
+	go func() {
+		wg.Wait()
+		close(outChan)
+	}()
+
 	return outChan
 }
 
@@ -387,7 +421,6 @@ func (b *JSONTable) CompactSection(secId uint16) error {
 	sec.Lock.Lock()
 	defer sec.Lock.Unlock()
 
-	const flushThreshold = 1000
 	flushCounter := 0
 	tempFileName := sec.Path + ".compact"
 	tempHandle, err := os.Create(tempFileName)
@@ -466,7 +499,7 @@ func (b *JSONTable) CompactSection(secId uint16) error {
 		}
 
 		flushCounter++
-		if flushCounter%flushThreshold == 0 {
+		if flushCounter%FLUSH_THRESHOLD == 0 {
 			if err := writer.Flush(); err != nil {
 				return fmt.Errorf("failed flushing writer: %w", err)
 			}
@@ -525,7 +558,7 @@ func (b *JSONTable) CompactSection(secId uint16) error {
 func (b *JSONTable) Compact() error {
 	var errs *multierror.Error
 	for secId, sec := range b.Sections {
-		if float64(sec.DeletedRows)/float64(sec.TotalRows) > CompactionThreshold {
+		if float64(sec.DeletedRows)/float64(sec.TotalRows) > MAX_COMPACT_RATIO {
 			if err := b.CompactSection(secId); err != nil {
 				errs = multierror.Append(errs, err)
 			}
