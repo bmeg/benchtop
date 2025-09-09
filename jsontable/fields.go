@@ -9,6 +9,7 @@ import (
 	"github.com/bytedance/sonic"
 
 	"github.com/bmeg/benchtop/filters"
+	"github.com/bmeg/benchtop/jsontable/tpath"
 	"github.com/bmeg/benchtop/pebblebulk"
 	"github.com/bmeg/grip/gripql"
 )
@@ -49,7 +50,7 @@ func (dr *JSONDriver) AddField(label, field string) error {
 		err := dr.Pkv.BulkWrite(func(tx *pebblebulk.PebbleBulk) error {
 			var filter benchtop.RowFilter = nil
 			for r := range foundTable.Scan(true, filter) {
-				fieldValue := PathLookup(r.(map[string]any), field)
+				fieldValue := tpath.PathLookup(r.(map[string]any), field)
 				rowId, ok := r.(map[string]any)["_id"].(string)
 				if !ok {
 					return fmt.Errorf("_id field not found or is not string in map %s", r)

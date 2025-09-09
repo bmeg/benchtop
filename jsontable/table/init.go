@@ -1,4 +1,4 @@
-package jsontable
+package table
 
 import (
 	"fmt"
@@ -106,7 +106,7 @@ func (b *JSONTable) Init(poolSize int) error {
 	// Ensure at least one section per partition
 	for pId := uint8(0); pId < uint8(b.NumPartitions); pId++ {
 		if len(b.PartitionMap[pId]) == 0 {
-			_, err := b.createNewSection(pId)
+			_, err := b.CreateNewSection(pId)
 			if err != nil {
 				return err
 			}

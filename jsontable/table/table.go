@@ -1,4 +1,4 @@
-package jsontable
+package table
 
 import (
 	"bufio"
@@ -25,15 +25,12 @@ import (
 const (
 	MaxSectionSize             = 1 << 29 // 512MB
 	CompactionThreshold        = 0.2     // 20% deleted rows triggers compaction
-	ROW_HSIZE           uint32 = 8       // Header size: 8-byte next offset + 4-byte size
-	ROW_OFFSET_HSIZE    uint32 = 4       // Offset part of header
-	BATCH_SIZE                 = 1000
 )
 
 type JSONTable struct {
 	// Artifact arguments
-	columns   []benchtop.ColumnDef
-	columnMap map[string]int
+	Columns   []benchtop.ColumnDef
+	ColumnMap map[string]int
 
 	TableId  uint16
 	Path     string // Base path (for legacy single file)
@@ -85,7 +82,7 @@ func (b *JSONTable) AddRow(elem benchtop.Row) (*benchtop.RowLoc, error) {
 	if len(b.PartitionMap[uint8(partitionId)]) == 0 {
 		b.SectionLock.Lock()
 		defer b.SectionLock.Unlock()
-		_, err := b.createNewSection(partitionId)
+		_, err := b.CreateNewSection(partitionId)
 		if err != nil {
 			return nil, err
 		}
@@ -101,7 +98,7 @@ func (b *JSONTable) AddRow(elem benchtop.Row) (*benchtop.RowLoc, error) {
 	sec.Lock.Lock()
 	if sec.LiveBytes > b.MaxSectionSize {
 		sec.Lock.Unlock()
-		_, err := b.createNewSection(partitionId)
+		_, err := b.CreateNewSection(partitionId)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create new section for partition %d", partitionId)
 		}
@@ -110,7 +107,7 @@ func (b *JSONTable) AddRow(elem benchtop.Row) (*benchtop.RowLoc, error) {
 	defer sec.Lock.Unlock()
 
 	// Step 4: Marshal and write data to section file
-	bData, err := sonic.ConfigFastest.Marshal(b.packData(elem.Data, string(elem.Id)))
+	bData, err := sonic.ConfigFastest.Marshal(b.PackData(elem.Data, string(elem.Id)))
 	if err != nil {
 		return nil, err
 	}
@@ -127,7 +124,7 @@ func (b *JSONTable) AddRow(elem benchtop.Row) (*benchtop.RowLoc, error) {
 
 	// Step 5: Update stats and RowLoc
 	sec.TotalRows++
-	sec.LiveBytes += (writesize + ROW_HSIZE)
+	sec.LiveBytes += (writesize + benchtop.ROW_HSIZE)
 	loc := &benchtop.RowLoc{
 		Section: sec.ID,
 		Offset:  uint32(offset),
@@ -137,7 +134,7 @@ func (b *JSONTable) AddRow(elem benchtop.Row) (*benchtop.RowLoc, error) {
 	return loc, nil
 }
 
-func (b *JSONTable) createNewSection(partitionId uint8) (*section.Section, error) {
+func (b *JSONTable) CreateNewSection(partitionId uint8) (*section.Section, error) {
 	b.SectionLock.Lock()
 	defer b.SectionLock.Unlock()
 
@@ -174,10 +171,10 @@ func (b *JSONTable) createNewSection(partitionId uint8) (*section.Section, error
 
 func NewSecPayload(offset uint32, data []byte) []byte {
 	dataLen := uint32(len(data))
-	payload := make([]byte, ROW_HSIZE+dataLen)
-	binary.LittleEndian.PutUint32(payload[:ROW_OFFSET_HSIZE], offset+ROW_HSIZE)
-	binary.LittleEndian.PutUint32(payload[ROW_OFFSET_HSIZE:], dataLen)
-	copy(payload[ROW_HSIZE:], data)
+	payload := make([]byte, benchtop.ROW_HSIZE+dataLen)
+	binary.LittleEndian.PutUint32(payload[:benchtop.ROW_OFFSET_HSIZE], offset+benchtop.ROW_HSIZE)
+	binary.LittleEndian.PutUint32(payload[benchtop.ROW_OFFSET_HSIZE:], dataLen)
+	copy(payload[benchtop.ROW_HSIZE:], data)
 	return payload
 }
 
@@ -190,7 +187,7 @@ func (b *JSONTable) GetRow(loc *benchtop.RowLoc) (map[string]any, error) {
 	file := <-sec.FilePool
 	defer func() { sec.FilePool <- file }()
 
-	_, err := file.Seek(int64(loc.Offset+ROW_HSIZE), io.SeekStart)
+	_, err := file.Seek(int64(loc.Offset+benchtop.ROW_HSIZE), io.SeekStart)
 	if err != nil {
 		return nil, err
 	}
@@ -220,7 +217,7 @@ func (b *JSONTable) MarkDeleteTable(loc *benchtop.RowLoc) error {
 	file := <-sec.FilePool
 	defer func() { sec.FilePool <- file }()
 
-	_, err := file.WriteAt(bytes.Repeat([]byte{0x00}, 4), int64(loc.Offset+ROW_OFFSET_HSIZE))
+	_, err := file.WriteAt(bytes.Repeat([]byte{0x00}, 4), int64(loc.Offset+benchtop.ROW_OFFSET_HSIZE))
 	if err != nil {
 		return fmt.Errorf("writeAt failed: %w", err)
 	}
@@ -240,7 +237,7 @@ func (b *JSONTable) DeleteRow(loc *benchtop.RowLoc, id []byte) error {
 	sec.Lock.Lock()
 	defer sec.Lock.Unlock()
 
-	_, err := sec.Handle.WriteAt(bytes.Repeat([]byte{0x00}, 4), int64(loc.Offset+ROW_OFFSET_HSIZE))
+	_, err := sec.Handle.WriteAt(bytes.Repeat([]byte{0x00}, 4), int64(loc.Offset+benchtop.ROW_OFFSET_HSIZE))
 	if err != nil {
 		return fmt.Errorf("writeAt failed: %w", err)
 	}
@@ -299,10 +296,10 @@ func (b *JSONTable) Scan(loadData bool, filter benchtop.RowFilter) chan any {
 				defer m.Unmap()
 
 				var offset uint32 = 0
-				for offset+ROW_HSIZE <= uint32(len(m)) {
-					header := m[offset : offset+ROW_HSIZE]
-					nextOffset := binary.LittleEndian.Uint32(header[:ROW_OFFSET_HSIZE])
-					bSize := binary.LittleEndian.Uint32(header[ROW_OFFSET_HSIZE:ROW_HSIZE])
+				for offset+benchtop.ROW_HSIZE <= uint32(len(m)) {
+					header := m[offset : offset+benchtop.ROW_HSIZE]
+					nextOffset := binary.LittleEndian.Uint32(header[:benchtop.ROW_OFFSET_HSIZE])
+					bSize := binary.LittleEndian.Uint32(header[benchtop.ROW_OFFSET_HSIZE:benchtop.ROW_HSIZE])
 
 					// Skip deleted rows (bSize == 0)
 					if bSize == 0 {
@@ -313,7 +310,7 @@ func (b *JSONTable) Scan(loadData bool, filter benchtop.RowFilter) chan any {
 						continue
 					}
 
-					jsonStart := offset + ROW_HSIZE
+					jsonStart := offset + benchtop.ROW_HSIZE
 					jsonEnd := jsonStart + bSize
 					// Ensure the row data fits within the file
 					if jsonEnd > uint32(len(m)) {
@@ -419,19 +416,19 @@ func (b *JSONTable) CompactSection(secId uint16) error {
 	*/
 
 	var offset uint32 = 0
-	for offset+ROW_HSIZE <= uint32(len(m)) {
-		header := m[offset : offset+ROW_HSIZE]
-		nextOffset := binary.LittleEndian.Uint32(header[:ROW_OFFSET_HSIZE])
-		bSize := binary.LittleEndian.Uint32(header[ROW_OFFSET_HSIZE:ROW_HSIZE])
+	for offset+benchtop.ROW_HSIZE <= uint32(len(m)) {
+		header := m[offset : offset+benchtop.ROW_HSIZE]
+		nextOffset := binary.LittleEndian.Uint32(header[:benchtop.ROW_OFFSET_HSIZE])
+		bSize := binary.LittleEndian.Uint32(header[benchtop.ROW_OFFSET_HSIZE:benchtop.ROW_HSIZE])
 
-		if bSize == 0 || int64(nextOffset) == int64(ROW_HSIZE) {
+		if bSize == 0 || int64(nextOffset) == int64(benchtop.ROW_HSIZE) {
 			if int64(nextOffset) > int64(offset) {
 				offset = nextOffset
 			}
 			continue
 		}
 
-		jsonStart := offset + ROW_HSIZE
+		jsonStart := offset + benchtop.ROW_HSIZE
 		jsonEnd := jsonStart + bSize
 		if jsonEnd > uint32(len(m)) {
 			return fmt.Errorf("incomplete JSON data at section %d, offset %d, size %d", sec.ID, offset, bSize)
@@ -457,8 +454,8 @@ func (b *JSONTable) CompactSection(secId uint16) error {
 		}
 		inputChan <- benchtop.Index{Key: []byte(key), Loc: benchtop.RowLoc{Offset: newOffset, Size: bSize}}
 
-		newOffsetBytes := make([]byte, ROW_OFFSET_HSIZE)
-		binary.LittleEndian.PutUint32(newOffsetBytes, newOffset+bSize+ROW_HSIZE)
+		newOffsetBytes := make([]byte, benchtop.ROW_OFFSET_HSIZE)
+		binary.LittleEndian.PutUint32(newOffsetBytes, newOffset+bSize+benchtop.ROW_HSIZE)
 		_, err = writer.Write(newOffsetBytes)
 		if err != nil {
 			return fmt.Errorf("failed writing new offset at %d: %w", newOffset, err)
@@ -474,7 +471,7 @@ func (b *JSONTable) CompactSection(secId uint16) error {
 				return fmt.Errorf("failed flushing writer: %w", err)
 			}
 		}
-		newOffset += bSize + ROW_HSIZE
+		newOffset += bSize + benchtop.ROW_HSIZE
 	}
 	close(inputChan)
 	//wg.Wait()
@@ -559,5 +556,5 @@ func ConvertJSONPathToArray(path string) ([]any, error) {
 }
 
 func (b *JSONTable) GetColumnDefs() []benchtop.ColumnDef {
-	return b.columns
+	return b.Columns
 }

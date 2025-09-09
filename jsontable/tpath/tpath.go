@@ -2,10 +2,25 @@ package tpath
 
 import (
 	"strings"
+
+	"github.com/bmeg/jsonpath"
 )
 
 // Current represents the 'current' traveler namespace
 const CURRENT = "_current"
+
+func PathLookup(v map[string]any, path string) any {
+	/* Expects that special fields like '_id' and '_label'
+	   are added to the map before reaching this function
+	*/
+	field := NormalizePath(path)
+	jpath := ToLocalPath(field)
+	res, err := jsonpath.JsonPathLookup(v, jpath)
+	if err != nil {
+		return nil
+	}
+	return res
+}
 
 // GetNamespace returns the namespace of the provided path
 //

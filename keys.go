@@ -8,6 +8,11 @@ import (
 	"github.com/bmeg/grip/log"
 )
 
+const (
+	ROW_HSIZE        uint32 = 8 // Header size: 8-byte next offset + 4-byte size
+	ROW_OFFSET_HSIZE uint32 = 4 // Offset part of header
+)
+
 // Vertex TableId
 // key: T | TableId | VtablePrefix'
 // The starting point for vertex table ids in th pebble index

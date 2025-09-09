@@ -12,11 +12,17 @@ import (
 
 	"github.com/bmeg/benchtop"
 	"github.com/bmeg/benchtop/jsontable/cache"
+	jTable "github.com/bmeg/benchtop/jsontable/table"
+	"github.com/bmeg/benchtop/jsontable/tpath"
 	"github.com/bmeg/benchtop/pebblebulk"
 	"github.com/bmeg/benchtop/util"
 	"github.com/bmeg/grip/log"
 	"github.com/bytedance/sonic"
 	"github.com/hashicorp/go-multierror"
+)
+
+const (
+	BATCH_SIZE = 1000
 )
 
 type JSONDriver struct {
@@ -26,7 +32,7 @@ type JSONDriver struct {
 	Pkv        *pebblebulk.PebbleKV
 	LocCache   *cache.JSONCache
 
-	Tables      map[string]*JSONTable
+	Tables      map[string]*jTable.JSONTable
 	LabelLookup map[uint16]string
 	Fields      map[string]map[string]any
 }
@@ -51,7 +57,7 @@ func NewJSONDriver(path string) (benchtop.TableDriver, error) {
 
 	driver := &JSONDriver{
 		base:   path,
-		Tables: map[string]*JSONTable{},
+		Tables: map[string]*jTable.JSONTable{},
 		Pkv: &pebblebulk.PebbleKV{
 			Db:           Pkv.Db,
 			InsertCount:  0,
@@ -88,7 +94,7 @@ func LoadJSONDriver(path string) (benchtop.TableDriver, error) {
 
 	driver := &JSONDriver{
 		base:   path,
-		Tables: map[string]*JSONTable{},
+		Tables: map[string]*jTable.JSONTable{},
 		Pkv: &pebblebulk.PebbleKV{
 			Db:           pKv.Db,
 			InsertCount:  0,
@@ -113,7 +119,7 @@ func LoadJSONDriver(path string) (benchtop.TableDriver, error) {
 			driver.Close()
 			return nil, fmt.Errorf("failed to load table %s: %v", tableName, err)
 		}
-		jsonTable, ok := table.(*JSONTable)
+		jsonTable, ok := table.(*jTable.JSONTable)
 		if !ok {
 			driver.Close()
 			return nil, fmt.Errorf("invalid table type for %s", tableName)
@@ -153,16 +159,16 @@ func (dr *JSONDriver) New(name string, columns []benchtop.ColumnDef) (benchtop.T
 	formattedName := util.PadToSixDigits(int(newId))
 	tPath := filepath.Join(dr.base, "TABLES", formattedName)
 
-	out := &JSONTable{
-		columns:   columns,
-		columnMap: map[string]int{},
+	out := &jTable.JSONTable{
+		Columns:   columns,
+		ColumnMap: map[string]int{},
 		Path:      tPath,
 		Name:      name,
 		FileName:  tPath, // Base name for partition/section files
 		TableId:   newId,
 	}
 	for n, d := range columns {
-		out.columnMap[d.Key] = n
+		out.ColumnMap[d.Key] = n
 	}
 
 	dr.LabelLookup[newId] = name[2:]
@@ -247,7 +253,7 @@ func (dr *JSONDriver) Close() {
 		table.Close() // Closes all section handles and file pools
 		log.Debugf("Closed table %s", tableName)
 	}
-	dr.Tables = make(map[string]*JSONTable)
+	dr.Tables = make(map[string]*jTable.JSONTable)
 	if dr.Pkv.Db != nil {
 		if closeErr := dr.Pkv.Db.Close(); closeErr != nil {
 			log.Errorf("Error closing Pebble database: %v", closeErr)
@@ -289,16 +295,16 @@ func (dr *JSONDriver) Get(name string) (benchtop.TableStore, error) {
 
 	log.Debugf("Opening Table: %#v\n", tinfo)
 	tPath := filepath.Join(dr.base, "TABLES", string(tinfo.FileName))
-	out := &JSONTable{
-		columns:   tinfo.Columns,
-		columnMap: map[string]int{},
+	out := &jTable.JSONTable{
+		Columns:   tinfo.Columns,
+		ColumnMap: map[string]int{},
 		TableId:   tinfo.TableId,
 		Path:      tPath,
 		FileName:  tPath,
 		Name:      name,
 	}
-	for n, d := range out.columns {
-		out.columnMap[d.Key] = n
+	for n, d := range out.Columns {
+		out.ColumnMap[d.Key] = n
 	}
 
 	if err := out.Init(10); err != nil {
@@ -356,7 +362,7 @@ func (dr *JSONDriver) BulkLoad(inputs chan *benchtop.Row, tx *pebblebulk.PebbleB
 	// metadataChan is used to pass results from table-specific processing
 	// goroutines to a single writer goroutine.
 	metadataChan := make(chan struct {
-		table                 *JSONTable
+		table                 *jTable.JSONTable
 		fieldIndexKeyElements []fieldKeyElements
 		metadata              map[string]*benchtop.RowLoc
 		err                   error
@@ -388,14 +394,14 @@ func (dr *JSONDriver) BulkLoad(inputs chan *benchtop.Row, tx *pebblebulk.PebbleB
 				if err != nil {
 					localErr = multierror.Append(localErr, fmt.Errorf("failed to create table %s: %v", tableName, err))
 					metadataChan <- struct {
-						table                 *JSONTable
+						table                 *jTable.JSONTable
 						fieldIndexKeyElements []fieldKeyElements
 						metadata              map[string]*benchtop.RowLoc
 						err                   error
 					}{nil, nil, nil, localErr.ErrorOrNil()}
 					return
 				}
-				table = newTable.(*JSONTable)
+				table = newTable.(*jTable.JSONTable)
 				dr.Lock.Lock()
 				dr.Tables[tableName] = table
 				dr.Lock.Unlock()
@@ -418,7 +424,7 @@ func (dr *JSONDriver) BulkLoad(inputs chan *benchtop.Row, tx *pebblebulk.PebbleB
 				// Filter out existing rows and gather index data for new rows.
 				newRows := make([]*benchtop.Row, 0, len(batch))
 				for _, row := range batch {
-					info, err := table.getTableEntryInfo(snapshot, row.Id) // Assumes this function exists
+					info, err := table.GetTableEntryInfo(snapshot, row.Id) // Assumes this function exists
 					if err != nil {
 						localErr = multierror.Append(localErr, fmt.Errorf("error getting entry info for %s: %v", row.Id, err))
 						continue
@@ -427,7 +433,7 @@ func (dr *JSONDriver) BulkLoad(inputs chan *benchtop.Row, tx *pebblebulk.PebbleB
 						newRows = append(newRows, row)
 						if fields, ok := dr.Fields[tableName]; ok {
 							for field := range fields {
-								if val := PathLookup(row.Data, field); val != nil { // Assumes PathLookup exists
+								if val := tpath.PathLookup(row.Data, field); val != nil { // Assumes PathLookup exists
 									allFieldIndexKeyElements = append(allFieldIndexKeyElements, fieldKeyElements{
 										field:     field,
 										tableName: tableName,
@@ -462,14 +468,14 @@ func (dr *JSONDriver) BulkLoad(inputs chan *benchtop.Row, tx *pebblebulk.PebbleB
 
 					// Marshal all data for this partition's batch.
 					for _, row := range rowsInPartition {
-						bData, err := sonic.ConfigFastest.Marshal(table.packData(row.Data, string(row.Id)))
+						bData, err := sonic.ConfigFastest.Marshal(table.PackData(row.Data, string(row.Id)))
 						if err != nil {
 							localErr = multierror.Append(localErr, fmt.Errorf("marshal error for row %s: %v", row.Id, err))
 							continue
 						}
 						bDatas = append(bDatas, bData)
 						rowIds = append(rowIds, string(row.Id))
-						totalDataSize += uint32(len(bData)) + ROW_HSIZE
+						totalDataSize += uint32(len(bData)) + benchtop.ROW_HSIZE
 					}
 					if len(bDatas) == 0 {
 						continue
@@ -486,7 +492,7 @@ func (dr *JSONDriver) BulkLoad(inputs chan *benchtop.Row, tx *pebblebulk.PebbleB
 					if sec.LiveBytes+totalDataSize > table.MaxSectionSize {
 						sec.Lock.Unlock() // Unlock old section
 
-						newSec, err := table.createNewSection(partitionId)
+						newSec, err := table.CreateNewSection(partitionId)
 						if err != nil {
 							localErr = multierror.Append(localErr, fmt.Errorf("failed to create new section for partition %d", partitionId))
 							continue
@@ -506,10 +512,10 @@ func (dr *JSONDriver) BulkLoad(inputs chan *benchtop.Row, tx *pebblebulk.PebbleB
 					batchPayload := make([]byte, totalDataSize)
 					currentPos, currentOffset := 0, uint32(startOffset)
 					for i, bData := range bDatas {
-						nextOffset := currentOffset + ROW_HSIZE + uint32(len(bData))
-						binary.LittleEndian.PutUint32(batchPayload[currentPos:currentPos+int(ROW_OFFSET_HSIZE)], nextOffset)
-						binary.LittleEndian.PutUint32(batchPayload[currentPos+int(ROW_OFFSET_HSIZE):currentPos+int(ROW_HSIZE)], uint32(len(bData)))
-						copy(batchPayload[currentPos+int(ROW_HSIZE):], bData)
+						nextOffset := currentOffset + benchtop.ROW_HSIZE + uint32(len(bData))
+						binary.LittleEndian.PutUint32(batchPayload[currentPos:currentPos+int(benchtop.ROW_OFFSET_HSIZE)], nextOffset)
+						binary.LittleEndian.PutUint32(batchPayload[currentPos+int(benchtop.ROW_OFFSET_HSIZE):currentPos+int(benchtop.ROW_HSIZE)], uint32(len(bData)))
+						copy(batchPayload[currentPos+int(benchtop.ROW_HSIZE):], bData)
 
 						// Record metadata (including the new Section ID).
 						allMetadata[rowIds[i]] = &benchtop.RowLoc{
@@ -519,7 +525,7 @@ func (dr *JSONDriver) BulkLoad(inputs chan *benchtop.Row, tx *pebblebulk.PebbleB
 							Size:    uint32(len(bData)),
 						}
 						currentOffset = nextOffset
-						currentPos += int(ROW_HSIZE) + len(bData)
+						currentPos += int(benchtop.ROW_HSIZE) + len(bData)
 					}
 
 					if _, err := sec.Handle.Write(batchPayload); err != nil {
@@ -537,7 +543,7 @@ func (dr *JSONDriver) BulkLoad(inputs chan *benchtop.Row, tx *pebblebulk.PebbleB
 
 			// Send all collected metadata for this table to the writer.
 			metadataChan <- struct {
-				table                 *JSONTable
+				table                 *jTable.JSONTable
 				fieldIndexKeyElements []fieldKeyElements
 				metadata              map[string]*benchtop.RowLoc
 				err                   error

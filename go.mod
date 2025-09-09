@@ -17,7 +17,6 @@ require (
 	github.com/akuity/grpc-gateway-client v0.0.0-20231116134900-80c401329778 // indirect
 	github.com/alevinval/sse v1.0.2 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
-	github.com/bytedance/sonic v1.13.3 // indirect
 	github.com/bytedance/sonic/loader v0.2.4 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/cloudwego/base64x v0.1.5 // indirect
@@ -66,6 +65,7 @@ require (
 require (
 	github.com/bmeg/hnsw-index v0.0.0-20241122200324-94f3a5eb1f59
 	github.com/bmeg/jsonpath v0.0.0-20210207014051-cca5355553ad
+	github.com/bytedance/sonic v1.13.3
 	github.com/cockroachdb/pebble v1.1.2
 	github.com/edsrzf/mmap-go v1.2.0
 	github.com/hashicorp/go-multierror v1.1.1
