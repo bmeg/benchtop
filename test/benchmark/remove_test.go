@@ -54,9 +54,9 @@ func BenchmarkRemove(b *testing.B) {
 	}
 	b.Log("Load completed successfully")
 
-	bT, _ := compactjsonTable.(*jsontable.JSONTable)
-	pKey := benchtop.NewPosKey(bT.TableId, []byte("key_5"))
-	val, closer, err := bT.Pb.Db.Get(pKey)
+	jT, _ := compactjsonTable.(*jsontable.JSONTable)
+	pKey := benchtop.NewPosKey(jT.TableId, []byte("key_5"))
+	val, closer, err := jT.Pb.Db.Get(pKey)
 	if err != nil {
 		if err != pebble.ErrNotFound {
 			log.Errorf("Err on dr.Pb.Get for key %s in CacheLoader: %v", pKey, err)

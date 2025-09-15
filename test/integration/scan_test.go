@@ -9,6 +9,8 @@ import (
 	"github.com/bmeg/benchtop"
 	"github.com/bmeg/benchtop/filters"
 	"github.com/bmeg/benchtop/jsontable"
+	jTable "github.com/bmeg/benchtop/jsontable/table"
+
 	"github.com/bmeg/benchtop/test/fixtures"
 	"github.com/bmeg/grip/gripql"
 
@@ -91,6 +93,8 @@ func TestScan(t *testing.T) {
 		t.Error(err)
 	}
 
+	jR,_ dr.(jsontable.*JSONDriver)
+
 	ts, err := dr.New("table_1", []benchtop.ColumnDef{
 		{Key: "field1"},
 		{Key: "name"},
@@ -99,16 +103,16 @@ func TestScan(t *testing.T) {
 		t.Error(err)
 	}
 
-	bT, _ := ts.(*jsontable.JSONTable)
+	jT, _ := ts.(*jTable.JSONTable)
 	for k, r := range fixtures.ScanData {
-		loc, err := bT.AddRow(benchtop.Row{Id: []byte(k), Data: r})
+		loc, err := jT.AddRow(benchtop.Row{Id: []byte(k), Data: r})
 		if err != nil {
 			t.Error(err)
 		}
 		if loc.Offset == 0 || loc.Size == 0 {
 			t.Error(fmt.Errorf("expecting Offset and Size to be populated but got %d and %d instead", loc.Offset, loc.Size))
 		}
-		err = bT.AddTableEntryInfo(nil, []byte(k), loc)
+		err = jT.AddTableEntryInfo(nil, []byte(k), loc)
 		if err != nil {
 			t.Error(err)
 		}
@@ -116,7 +120,7 @@ func TestScan(t *testing.T) {
 
 	filters1 := FieldFilters{filters.FieldFilter{Field: "name", Operator: gripql.Condition_EQ, Value: "alice"}}
 	lenscanChan1 := 0
-	for elem := range bT.Scan(true, filters1) {
+	for elem := range jT.Scan(true, filters1) {
 		lenscanChan1++
 		t.Log("scanChan: ", elem)
 		if elem.(map[string]any)["name"] != "alice" {
@@ -132,7 +136,7 @@ func TestScan(t *testing.T) {
 
 	// Second test case: "field1" == 0.2
 	filters2 := FieldFilters{filters.FieldFilter{Field: "field1", Operator: gripql.Condition_EQ, Value: 0.2}}
-	scanChan2 := bT.Scan(true, filters2)
+	scanChan2 := jT.Scan(true, filters2)
 
 	for elem := range scanChan2 {
 		t.Log("scanChantwo: ", elem)
@@ -153,7 +157,7 @@ func TestScan(t *testing.T) {
 
 	// Third test case: "field1" > 0.2
 	filters3 := FieldFilters{filters.FieldFilter{Field: "field1", Operator: gripql.Condition_GT, Value: 0.2}}
-	scanChan3 := bT.Scan(true, filters3)
+	scanChan3 := jT.Scan(true, filters3)
 
 	scanChanLen3 := 0
 	for elem := range scanChan3 {
@@ -174,11 +178,11 @@ func TestScan(t *testing.T) {
 		t.Errorf("Expecting 6 items returned but got %d", scanChanLen3)
 	}
 
-	loc, err := bT.GetBlockPos([]byte("key4"))
+	loc, err := jT.GetBlockPos([]byte("key4"))
 	if err != nil {
 		t.Error(err)
 	}
-	err = bT.DeleteRow(loc, []byte("key4"))
+	err = jT.DeleteRow(loc, []byte("key4"))
 	if err != nil {
 		t.Error(err)
 	}
@@ -186,7 +190,7 @@ func TestScan(t *testing.T) {
 	// Fourth test case: "name" starts with "a"
 	// NOTE: You need to fix the case in your original code from "startswith" to "STARTSWITH"
 	filters4 := FieldFilters{filters.FieldFilter{Field: "name", Operator: gripql.Condition_CONTAINS, Value: []any{"mnbv"}}}
-	scanChan4 := bT.Scan(false, filters4)
+	scanChan4 := jT.Scan(false, filters4)
 
 	scanChanLen4 := 0
 	for elem := range scanChan4 {

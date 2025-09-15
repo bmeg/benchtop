@@ -121,17 +121,19 @@ func NewPosKeyPrefix(table uint16) []byte {
 }
 
 func EncodeRowLoc(loc *RowLoc) []byte {
-	var out [10]byte
-	binary.LittleEndian.PutUint16(out[0:], loc.Section)
-	binary.LittleEndian.PutUint32(out[2:], loc.Offset)
-	binary.LittleEndian.PutUint32(out[6:], loc.Size)
+	var out [12]byte
+	binary.LittleEndian.PutUint16(out[0:], loc.TableId)
+	binary.LittleEndian.PutUint16(out[2:], loc.Section)
+	binary.LittleEndian.PutUint32(out[4:], loc.Offset)
+	binary.LittleEndian.PutUint32(out[8:], loc.Size)
 	return out[:]
 }
 
 func DecodeRowLoc(v []byte) *RowLoc {
 	return &RowLoc{
-		Section: binary.LittleEndian.Uint16(v),
-		Offset:  binary.LittleEndian.Uint32(v[2:]),
-		Size:    binary.LittleEndian.Uint32(v[6:]),
+		TableId: binary.LittleEndian.Uint16(v[0:]),
+		Section: binary.LittleEndian.Uint16(v[2:]),
+		Offset:  binary.LittleEndian.Uint32(v[4:]),
+		Size:    binary.LittleEndian.Uint32(v[8:]),
 	}
 }

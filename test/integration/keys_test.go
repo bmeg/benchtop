@@ -32,15 +32,23 @@ func TestPosKeyParse(t *testing.T) {
 }
 
 func TestPosValueParse(t *testing.T) {
-	pos := uint64(12345)
-	size := uint64(2028)
+	pos := uint32(12345)
+	size := uint32(2028)
+	tableId := uint16(0)
+	section := uint16(0)
 
-	k := benchtop.EncodeRowLoc(&benchtop.RowLoc{SegmentID: 0, Offset: pos, Size: size})
+	k := benchtop.EncodeRowLoc(&benchtop.RowLoc{TableId: tableId, Section: section, Offset: pos, Size: size})
 	loc := benchtop.DecodeRowLoc(k)
 	if pos != loc.Offset {
 		t.Errorf("%d != %d", pos, loc.Offset)
 	}
 	if size != loc.Size {
+		t.Errorf("%d != %d", size, loc.Size)
+	}
+	if section != loc.Section {
+		t.Errorf("%d != %d", size, loc.Size)
+	}
+	if tableId != loc.TableId {
 		t.Errorf("%d != %d", size, loc.Size)
 	}
 }

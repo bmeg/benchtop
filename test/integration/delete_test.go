@@ -29,33 +29,33 @@ func TestDelete(t *testing.T) {
 	}
 
 	totalCount := 100
-	bT, _ := ts.(*jsontable.JSONTable)
+	jT, _ := ts.(*jsontable.JSONTable)
 	for i := 0; i < totalCount; i++ {
 		key := fmt.Sprintf("key_%d", i)
-		loc, err := bT.AddRow(benchtop.Row{Id: []byte(key), Data: map[string]any{
+		loc, err := jT.AddRow(benchtop.Row{Id: []byte(key), Data: map[string]any{
 			"id":   key,
 			"data": i,
 		}})
 		if err != nil {
 			t.Error(err)
 		}
-		err = bT.AddTableEntryInfo(nil, []byte(key), loc)
+		err = jT.AddTableEntryInfo(nil, []byte(key), loc)
 		if err != nil {
 			t.Error(err)
 		}
 	}
 
 	count := 0
-	r, err := bT.Keys()
+	r, err := jT.Keys()
 	if err != nil {
 		t.Error(err)
 	}
 	for i := range r {
-		loc, err := bT.GetBlockPos(i.Key)
+		loc, err := jT.GetBlockPos(i.Key)
 		if err != nil {
 			t.Error(err)
 		}
-		_, err = bT.GetRow(loc)
+		_, err = jT.GetRow(loc)
 		if err != nil {
 			t.Errorf("Get %s error: %s", string(i.Key), err)
 		}
@@ -66,18 +66,18 @@ func TestDelete(t *testing.T) {
 	}
 
 	var deleteCount = 0
-	keys, err := bT.Keys()
+	keys, err := jT.Keys()
 	if err != nil {
 		t.Error(err)
 	}
 	i := 0
 	for k := range keys {
 		if i%3 == 0 {
-			loc, err := bT.GetBlockPos(k.Key)
+			loc, err := jT.GetBlockPos(k.Key)
 			if err != nil {
 				t.Error(err)
 			}
-			err = bT.DeleteRow(loc, k.Key)
+			err = jT.DeleteRow(loc, k.Key)
 			if err != nil {
 				t.Errorf("delete %s error: %s", string(k.Key), err)
 			}
@@ -87,7 +87,7 @@ func TestDelete(t *testing.T) {
 	}
 
 	count = 0
-	r, err = bT.Keys()
+	r, err = jT.Keys()
 	if err != nil {
 		t.Error(err)
 	}

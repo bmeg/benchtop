@@ -7,7 +7,6 @@ import (
 	"github.com/cockroachdb/pebble"
 )
 
-
 type RowData struct {
 	Data map[string]any `json:"0"`
 	Key  string         `json:"1"`
@@ -20,7 +19,7 @@ func (b *JSONTable) PackData(entry map[string]any, key string) *RowData {
 	}
 }
 
-func (b *JSONTable)unpackData(loadData bool, retId bool, doc *RowData) (any, error) {
+func (b *JSONTable) unpackData(loadData bool, retId bool, doc *RowData) (any, error) {
 	if doc == nil {
 		return nil, fmt.Errorf("Doc is nil nothing to unpack")
 	}

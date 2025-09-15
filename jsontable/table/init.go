@@ -5,7 +5,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"sort"
 	"strconv"
 	"strings"
 
@@ -14,12 +13,17 @@ import (
 
 // Update Init to parse and assign stable section IDs based on file names
 func (b *JSONTable) Init(poolSize int) error {
-	if b.NumPartitions == 0 {
-		b.NumPartitions = 4
+
+	b.NumPartitions = 4
+	// Sanity check to make sure that the section id multipler *
+	// the number of partitions doesn't exceed the max value of a uint16
+	if b.NumPartitions > 256 {
+		if uint32(b.NumPartitions)*uint32(SECTION_ID_MULT) > 65536 {
+			return fmt.Errorf("too many partitions (%d) for the chosen section ID multiplier (%d)", b.NumPartitions, SECTION_ID_MULT)
+		}
 	}
-	if b.PartitionFunc == nil {
-		b.PartitionFunc = DefaultPartitionFunc(b.NumPartitions)
-	}
+
+	b.PartitionFunc = DefaultPartitionFunc(b.NumPartitions)
 	b.Sections = map[uint16]*section.Section{}
 	b.PartitionMap = map[uint8][]uint16{}
 	b.MaxConcurrentSections = uint8(runtime.NumCPU())
@@ -39,8 +43,9 @@ func (b *JSONTable) Init(poolSize int) error {
 	}
 	var secList []secInfo
 	for _, f := range files {
-		if strings.HasPrefix(f.Name(), base+SECTION_FILE_SUFFIX) {
-			parts := strings.Split(strings.TrimPrefix(f.Name(), base+SECTION_FILE_SUFFIX), ".section")
+		if strings.HasPrefix(f.Name(), base+PART_FILE_SUFFIX) {
+			parts := strings.Split(strings.TrimPrefix(f.Name(), base+PART_FILE_SUFFIX), SECTION_FILE_SUFFIX)
+
 			if len(parts) != 2 {
 				continue
 			}
@@ -48,6 +53,7 @@ func (b *JSONTable) Init(poolSize int) error {
 			if err != nil {
 				continue
 			}
+
 			localSecId, err := strconv.Atoi(parts[1])
 			if err != nil {
 				continue
@@ -59,14 +65,6 @@ func (b *JSONTable) Init(poolSize int) error {
 			})
 		}
 	}
-
-	// Sort deterministically: by pId, then by localSecId
-	sort.Slice(secList, func(i, j int) bool {
-		if secList[i].pId == secList[j].pId {
-			return secList[i].localSecId < secList[j].localSecId
-		}
-		return secList[i].pId < secList[j].pId
-	})
 
 	// Build Sections and PartitionMap
 	for _, s := range secList {

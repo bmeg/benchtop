@@ -6,9 +6,7 @@ toolchain go1.24.2
 
 require (
 	github.com/bmeg/grip v0.0.0-20250206222527-96023b5f8b4f
-	github.com/schollz/progressbar/v3 v3.16.0
 	github.com/spf13/cobra v1.8.1
-	go.mongodb.org/mongo-driver v1.17.0
 	golang.org/x/exp v0.0.0-20240707233637-46b078467d37
 )
 
@@ -33,19 +31,17 @@ require (
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.20.0 // indirect
 	github.com/hashicorp/errwrap v1.1.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
-	github.com/klauspost/compress v1.17.9 // indirect
+	github.com/klauspost/compress v1.18.0 // indirect
 	github.com/klauspost/cpuid/v2 v2.2.8 // indirect
 	github.com/kr/pretty v0.3.1 // indirect
 	github.com/kr/text v0.2.0 // indirect
 	github.com/logrusorgru/aurora v2.0.3+incompatible // indirect
-	github.com/mitchellh/colorstring v0.0.0-20190213212951-d06e56a500db // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/prometheus/client_golang v1.19.1 // indirect
 	github.com/prometheus/client_model v0.6.1 // indirect
 	github.com/prometheus/common v0.55.0 // indirect
 	github.com/prometheus/procfs v0.15.1 // indirect
-	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/rogpeppe/go-internal v1.12.0 // indirect
 	github.com/sirupsen/logrus v1.9.3 // indirect
 	github.com/spf13/pflag v1.0.5 // indirect
@@ -63,10 +59,9 @@ require (
 )
 
 require (
-	github.com/bmeg/hnsw-index v0.0.0-20241122200324-94f3a5eb1f59
 	github.com/bmeg/jsonpath v0.0.0-20210207014051-cca5355553ad
 	github.com/bytedance/sonic v1.13.3
-	github.com/cockroachdb/pebble v1.1.2
+	github.com/cockroachdb/pebble v1.1.5
 	github.com/edsrzf/mmap-go v1.2.0
 	github.com/hashicorp/go-multierror v1.1.1
 	github.com/maypok86/otter/v2 v2.1.0

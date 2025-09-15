@@ -77,21 +77,21 @@ func TestInsert(t *testing.T) {
 		t.Error(err)
 	}
 
-	bT, _ := ts.(*jsontable.JSONTable)
+	jT, _ := ts.(*jsontable.JSONTable)
 	for k, r := range data {
-		loc, err := bT.AddRow(benchtop.Row{Id: []byte(k), TableName: "table_1", Data: r})
+		loc, err := jT.AddRow(benchtop.Row{Id: []byte(k), TableName: "table_1", Data: r})
 		if err != nil {
 			t.Error(err)
 		}
-		err = bT.AddTableEntryInfo(nil, []byte(k), loc)
+		err = jT.AddTableEntryInfo(nil, []byte(k), loc)
 		if err != nil {
 			t.Error(err)
 		}
 	}
 
 	for k := range data {
-		pKey := benchtop.NewPosKey(bT.TableId, []byte(k))
-		val, closer, err := bT.Pb.Db.Get(pKey)
+		pKey := benchtop.NewPosKey(jT.TableId, []byte(k))
+		val, closer, err := jT.Pb.Db.Get(pKey)
 		if err != nil {
 			if err != pebble.ErrNotFound {
 				log.Errorf("Err on dr.Pb.Get for key %s in CacheLoader: %v", k, err)

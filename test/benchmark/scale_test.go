@@ -7,6 +7,7 @@ import (
 
 	"github.com/bmeg/benchtop"
 	"github.com/bmeg/benchtop/jsontable"
+	jTable "github.com/bmeg/benchtop/jsontable/table"
 	"github.com/bmeg/benchtop/test/fixtures"
 	"github.com/bmeg/benchtop/util"
 	"github.com/bmeg/grip/log"
@@ -14,7 +15,7 @@ import (
 )
 
 var Jsonname = "test.json" + util.RandomString(5)
-var jsonTable *jsontable.JSONTable
+var jsonTable *jTable.JSONTable
 var jsonDriver *jsontable.JSONDriver
 
 const (
@@ -99,12 +100,12 @@ func BenchmarkRandomReadJson(b *testing.B) {
 	b.ResetTimer()
 
 	OTKEYS, _ := ot.Keys()
-	bT, _ := ot.(*jsontable.JSONTable)
+	jT, _ := ot.(*jsontable.JSONTable)
 	for key := range OTKEYS {
 		if _, exists := randomIndexSet[count]; exists {
 
-			pKey := benchtop.NewPosKey(bT.TableId, key.Key)
-			val, closer, err := bT.Pb.Db.Get(pKey)
+			pKey := benchtop.NewPosKey(jT.TableId, key.Key)
+			val, closer, err := jT.Pb.Db.Get(pKey)
 			if err != nil {
 				if err != pebble.ErrNotFound {
 					log.Errorf("Err on dr.Pb.Get for key %s in CacheLoader: %v", key.Key, err)
@@ -114,7 +115,7 @@ func BenchmarkRandomReadJson(b *testing.B) {
 			loc := benchtop.DecodeRowLoc(val)
 			closer.Close()
 
-			rOw, err := bT.GetRow(loc)
+			rOw, err := jT.GetRow(loc)
 			if err != nil {
 				b.Fatal(err)
 			}

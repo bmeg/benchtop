@@ -10,19 +10,25 @@ import (
 
 	"github.com/bmeg/benchtop/filters"
 	"github.com/bmeg/benchtop/jsontable/tpath"
+
 	"github.com/bmeg/benchtop/pebblebulk"
 	"github.com/bmeg/grip/gripql"
 )
 
 func (dr *JSONDriver) AddField(label, field string) error {
-	dr.Lock.Lock()
-	defer dr.Lock.Unlock()
-
 	foundTable, ok := dr.Tables[label]
 	if !ok {
+		_, err := dr.New(label, nil)
+		if err != nil {
+			return err
+		}
+
+		dr.Lock.Lock()
+		defer dr.Lock.Unlock()
+
 		log.Debugf("Creating index '%s' for table '%s' that has not been written yet", field, label)
 		// If the table doesn't yet exist, write the index Key stub.
-		err := dr.Pkv.Set(
+		err = dr.Pkv.Set(
 			benchtop.FieldKey(field, label, nil, nil),
 			[]byte{},
 			nil,
@@ -46,6 +52,9 @@ func (dr *JSONDriver) AddField(label, field string) error {
 		}
 
 	} else {
+		dr.Lock.Lock()
+		defer dr.Lock.Unlock()
+
 		log.Debugf("Found table %s writing indices for field %s", label, field)
 		err := dr.Pkv.BulkWrite(func(tx *pebblebulk.PebbleBulk) error {
 			var filter benchtop.RowFilter = nil
@@ -86,16 +95,14 @@ func (dr *JSONDriver) AddField(label, field string) error {
 		}
 	}
 
-	innerMap, existsLabel := dr.Fields[label]
-	if !existsLabel {
-		innerMap = make(map[string]any)
-		dr.Fields[label] = innerMap
+	if dr.Tables[label].Fields == nil {
+		dr.Tables[label].Fields = map[string]struct{}{}
 	}
-	if _, existsField := innerMap[field]; existsField {
+	if _, existsField := dr.Tables[label].Fields[field]; existsField {
 		return fmt.Errorf("index label '%s' field '%s' already exists", label, field)
 	}
-	innerMap[field] = struct{}{}
-	log.Debugln("List Fields: ", dr.Fields)
+	dr.Tables[label].Fields[field] = struct{}{}
+	log.Debugln("List Fields: ", dr.Tables[label].Fields)
 
 	return nil
 }
@@ -104,13 +111,9 @@ func (dr *JSONDriver) RemoveField(label string, field string) error {
 	dr.Lock.Lock()
 	defer dr.Lock.Unlock()
 
-	if fieldsForLabel, ok := dr.Fields[label]; ok {
-		delete(fieldsForLabel, field)
-		if len(fieldsForLabel) == 0 {
-			delete(dr.Fields, label)
-		}
+	if table, ok := dr.Tables[label]; ok {
+		delete(table.Fields, field)
 	}
-
 	FieldPrefix := benchtop.FieldLabelKey(field, label)
 	RFieldKeyPrefix := bytes.Join([][]byte{
 		benchtop.RFieldPrefix,
@@ -139,21 +142,26 @@ func (dr *JSONDriver) LoadFields() error {
 	 * Not sure wether to use a cache here as well or keep it how it is.
 	 */
 	fPrefix := benchtop.FieldPrefix
-	dr.Lock.Lock()
-	defer dr.Lock.Unlock()
 	count := 0
 	err := dr.Pkv.View(func(it *pebblebulk.PebbleIterator) error {
 		for it.Seek(fPrefix); it.Valid() && bytes.HasPrefix(it.Key(), fPrefix); it.Next() {
 			field, label, _, _ := benchtop.FieldKeyParse(it.Key())
-			if _, exists := dr.Fields[label]; !exists {
-				dr.Fields[label] = make(map[string]any)
+			if _, exists := dr.Tables[label]; !exists {
+				_, err := dr.New(label, nil)
+				if err != nil {
+					return err
+				}
+
 			}
-			if _, exists := dr.Fields[label][field]; !exists {
-				dr.Fields[label][field] = struct{}{}
+			if dr.Tables[label].Fields == nil {
+				dr.Tables[label].Fields = make(map[string]struct{})
+			}
+			if _, exists := dr.Tables[label].Fields[field]; !exists {
+				dr.Tables[label].Fields[field] = struct{}{}
 				count++
 			}
 		}
-		log.Debugf("Loaded %d indices", len(dr.Fields))
+		log.Debugf("Loaded %d indices", count)
 		return nil
 	})
 	if err != nil {
@@ -176,12 +184,15 @@ func (dr *JSONDriver) ListFields() []FieldInfo {
 	defer dr.Lock.RUnlock()
 
 	var out []FieldInfo
-	for label, fieldsMap := range dr.Fields {
-		for fieldName := range fieldsMap {
-			if label[:2] == "v_" {
-				out = append(out, FieldInfo{Label: label[2:], Field: fieldName})
-			} else {
-				out = append(out, FieldInfo{Label: label, Field: fieldName})
+	for _, table := range dr.Tables {
+		if table.Fields != nil {
+			for fieldName, _ := range table.Fields {
+				if table.Name[:2] == "v_" {
+					out = append(out, FieldInfo{Label: table.Name[2:], Field: fieldName})
+				} else {
+					out = append(out, FieldInfo{Label: table.Name, Field: fieldName})
+				}
+
 			}
 		}
 	}
@@ -196,17 +207,19 @@ func (dr *JSONDriver) DeleteRowField(label, field, rowID string) error {
 	// Check if the table exists
 	_, ok := dr.Tables[label]
 	if !ok {
-		log.Errorf("Table '%s' does not exist", label)
-		return fmt.Errorf("table '%s' does not exist", label)
+		_, err := dr.New(label, nil)
+		if err != nil {
+			return err
+		}
+
 	}
 
-	// Check if the field exists
-	innerMap, existsLabel := dr.Fields[label]
-	if !existsLabel || innerMap == nil {
+	if len(dr.Tables[label].Fields) <= 0 {
 		log.Errorf("No fields defined for table '%s'", label)
 		return fmt.Errorf("no fields defined for table '%s'", label)
 	}
-	if _, existsField := innerMap[field]; !existsField {
+
+	if _, existsField := dr.Tables[label].Fields[field]; !existsField {
 		log.Errorf("Field '%s' does not exist in table '%s'", field, label)
 		return fmt.Errorf("field '%s' does not exist in table '%s'", field, label)
 	}
@@ -240,7 +253,6 @@ func (dr *JSONDriver) DeleteRowField(label, field, rowID string) error {
 		log.Errorf("Error deserializing field value for row '%s' in table '%s' for field '%s': %v", rowID, label, field, err)
 		return err
 	}
-	fmt.Println("FIELD VALUE ANY: ", fieldValue)
 
 	// Delete both the forward and reverse index entries
 	err = dr.Pkv.BulkWrite(func(tx *pebblebulk.PebbleBulk) error {

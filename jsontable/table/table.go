@@ -23,9 +23,10 @@ import (
 )
 
 const (
-	SECTION_FILE_SUFFIX string = ".partition"
-	SECTION_ID_MULT     uint16 = 16384
-	MAX_SECTION_SIZE           = 1 << 29 // 512MB
+	PART_FILE_SUFFIX    string = ".partition"
+	SECTION_FILE_SUFFIX string = ".section"
+	SECTION_ID_MULT     uint16 = 256
+	MAX_SECTION_SIZE           = 1 << 26 // 64MB
 	MAX_COMPACT_RATIO          = 0.2     // 20% deleted rows triggers compaction
 	FLUSH_THRESHOLD            = 1000
 )
@@ -40,12 +41,13 @@ type JSONTable struct {
 	Name     string
 	FileName string // Base name for section files
 
+	Fields map[string]struct{} // Indexing moved to table level
+
 	Sections              map[uint16]*section.Section // sectionId -> Section
 	PartitionMap          map[uint8][]uint16          // partitionId -> []sectionId
 	SectionLock           sync.Mutex                  // For creating new sections
 	NumPartitions         uint32                      // Number of partitions
 	PartitionFunc         func(id []byte) uint8       // Assigns row to partition
-	MaxSectionSize        uint32                      // Max size per section
 	MaxConcurrentSections uint8                       // Limit for parallel operations
 }
 
@@ -74,6 +76,7 @@ func (b *JSONTable) Close() {
 			close(sec.FilePool)
 		}
 	}
+	b.Fields = map[string]struct{}{}
 }
 
 func (b *JSONTable) AddRow(elem benchtop.Row) (*benchtop.RowLoc, error) {
@@ -108,7 +111,7 @@ func (b *JSONTable) AddRow(elem benchtop.Row) (*benchtop.RowLoc, error) {
 
 	// Step: lock the section; if it doesn't have room for this entry, create new section
 	sec.Lock.Lock()
-	if sec.LiveBytes+totalDataSize > b.MaxSectionSize {
+	if sec.LiveBytes+totalDataSize > MAX_SECTION_SIZE {
 		// unlock the old section before creating a new one
 		sec.Lock.Unlock()
 
@@ -137,7 +140,6 @@ func (b *JSONTable) AddRow(elem benchtop.Row) (*benchtop.RowLoc, error) {
 	// to match your BulkLoad approach we pass nextOffset.
 	payload := NewSecPayload(nextOffset, bData)
 
-	// Write the entry
 	err = sec.WriteJsonEntryToSection(payload)
 	if err != nil {
 		log.Errorf("write handler err in AddRow: %v", err)
@@ -161,9 +163,15 @@ func (b *JSONTable) CreateNewSection(partitionId uint8) (*section.Section, error
 	b.SectionLock.Lock()
 	defer b.SectionLock.Unlock()
 
-	secId := uint16(len(b.Sections))               // Global unique ID
-	localSecId := len(b.PartitionMap[partitionId]) // Local to partition
-	path := fmt.Sprintf("%s%s%d.section%d", b.FileName, SECTION_FILE_SUFFIX, partitionId, localSecId)
+	localSecId := len(b.PartitionMap[partitionId])
+	secId := uint16(partitionId)*SECTION_ID_MULT + uint16(localSecId)
+
+	// Ensure the generated ID is not already in use (edge case sanity check)
+	if _, exists := b.Sections[secId]; exists {
+		return nil, fmt.Errorf("section ID conflict: ID %d already exists", secId)
+	}
+
+	path := fmt.Sprintf("%s%s%d.section%d", b.FileName, PART_FILE_SUFFIX, partitionId, localSecId)
 	handle, err := os.Create(path)
 	if err != nil {
 		log.Errorf("Failed to create section file %s: %v", path, err)
@@ -182,6 +190,7 @@ func (b *JSONTable) CreateNewSection(partitionId uint8) (*section.Section, error
 		file, err := os.OpenFile(path, os.O_RDWR, 0666)
 		if err != nil {
 			log.Errorf("Failed to init file pool for %s: %v", path, err)
+			handle.Close() // Clean up the create handle
 			return nil, err
 		}
 		sec.FilePool <- file
@@ -342,7 +351,7 @@ func (b *JSONTable) Scan(loadData bool, filter benchtop.RowFilter) chan any {
 					jsonStart := offset + benchtop.ROW_HSIZE
 					jsonEnd := jsonStart + bSize
 					// Ensure the row data fits within the file
-					fmt.Println("START: ", jsonStart, "END: ", jsonEnd, "SEC: ", sec.ID)
+					//fmt.Println("START: ", jsonStart, "END: ", jsonEnd, "SEC: ", sec.ID)
 					if jsonEnd > uint32(len(m)) {
 						log.Debugf("Incomplete record at section %d, offset %d", sec.ID, offset)
 						break
@@ -413,6 +422,7 @@ func (b *JSONTable) processJSONRowData(
 	}
 	return nil
 }
+
 func (b *JSONTable) CompactSection(secId uint16) error {
 	sec, exists := b.Sections[secId]
 	if !exists {

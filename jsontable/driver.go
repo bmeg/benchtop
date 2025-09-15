@@ -2,9 +2,7 @@ package jsontable
 
 import (
 	"bytes"
-	"encoding/binary"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"sync"
@@ -13,16 +11,14 @@ import (
 	"github.com/bmeg/benchtop"
 	"github.com/bmeg/benchtop/jsontable/cache"
 	jTable "github.com/bmeg/benchtop/jsontable/table"
-	"github.com/bmeg/benchtop/jsontable/tpath"
 	"github.com/bmeg/benchtop/pebblebulk"
 	"github.com/bmeg/benchtop/util"
 	"github.com/bmeg/grip/log"
 	"github.com/bytedance/sonic"
-	"github.com/hashicorp/go-multierror"
 )
 
 const (
-	BATCH_SIZE = 1000
+	BATCH_SIZE int = 1000
 )
 
 type JSONDriver struct {
@@ -34,7 +30,6 @@ type JSONDriver struct {
 
 	Tables      map[string]*jTable.JSONTable
 	LabelLookup map[uint16]string
-	Fields      map[string]map[string]any
 }
 
 func NewJSONDriver(path string) (benchtop.TableDriver, error) {
@@ -47,7 +42,6 @@ func NewJSONDriver(path string) (benchtop.TableDriver, error) {
 	if err != nil {
 		return nil, err
 	}
-	fmt.Println("TABLE DIR: ", tableDir, exist)
 	if !exist {
 		if err := os.Mkdir(tableDir, 0700); err != nil {
 			Pkv.Db.Close()
@@ -63,9 +57,7 @@ func NewJSONDriver(path string) (benchtop.TableDriver, error) {
 			InsertCount:  0,
 			CompactLimit: uint32(1000),
 		},
-		LocCache: cache.NewJSONCache(Pkv),
-
-		Fields:      map[string]map[string]any{},
+		LocCache:    cache.NewJSONCache(Pkv),
 		Lock:        sync.RWMutex{},
 		PebbleLock:  sync.RWMutex{},
 		LabelLookup: map[uint16]string{},
@@ -101,16 +93,9 @@ func LoadJSONDriver(path string) (benchtop.TableDriver, error) {
 			CompactLimit: uint32(1000),
 		},
 		LocCache:    cache.NewJSONCache(pKv),
-		Fields:      map[string]map[string]any{},
 		Lock:        sync.RWMutex{},
 		PebbleLock:  sync.RWMutex{},
 		LabelLookup: map[uint16]string{},
-	}
-
-	err = driver.LoadFields()
-	if err != nil {
-		pKv.Close()
-		return nil, err
 	}
 
 	for _, tableName := range driver.List() {
@@ -124,10 +109,17 @@ func LoadJSONDriver(path string) (benchtop.TableDriver, error) {
 			driver.Close()
 			return nil, fmt.Errorf("invalid table type for %s", tableName)
 		}
+
 		driver.Lock.Lock()
 		driver.LabelLookup[jsonTable.TableId] = tableName[2:]
 		driver.Tables[tableName] = jsonTable
 		driver.Lock.Unlock()
+	}
+
+	err = driver.LoadFields()
+	if err != nil {
+		pKv.Close()
+		return nil, err
 	}
 
 	driver.Lock.RLock()
@@ -151,10 +143,6 @@ func (dr *JSONDriver) New(name string, columns []benchtop.ColumnDef) (benchtop.T
 	dr.Lock.Lock()
 	defer dr.Lock.Unlock()
 
-	if p, ok := dr.Tables[name]; ok {
-		return p, nil
-	}
-
 	newId := dr.getMaxTablePrefix()
 	formattedName := util.PadToSixDigits(int(newId))
 	tPath := filepath.Join(dr.base, "TABLES", formattedName)
@@ -166,6 +154,7 @@ func (dr *JSONDriver) New(name string, columns []benchtop.ColumnDef) (benchtop.T
 		Name:      name,
 		FileName:  tPath, // Base name for partition/section files
 		TableId:   newId,
+		Fields:    map[string]struct{}{},
 	}
 	for n, d := range columns {
 		out.ColumnMap[d.Key] = n
@@ -262,7 +251,6 @@ func (dr *JSONDriver) Close() {
 		time.Sleep(50 * time.Millisecond)
 	}
 	dr.Pkv = nil
-	dr.Fields = make(map[string]map[string]any)
 	log.Infof("Successfully closed JSONDriver for path %s", dr.base)
 }
 
@@ -302,6 +290,7 @@ func (dr *JSONDriver) Get(name string) (benchtop.TableStore, error) {
 		Path:      tPath,
 		FileName:  tPath,
 		Name:      name,
+		Fields:    map[string]struct{}{},
 	}
 	for n, d := range out.Columns {
 		out.ColumnMap[d.Key] = n
@@ -336,6 +325,7 @@ func (dr *JSONDriver) Delete(name string) error {
 	return nil
 }
 
+/*
 // BulkLoad efficiently loads a large number of rows from an input channel into
 // the appropriate tables. It processes rows in batches, distributing them to
 // the correct partition and section files based on the new architecture.
@@ -432,8 +422,8 @@ func (dr *JSONDriver) BulkLoad(inputs chan *benchtop.Row, tx *pebblebulk.PebbleB
 					if info == nil { // Row is new
 						newRows = append(newRows, row)
 					}
-					if fields, ok := dr.Fields[tableName]; ok {
-						for field := range fields {
+					if table.Fields != nil {
+						for field := range table.Fields {
 							if val := tpath.PathLookup(row.Data, field); val != nil { // Assumes PathLookup exists
 								allFieldIndexKeyElements = append(allFieldIndexKeyElements, fieldKeyElements{
 									field:     field,
@@ -444,6 +434,7 @@ func (dr *JSONDriver) BulkLoad(inputs chan *benchtop.Row, tx *pebblebulk.PebbleB
 							}
 						}
 					}
+
 				}
 
 				if len(newRows) == 0 {
@@ -490,7 +481,7 @@ func (dr *JSONDriver) BulkLoad(inputs chan *benchtop.Row, tx *pebblebulk.PebbleB
 
 					// Lock the section and check if a new one is needed.
 					sec.Lock.Lock()
-					if sec.LiveBytes+totalDataSize > table.MaxSectionSize {
+					if sec.LiveBytes+totalDataSize > jTable.MAX_SECTION_SIZE {
 						sec.Lock.Unlock() // Unlock old section
 
 						newSec, err := table.CreateNewSection(partitionId)
@@ -620,3 +611,4 @@ func (dr *JSONDriver) BulkLoad(inputs chan *benchtop.Row, tx *pebblebulk.PebbleB
 
 	return errs.ErrorOrNil()
 }
+*/
