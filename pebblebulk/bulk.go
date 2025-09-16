@@ -51,7 +51,10 @@ func (pb *PebbleBulk) Get(key []byte) ([]byte, io.Closer, error) {
 }
 
 func (pb *PebbleBulk) Delete(key []byte, opts *pebble.WriteOptions) error {
-	return pb.Db.Delete(key, nil)
+	pb.mu.Lock()
+	err := pb.Db.Delete(key, nil)
+	pb.mu.Unlock()
+	return err
 }
 
 func (pb *PebbleBulk) BulkRead(fn func(tx *PebbleBulk) error) error {

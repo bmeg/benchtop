@@ -1,9 +1,7 @@
 package table
 
 import (
-	"encoding/binary"
 	"fmt"
-	"io"
 	"sync"
 
 	"github.com/bmeg/benchtop"
@@ -76,7 +74,6 @@ func (b *JSONTable) StartTableGoroutine(
 						}
 					}
 				}
-
 			}
 
 			if len(newRows) == 0 {
@@ -96,7 +93,7 @@ func (b *JSONTable) StartTableGoroutine(
 
 				bDatas := make([][]byte, 0, len(rowsInPartition))
 				rowIds := make([]string, 0, len(rowsInPartition))
-				var totalDataSize uint32
+				var totalUncompressedSize uint32
 
 				for _, row := range rowsInPartition {
 					bData, err := sonic.ConfigFastest.Marshal(b.PackData(row.Data, string(row.Id)))
@@ -106,7 +103,7 @@ func (b *JSONTable) StartTableGoroutine(
 					}
 					bDatas = append(bDatas, bData)
 					rowIds = append(rowIds, string(row.Id))
-					totalDataSize += uint32(len(bData)) + benchtop.ROW_HSIZE
+					totalUncompressedSize += uint32(len(bData)) + 8 // 8-byte header
 				}
 				if len(bDatas) == 0 {
 					continue
@@ -119,50 +116,32 @@ func (b *JSONTable) StartTableGoroutine(
 				b.SectionLock.Unlock()
 
 				sec.Lock.Lock()
-				if sec.LiveBytes+totalDataSize > MAX_SECTION_SIZE {
-					sec.Lock.Unlock() // Unlock old section
+
+				// Use uncompressed size for section size check (conservative estimate)
+				if sec.LiveBytes+totalUncompressedSize > MAX_SECTION_SIZE {
+					sec.Lock.Unlock()
 
 					newSec, err := b.CreateNewSection(partitionId)
 					if err != nil {
-						localErr = multierror.Append(localErr, fmt.Errorf("failed to create new section for partition %d", partitionId))
+						localErr = multierror.Append(localErr, fmt.Errorf("failed to create new section for partition %d: %v", partitionId, err))
 						continue
 					}
 					sec = newSec
-					sec.Lock.Lock() // Lock new section
+					sec.Lock.Lock()
 				}
 
-				startOffset, err := sec.Handle.Seek(0, io.SeekEnd)
-				if err != nil {
-					localErr = multierror.Append(localErr, fmt.Errorf("seek error for section %d: %v", sec.ID, err))
-					sec.Lock.Unlock()
-					continue
-				}
-
-				batchPayload := make([]byte, totalDataSize)
-				currentPos, currentOffset := 0, uint32(startOffset)
 				for i, bData := range bDatas {
-					nextOffset := currentOffset + benchtop.ROW_HSIZE + uint32(len(bData))
-					binary.LittleEndian.PutUint32(batchPayload[currentPos:currentPos+int(benchtop.ROW_OFFSET_HSIZE)], nextOffset)
-					binary.LittleEndian.PutUint32(batchPayload[currentPos+int(benchtop.ROW_OFFSET_HSIZE):currentPos+int(benchtop.ROW_HSIZE)], uint32(len(bData)))
-					copy(batchPayload[currentPos+int(benchtop.ROW_HSIZE):], bData)
-
-					allMetadata[rowIds[i]] = &benchtop.RowLoc{
-						TableId: b.TableId,
-						Section: sec.ID,
-						Offset:  currentOffset,
-						Size:    uint32(len(bData)),
+					rowLoc, err := sec.WriteJsonEntryToSection(bData)
+					if err != nil {
+						sec.Lock.Unlock()
+						localErr = multierror.Append(localErr, fmt.Errorf("write error for row %s in section %d: %v", rowIds[i], sec.ID, err))
+						continue
 					}
-					currentOffset = nextOffset
-					currentPos += int(benchtop.ROW_HSIZE) + len(bData)
+					rowLoc.TableId = b.TableId
+					allMetadata[rowIds[i]] = rowLoc
 				}
 
-				if _, err := sec.Handle.Write(batchPayload); err != nil {
-					localErr = multierror.Append(localErr, fmt.Errorf("write error for section %d: %v", sec.ID, err))
-					sec.Lock.Unlock()
-					continue
-				}
-				sec.TotalRows += uint32(len(bDatas))
-				sec.LiveBytes += totalDataSize
+				sec.TotalRows++
 				sec.Lock.Unlock()
 			}
 		}

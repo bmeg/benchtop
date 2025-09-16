@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/DataDog/zstd"
 	"github.com/bmeg/benchtop/jsontable/section"
 )
 
@@ -90,9 +91,12 @@ func (b *JSONTable) Init(poolSize int) error {
 			}
 			sec.FilePool <- file
 		}
-		if sec.Handle, err = os.OpenFile(secPath, os.O_RDWR, 0666); err != nil {
+		oFile, err := os.OpenFile(secPath, os.O_RDWR, 0666)
+		if err != nil {
 			return fmt.Errorf("failed to open section handle: %w", err)
 		}
+		sec.Writer = zstd.NewWriter(oFile)
+
 		if stat, err := os.Stat(secPath); err == nil {
 			sec.LiveBytes = uint32(stat.Size())
 		}

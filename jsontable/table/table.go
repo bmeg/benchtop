@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/DataDog/zstd"
 	"github.com/bmeg/benchtop"
 	"github.com/bmeg/benchtop/jsontable/section"
 	"github.com/bmeg/grip/log"
@@ -62,14 +63,15 @@ func DefaultPartitionFunc(numPartitions uint32) func(id []byte) uint8 {
 
 func (b *JSONTable) Close() {
 	for _, sec := range b.Sections {
-		if sec.Handle != nil {
-			sec.Handle.Sync()
-			sec.Handle.Close()
+		if sec.Writer != nil {
+			sec.Writer.Close()
+		}
+		if sec.File != nil {
+			sec.File.Close()
 		}
 		if sec.FilePool != nil {
 			for len(sec.FilePool) > 0 {
 				if file, ok := <-sec.FilePool; ok {
-					file.Sync()
 					file.Close()
 				}
 			}
@@ -79,6 +81,7 @@ func (b *JSONTable) Close() {
 	b.Fields = map[string]struct{}{}
 }
 
+// AddRow adds a single row to the JSONTable, writing it as zstd-compressed data.
 func (b *JSONTable) AddRow(elem benchtop.Row) (*benchtop.RowLoc, error) {
 	// partitionId returned as uint8
 	partitionId := b.PartitionFunc(elem.Id)
@@ -88,11 +91,9 @@ func (b *JSONTable) AddRow(elem benchtop.Row) (*benchtop.RowLoc, error) {
 
 	// Ensure partition has at least one section
 	if len(b.PartitionMap[uint8(partitionId)]) == 0 {
-		b.SectionLock.Lock()
 		_, err := b.CreateNewSection(partitionId)
-		b.SectionLock.Unlock()
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("failed to create new section for partition %d: %w", partitionId, err)
 		}
 	}
 
@@ -102,60 +103,33 @@ func (b *JSONTable) AddRow(elem benchtop.Row) (*benchtop.RowLoc, error) {
 		return nil, fmt.Errorf("section %d not found", secId)
 	}
 
-	// Marshal the row payload first so we can compute total size and check section boundaries
+	// Marshal the row payload to compute size
 	bData, err := sonic.ConfigFastest.Marshal(b.PackData(elem.Data, string(elem.Id)))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to marshal row data for ID %s: %w", elem.Id, err)
 	}
-	var totalDataSize uint32 = uint32(len(bData)) + benchtop.ROW_HSIZE
+	totalUncompressedSize := uint32(len(bData)) + benchtop.ROW_HSIZE
 
-	// Step: lock the section; if it doesn't have room for this entry, create new section
 	sec.Lock.Lock()
-	if sec.LiveBytes+totalDataSize > MAX_SECTION_SIZE {
-		// unlock the old section before creating a new one
-		sec.Lock.Unlock()
-
-		newSec, err := b.CreateNewSection(partitionId)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create new section for partition %d", partitionId)
-		}
-		sec = newSec
-		sec.Lock.Lock()
-	}
-	// we now hold sec.Lock
 	defer sec.Lock.Unlock()
 
-	// Seek to end to get append offset
-	offset64, err := sec.Handle.Seek(0, io.SeekEnd)
-	if err != nil {
-		return nil, err
-	}
-	offset := uint32(offset64) // be careful if >4GB
+	if sec.LiveBytes+totalUncompressedSize > MAX_SECTION_SIZE {
+		newSec, err := b.CreateNewSection(partitionId)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create new section for partition %d: %w", partitionId, err)
+		}
+		sec = newSec
 
-	// Compute nextOffset like the bulk writer does: currentOffset + header + data
-	nextOffset := offset + uint32(benchtop.ROW_HSIZE) + uint32(len(bData))
-
-	// Create payload using nextOffset (not current offset) — matches the batch writer format.
-	// If NewSecPayload expects (currentOffset, data) you can change to that, but
-	// to match your BulkLoad approach we pass nextOffset.
-	payload := NewSecPayload(nextOffset, bData)
-
-	err = sec.WriteJsonEntryToSection(payload)
-	if err != nil {
-		log.Errorf("write handler err in AddRow: %v", err)
-		return nil, err
 	}
 
-	// Update stats and return RowLoc using starting offset and size (size is data length)
+	loc, err := sec.WriteJsonEntryToSection(bData)
+	if err != nil {
+		return nil, fmt.Errorf("failed to write payload for row %s in section %d: %w", elem.Id, sec.ID, err)
+	}
+
 	sec.TotalRows++
-	sec.LiveBytes += totalDataSize
+	loc.TableId = b.TableId
 
-	loc := &benchtop.RowLoc{
-		Section: sec.ID,
-		Offset:  offset,
-		Size:    uint32(len(bData)),
-		TableId: b.TableId,
-	}
 	return loc, nil
 }
 
@@ -182,8 +156,9 @@ func (b *JSONTable) CreateNewSection(partitionId uint8) (*section.Section, error
 		ID:          secId,
 		PartitionID: partitionId,
 		Path:        path,
-		Handle:      handle,
+		Writer:      zstd.NewWriter(handle),
 		Active:      true,
+		File:        handle,
 	}
 	sec.FilePool = make(chan *os.File, 10)
 	for range cap(sec.FilePool) {
@@ -220,23 +195,46 @@ func (b *JSONTable) GetRow(loc *benchtop.RowLoc) (map[string]any, error) {
 	file := <-sec.FilePool
 	defer func() { sec.FilePool <- file }()
 
-	_, err := file.Seek(int64(loc.Offset+benchtop.ROW_HSIZE), io.SeekStart)
+	// Seek to the start of the row (uncompressed header + compressed data)
+	_, err := file.Seek(int64(loc.Offset), io.SeekStart)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to seek to offset %d in section %d: %w", loc.Offset, loc.Section, err)
 	}
 
-	decoder := sonic.ConfigFastest.NewDecoder(io.LimitReader(file, int64(loc.Size)))
-	var m RowData
-	err = decoder.Decode(&m)
+	// Read the entire row in one go: header + compressed data
+	rowData := make([]byte, benchtop.ROW_HSIZE+loc.Size)
+	_, err = io.ReadFull(file, rowData)
 	if err != nil {
-		if err == io.EOF {
-			return nil, fmt.Errorf("JSON data for row at section %d, offset %d, size %d was incomplete: %w", loc.Section, loc.Offset, loc.Size, err)
-		}
+		return nil, fmt.Errorf("failed to read row data at offset %d in section %d: %w", loc.Offset, loc.Section, err)
+	}
+
+	// Parse the 8-byte header
+	header := rowData[:benchtop.ROW_HSIZE]
+	// nextOffset := binary.LittleEndian.Uint32(header[:4]) // Ignored for now
+	compressedSize := binary.LittleEndian.Uint32(header[4:8])
+
+	// Verify compressed size matches loc.Size
+	if compressedSize != loc.Size {
+		return nil, fmt.Errorf("compressed size mismatch at offset %d in section %d: header says %d, RowLoc says %d", loc.Offset, loc.Section, compressedSize, loc.Size)
+	}
+
+	// Decompress the compressed section
+	compressed := rowData[benchtop.ROW_HSIZE:]
+	decompressed, err := zstd.Decompress(nil, compressed)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decompress data at offset %d in section %d: %w", loc.Offset, loc.Section, err)
+	}
+
+	// Decode the JSON
+	var m RowData
+	err = sonic.ConfigFastest.Unmarshal(decompressed, &m)
+	if err != nil {
 		return nil, fmt.Errorf("failed to decode JSON row at section %d, offset %d, size %d: %w", loc.Section, loc.Offset, loc.Size, err)
 	}
+
 	out, err := b.unpackData(true, false, &m)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to unpack data for row at section %d, offset %d: %w", loc.Section, loc.Offset, err)
 	}
 	return out.(map[string]any), nil
 }
@@ -270,7 +268,11 @@ func (b *JSONTable) DeleteRow(loc *benchtop.RowLoc, id []byte) error {
 	sec.Lock.Lock()
 	defer sec.Lock.Unlock()
 
-	_, err := sec.Handle.WriteAt(bytes.Repeat([]byte{0x00}, 4), int64(loc.Offset+benchtop.ROW_OFFSET_HSIZE))
+	_, err := sec.File.Seek(int64(loc.Offset+benchtop.ROW_OFFSET_HSIZE), io.SeekStart)
+	if err != nil {
+		return err
+	}
+	_, err = sec.Writer.Write(bytes.Repeat([]byte{0x00}, 4))
 	if err != nil {
 		return fmt.Errorf("writeAt failed: %w", err)
 	}
@@ -389,17 +391,22 @@ func (b *JSONTable) processJSONRowData(
 	outChan chan any,
 ) error {
 	var val any
-	var err error
+
+	newData, err := zstd.Decompress(nil, rowData)
+	if err != nil {
+		return err
+	}
 
 	if loadData || filter != nil && !filter.IsNoOp() {
 		var m RowData
-		sonic.ConfigFastest.Unmarshal(rowData, &m)
+
+		sonic.ConfigFastest.Unmarshal(newData, &m)
 		val, err = b.unpackData(true, true, &m)
 		if err != nil {
 			return err
 		}
 	} else {
-		val = rowData
+		val = newData
 	}
 
 	if filter == nil || filter.IsNoOp() || (!filter.IsNoOp() && filter.Matches(val)) {
@@ -408,9 +415,9 @@ func (b *JSONTable) processJSONRowData(
 			return nil
 		}
 
-		node, err := sonic.Get(rowData, "1")
+		node, err := sonic.Get(newData, "1")
 		if err != nil {
-			log.Errorf("Error accessing JSON path for row data %s: %v\n", string(rowData), err)
+			log.Errorf("Error accessing JSON path for row data %s: %v\n", string(newData), err)
 			return err
 		}
 		ID, err := node.Interface()
@@ -439,7 +446,7 @@ func (b *JSONTable) CompactSection(secId uint16) error {
 	}
 	defer tempHandle.Close()
 
-	m, err := mmap.Map(sec.Handle, mmap.RDONLY, 0)
+	m, err := mmap.Map(sec.File, mmap.RDONLY, 0)
 	if err != nil {
 		return fmt.Errorf("failed to map file: %w", err)
 	}
@@ -478,6 +485,17 @@ func (b *JSONTable) CompactSection(secId uint16) error {
 		}
 
 		rowData := m[jsonStart:jsonEnd]
+
+		rowData, err := zstd.Decompress(nil, rowData)
+		if err != nil {
+			log.Debugf("Failed to decompress row at section %d, offset %d: %v", sec.ID, offset, err)
+			if nextOffset == 0 || nextOffset <= offset {
+				break
+			}
+			offset = nextOffset
+			continue
+		}
+
 		var mRow RowData
 		err = sonic.ConfigFastest.Unmarshal(rowData, &mRow)
 		if err != nil {
@@ -528,7 +546,7 @@ func (b *JSONTable) CompactSection(secId uint16) error {
 	if err := tempHandle.Close(); err != nil {
 		return fmt.Errorf("failed closing temp file: %w", err)
 	}
-	if err := sec.Handle.Close(); err != nil {
+	if err := sec.File.Close(); err != nil {
 		return fmt.Errorf("failed closing old handle: %w", err)
 	}
 
@@ -540,7 +558,7 @@ func (b *JSONTable) CompactSection(secId uint16) error {
 	if err != nil {
 		return fmt.Errorf("failed reopening compacted file: %w", err)
 	}
-	sec.Handle = newHandle
+	sec.File = newHandle
 
 	oldPool := sec.FilePool
 	sec.FilePool = make(chan *os.File, cap(oldPool))

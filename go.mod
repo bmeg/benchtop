@@ -11,7 +11,6 @@ require (
 )
 
 require (
-	github.com/DataDog/zstd v1.5.6-0.20230824185856-869dae002e5e // indirect
 	github.com/akuity/grpc-gateway-client v0.0.0-20231116134900-80c401329778 // indirect
 	github.com/alevinval/sse v1.0.2 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
@@ -59,6 +58,7 @@ require (
 )
 
 require (
+	github.com/DataDog/zstd v1.5.7
 	github.com/bmeg/jsonpath v0.0.0-20210207014051-cca5355553ad
 	github.com/bytedance/sonic v1.13.3
 	github.com/cockroachdb/pebble v1.1.5
