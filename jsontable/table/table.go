@@ -15,10 +15,12 @@ import (
 
 	"github.com/DataDog/zstd"
 	"github.com/bmeg/benchtop"
+	"github.com/bmeg/benchtop/jsontable/block"
 	"github.com/bmeg/benchtop/jsontable/section"
 	"github.com/bmeg/grip/log"
 	"github.com/edsrzf/mmap-go"
 	multierror "github.com/hashicorp/go-multierror"
+	"github.com/sirupsen/logrus"
 
 	"github.com/bytedance/sonic"
 )
@@ -81,15 +83,12 @@ func (b *JSONTable) Close() {
 	b.Fields = map[string]struct{}{}
 }
 
-// AddRow adds a single row to the JSONTable, writing it as zstd-compressed data.
 func (b *JSONTable) AddRow(elem benchtop.Row) (*benchtop.RowLoc, error) {
-	// partitionId returned as uint8
 	partitionId := b.PartitionFunc(elem.Id)
 	if int(partitionId) < 0 || partitionId >= uint8(b.NumPartitions) {
 		return nil, fmt.Errorf("invalid partition ID: %d", partitionId)
 	}
 
-	// Ensure partition has at least one section
 	if len(b.PartitionMap[uint8(partitionId)]) == 0 {
 		_, err := b.CreateNewSection(partitionId)
 		if err != nil {
@@ -103,28 +102,28 @@ func (b *JSONTable) AddRow(elem benchtop.Row) (*benchtop.RowLoc, error) {
 		return nil, fmt.Errorf("section %d not found", secId)
 	}
 
-	// Marshal the row payload to compute size
 	bData, err := sonic.ConfigFastest.Marshal(b.PackData(elem.Data, string(elem.Id)))
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal row data for ID %s: %w", elem.Id, err)
 	}
-	totalUncompressedSize := uint32(len(bData)) + benchtop.ROW_HSIZE
+
+	// Estimated add size (uncompressed, conservative)
+	estimatedAddSize := uint32(len(bData)) + 4
 
 	sec.Lock.Lock()
-	defer sec.Lock.Unlock()
-
-	if sec.LiveBytes+totalUncompressedSize > MAX_SECTION_SIZE {
+	if sec.LiveBytes+estimatedAddSize > MAX_SECTION_SIZE {
 		newSec, err := b.CreateNewSection(partitionId)
 		if err != nil {
+			sec.Lock.Unlock()
 			return nil, fmt.Errorf("failed to create new section for partition %d: %w", partitionId, err)
 		}
 		sec = newSec
-
 	}
+	sec.Lock.Unlock()
 
-	loc, err := sec.WriteJsonEntryToSection(bData)
+	loc, err := sec.AppendRow(bData)
 	if err != nil {
-		return nil, fmt.Errorf("failed to write payload for row %s in section %d: %w", elem.Id, sec.ID, err)
+		return nil, fmt.Errorf("failed to append row %s to block in section %d: %w", elem.Id, sec.ID, err)
 	}
 
 	sec.TotalRows++
@@ -153,12 +152,14 @@ func (b *JSONTable) CreateNewSection(partitionId uint8) (*section.Section, error
 	}
 
 	sec := &section.Section{
-		ID:          secId,
-		PartitionID: partitionId,
-		Path:        path,
-		Writer:      zstd.NewWriter(handle),
-		Active:      true,
-		File:        handle,
+		ID:           secId,
+		PartitionID:  partitionId,
+		Path:         path,
+		Writer:       zstd.NewWriter(handle),
+		Active:       true,
+		File:         handle,
+		CurrentBlock: block.NewMemBlock(),
+		Blocks:       []section.BlockMeta{},
 	}
 	sec.FilePool = make(chan *os.File, 10)
 	for range cap(sec.FilePool) {
@@ -176,65 +177,102 @@ func (b *JSONTable) CreateNewSection(partitionId uint8) (*section.Section, error
 	return sec, nil
 }
 
-func NewSecPayload(offset uint32, data []byte) []byte {
-	dataLen := uint32(len(data))
-	payload := make([]byte, benchtop.ROW_HSIZE+dataLen)
-	nextOffset := offset + benchtop.ROW_HSIZE + dataLen
-	binary.LittleEndian.PutUint32(payload[:benchtop.ROW_OFFSET_HSIZE], nextOffset)
-	binary.LittleEndian.PutUint32(payload[benchtop.ROW_OFFSET_HSIZE:benchtop.ROW_HSIZE], dataLen)
-	copy(payload[benchtop.ROW_HSIZE:], data)
-	return payload
-}
-
 func (b *JSONTable) GetRow(loc *benchtop.RowLoc) (map[string]any, error) {
 	sec, exists := b.Sections[loc.Section]
 	if !exists {
 		return nil, fmt.Errorf("section %d not found", loc.Section)
 	}
 
+	sec.Lock.RLock()
+	defer sec.Lock.RUnlock()
+
+	// Check if the row is in the in-memory CurrentBlock
+	if int(loc.BlockIndex) == len(sec.Blocks) && sec.CurrentBlock != nil {
+		if int(loc.RowIndex) >= len(sec.CurrentBlock.Rows) {
+			return nil, fmt.Errorf("row index %d out of range in current block of section %d", loc.RowIndex, loc.Section)
+		}
+		rowData := sec.CurrentBlock.Rows[loc.RowIndex]
+		if len(rowData) == 0 {
+			return nil, fmt.Errorf("row %d in current block of section %d is deleted or invalid", loc.RowIndex, loc.Section)
+		}
+		// Verify row size matches loc.Size
+		if uint32(len(rowData)) != loc.Size {
+			return nil, fmt.Errorf("row size mismatch in current block of section %d: expected %d, got %d", loc.Section, loc.Size, len(rowData))
+		}
+		// Decode the JSON (no decompress needed)
+		var m RowData
+		err := sonic.ConfigFastest.Unmarshal(rowData, &m)
+		if err != nil {
+			return nil, fmt.Errorf("failed to decode JSON row %d in current block of section %d: %w", loc.RowIndex, loc.Section, err)
+		}
+		out, err := b.unpackData(true, false, &m)
+		if err != nil {
+			return nil, fmt.Errorf("failed to unpack data for row %d in current block of section %d: %w", loc.RowIndex, loc.Section, err)
+		}
+		return out.(map[string]any), nil
+	}
+
+	// Ensure BlockIndex is valid for flushed blocks
+	if int(loc.BlockIndex) >= len(sec.Blocks) {
+		return nil, fmt.Errorf("block index %d out of range in section %d", loc.BlockIndex, loc.Section)
+	}
+
+	// Handle flushed block on disk
 	file := <-sec.FilePool
 	defer func() { sec.FilePool <- file }()
 
-	// Seek to the start of the row (uncompressed header + compressed data)
-	_, err := file.Seek(int64(loc.Offset), io.SeekStart)
+	// Get block metadata
+	blockMeta := sec.Blocks[loc.BlockIndex]
+
+	// Seek to the start of the block
+	_, err := file.Seek(int64(blockMeta.FileOffset), io.SeekStart)
 	if err != nil {
-		return nil, fmt.Errorf("failed to seek to offset %d in section %d: %w", loc.Offset, loc.Section, err)
+		return nil, fmt.Errorf("failed to seek to block offset %d in section %d: %w", blockMeta.FileOffset, loc.Section, err)
 	}
 
-	// Read the entire row in one go: header + compressed data
-	rowData := make([]byte, benchtop.ROW_HSIZE+loc.Size)
-	_, err = io.ReadFull(file, rowData)
+	// Read the compressed block
+	cData := make([]byte, blockMeta.Size)
+	_, err = io.ReadFull(file, cData)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read row data at offset %d in section %d: %w", loc.Offset, loc.Section, err)
+		return nil, fmt.Errorf("failed to read compressed block data at offset %d in section %d: %w", blockMeta.FileOffset, loc.Section, err)
 	}
 
-	// Parse the 8-byte header
-	header := rowData[:benchtop.ROW_HSIZE]
-	// nextOffset := binary.LittleEndian.Uint32(header[:4]) // Ignored for now
-	compressedSize := binary.LittleEndian.Uint32(header[4:8])
-
-	// Verify compressed size matches loc.Size
-	if compressedSize != loc.Size {
-		return nil, fmt.Errorf("compressed size mismatch at offset %d in section %d: header says %d, RowLoc says %d", loc.Offset, loc.Section, compressedSize, loc.Size)
+	// Decompress the block
+	decompressed, err := zstd.Decompress(nil, cData)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decompress block at offset %d in section %d: %w", blockMeta.FileOffset, loc.Section, err)
 	}
 
-	// Decompress the compressed section
-	compressed := rowData[benchtop.ROW_HSIZE:]
-	decompressed, err := zstd.Decompress(nil, compressed)
-	if err != nil {
-		return nil, fmt.Errorf("failed to decompress data at offset %d in section %d: %w", loc.Offset, loc.Section, err)
+	// Create iterator for the decompressed block
+	it := block.NewMemBlock().Iterator(decompressed)
+
+	// Iterate to the desired row
+	var rowData []byte
+	for i := uint16(0); i <= loc.RowIndex; i++ {
+		data, err := it.Next()
+		if err != nil {
+			return nil, fmt.Errorf("failed to read row %d in block %d of section %d: %w", loc.RowIndex, loc.BlockIndex, loc.Section, err)
+		}
+		if i == loc.RowIndex {
+			rowData = data
+		}
+	}
+
+	// Verify row size matches loc.Size
+	if uint32(len(rowData)) != loc.Size {
+		return nil, fmt.Errorf("row size mismatch in block %d of section %d: expected %d, got %d", loc.BlockIndex, loc.Section, loc.Size, len(rowData))
 	}
 
 	// Decode the JSON
 	var m RowData
-	err = sonic.ConfigFastest.Unmarshal(decompressed, &m)
+	err = sonic.ConfigFastest.Unmarshal(rowData, &m)
 	if err != nil {
-		return nil, fmt.Errorf("failed to decode JSON row at section %d, offset %d, size %d: %w", loc.Section, loc.Offset, loc.Size, err)
+		return nil, fmt.Errorf("failed to decode JSON row %d in block %d of section %d: %w", loc.RowIndex, loc.BlockIndex, loc.Section, err)
 	}
 
 	out, err := b.unpackData(true, false, &m)
 	if err != nil {
-		return nil, fmt.Errorf("failed to unpack data for row at section %d, offset %d: %w", loc.Section, loc.Offset, err)
+		return nil, fmt.Errorf("failed to unpack data for row %d in block %d of section %d: %w", loc.RowIndex, loc.BlockIndex, loc.Section, err)
 	}
 	return out.(map[string]any), nil
 }
@@ -245,17 +283,99 @@ func (b *JSONTable) MarkDeleteTable(loc *benchtop.RowLoc) error {
 		return fmt.Errorf("section %d not found", loc.Section)
 	}
 
+	// Handle in-memory block
+	if int(loc.BlockIndex) == len(sec.Blocks) {
+		sec.Lock.Lock()
+		defer sec.Lock.Unlock()
+		if sec.CurrentBlock == nil || int(loc.RowIndex) >= len(sec.CurrentBlock.Rows) {
+			return fmt.Errorf("row index %d out of range in current block of section %d", loc.RowIndex, loc.Section)
+		}
+		sec.CurrentBlock.Size -= uint32(len(sec.CurrentBlock.Rows[loc.RowIndex]))
+		sec.CurrentBlock.Rows[loc.RowIndex] = []byte{} // Mark as deleted with empty slice
+		sec.DeletedRows++
+		sec.LiveBytes -= loc.Size
+		return nil
+	}
+
+	// Handle flushed compressed block
+	if int(loc.BlockIndex) >= len(sec.Blocks) {
+		return fmt.Errorf("block index %d out of range in section %d", loc.BlockIndex, loc.Section)
+	}
+
 	file := <-sec.FilePool
 	defer func() { sec.FilePool <- file }()
 
-	_, err := file.WriteAt(bytes.Repeat([]byte{0x00}, 4), int64(loc.Offset+benchtop.ROW_OFFSET_HSIZE))
-	if err != nil {
-		return fmt.Errorf("writeAt failed: %w", err)
-	}
 	sec.Lock.Lock()
+	defer sec.Lock.Unlock()
+
+	blockMeta := sec.Blocks[loc.BlockIndex]
+
+	// Read compressed block
+	_, err := file.Seek(int64(blockMeta.FileOffset), io.SeekStart)
+	if err != nil {
+		return fmt.Errorf("failed to seek to block offset %d in section %d: %w", blockMeta.FileOffset, loc.Section, err)
+	}
+	cData := make([]byte, blockMeta.Size)
+	_, err = io.ReadFull(file, cData)
+	if err != nil {
+		return fmt.Errorf("failed to read compressed block data at offset %d in section %d: %w", blockMeta.FileOffset, loc.Section, err)
+	}
+
+	// Decompress block
+	decompressed, err := zstd.Decompress(nil, cData)
+	if err != nil {
+		return fmt.Errorf("failed to decompress block at offset %d in section %d: %w", blockMeta.FileOffset, loc.Section, err)
+	}
+
+	// Rebuild modified block with deleted row
+	newBuf := new(bytes.Buffer)
+	it := block.NewMemBlock().Iterator(decompressed)
+	currentRow := uint16(0)
+	for {
+		rowData, err := it.Next()
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			return fmt.Errorf("failed to read row %d in block %d of section %d: %w", currentRow, loc.BlockIndex, loc.Section, err)
+		}
+		if currentRow == loc.RowIndex {
+			// Write zero length to mark row as deleted
+			if err := binary.Write(newBuf, binary.LittleEndian, uint32(0)); err != nil {
+				return fmt.Errorf("failed to write zero length for row %d in block %d of section %d: %w", currentRow, loc.BlockIndex, loc.Section, err)
+			}
+		} else {
+			// Copy row as is
+			if err := binary.Write(newBuf, binary.LittleEndian, uint32(len(rowData))); err != nil {
+				return fmt.Errorf("failed to write length for row %d in block %d of section %d: %w", currentRow, loc.BlockIndex, loc.Section, err)
+			}
+			newBuf.Write(rowData)
+		}
+		currentRow++
+	}
+
+	// Compress the modified block
+	newData := newBuf.Bytes()
+	cNew, err := zstd.Compress(nil, newData)
+	if err != nil {
+		return fmt.Errorf("failed to compress modified block: %w", err)
+	}
+
+	// Write the compressed modified block back
+	_, err = file.Seek(int64(blockMeta.FileOffset), io.SeekStart)
+	if err != nil {
+		return fmt.Errorf("failed to seek to block offset %d in section %d: %w", blockMeta.FileOffset, loc.Section, err)
+	}
+	_, err = file.Write(cNew)
+	if err != nil {
+		return fmt.Errorf("failed to write modified compressed block at offset %d in section %d: %w", blockMeta.FileOffset, loc.Section, err)
+	}
+
+	// Update metadata
+	sec.Blocks[loc.BlockIndex].Size = uint32(len(cNew))
 	sec.DeletedRows++
 	sec.LiveBytes -= loc.Size
-	sec.Lock.Unlock()
+
 	return nil
 }
 
@@ -265,26 +385,101 @@ func (b *JSONTable) DeleteRow(loc *benchtop.RowLoc, id []byte) error {
 		return fmt.Errorf("section %d not found", loc.Section)
 	}
 
+	// Handle in-memory block if BlockIndex points to the current block
+	if int(loc.BlockIndex) == len(sec.Blocks) {
+		sec.Lock.Lock()
+		defer sec.Lock.Unlock()
+		if sec.CurrentBlock == nil || int(loc.RowIndex) >= len(sec.CurrentBlock.Rows) {
+			return fmt.Errorf("row index %d out of range in current block of section %d", loc.RowIndex, loc.Section)
+		}
+		// Mark row as deleted by setting its data to an empty slice
+		sec.CurrentBlock.Size -= uint32(len(sec.CurrentBlock.Rows[loc.RowIndex]))
+		sec.CurrentBlock.Rows[loc.RowIndex] = nil // Mark as deleted
+		sec.DeletedRows++
+		sec.LiveBytes -= loc.Size
+		return nil
+	}
+
+	// Handle flushed block
+	if int(loc.BlockIndex) >= len(sec.Blocks) {
+		return fmt.Errorf("block index %d out of range in section %d", loc.BlockIndex, loc.Section)
+	}
+
 	sec.Lock.Lock()
 	defer sec.Lock.Unlock()
 
-	_, err := sec.File.Seek(int64(loc.Offset+benchtop.ROW_OFFSET_HSIZE), io.SeekStart)
+	// Get block metadata
+	blockMeta := sec.Blocks[loc.BlockIndex]
+
+	// Seek to the start of the block
+	_, err := sec.File.Seek(int64(blockMeta.FileOffset), io.SeekStart)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to seek to block offset %d in section %d: %w", blockMeta.FileOffset, loc.Section, err)
 	}
-	_, err = sec.Writer.Write(bytes.Repeat([]byte{0x00}, 4))
+
+	// Read the entire block
+	blockData := make([]byte, blockMeta.Size)
+	_, err = io.ReadFull(sec.File, blockData)
 	if err != nil {
-		return fmt.Errorf("writeAt failed: %w", err)
+		return fmt.Errorf("failed to read block data at offset %d in section %d: %w", blockMeta.FileOffset, loc.Section, err)
 	}
+
+	// Create a new buffer for the modified block
+	newBuf := new(bytes.Buffer)
+	it := sec.CurrentBlock.Iterator(blockData)
+	currentRow := uint16(0)
+
+	// Rewrite block, skipping or zeroing the deleted row
+	for {
+		rowData, err := it.Next()
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			return fmt.Errorf("failed to read row %d in block %d of section %d: %w", currentRow, loc.BlockIndex, loc.Section, err)
+		}
+		if currentRow == loc.RowIndex {
+			// Write zero length to mark row as deleted
+			if err := binary.Write(newBuf, binary.LittleEndian, uint32(0)); err != nil {
+				return fmt.Errorf("failed to write zero length for row %d in block %d of section %d: %w", currentRow, loc.BlockIndex, loc.Section, err)
+			}
+		} else {
+			// Copy row as is
+			if err := binary.Write(newBuf, binary.LittleEndian, uint32(len(rowData))); err != nil {
+				return fmt.Errorf("failed to write length for row %d in block %d of section %d: %w", currentRow, loc.BlockIndex, loc.Section, err)
+			}
+			newBuf.Write(rowData)
+		}
+		currentRow++
+	}
+
+	// Write the modified block back to the file
+	_, err = sec.File.Seek(int64(blockMeta.FileOffset), io.SeekStart)
+	if err != nil {
+		return fmt.Errorf("failed to seek to block offset %d in section %d: %w", blockMeta.FileOffset, loc.Section, err)
+	}
+	newData := newBuf.Bytes()
+	_, err = sec.File.Write(newData)
+	if err != nil {
+		return fmt.Errorf("failed to write modified block at offset %d in section %d: %w", blockMeta.FileOffset, loc.Section, err)
+	}
+
+	// Update block metadata
+	sec.Blocks[loc.BlockIndex].Size = uint32(len(newData))
 	sec.DeletedRows++
 	sec.LiveBytes -= loc.Size
+
 	return nil
 }
 
+// Scan scans through all blocks and sections in the table, applying the filter if provided.
 func (b *JSONTable) Scan(loadData bool, filter benchtop.RowFilter) chan any {
 	outChan := make(chan any, 100*len(b.Sections))
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, b.MaxConcurrentSections)
+
+	// Number of workers for parallel row processing within a block
+	const rowWorkers = 4
 
 	partitions := make(map[uint8]bool)
 	for i := uint8(0); i < uint8(b.NumPartitions); i++ {
@@ -295,80 +490,94 @@ func (b *JSONTable) Scan(loadData bool, filter benchtop.RowFilter) chan any {
 		for _, secId := range b.PartitionMap[pId] {
 			sec, exists := b.Sections[secId]
 			if !exists {
-				log.Debugf("SECTION: %s does not exist in %s", secId, b.Sections)
+				logrus.Debugf("SECTION: %d does not exist in %#v", secId, b.Sections)
 				continue
 			}
 			wg.Add(1)
 			go func(sec *section.Section) {
+				defer wg.Done()
 				sem <- struct{}{}
 				handle := <-sec.FilePool
 				defer func() {
-					<-sem
 					sec.FilePool <- handle
-					wg.Done()
+					<-sem
 				}()
 
-				fileInfo, err := handle.Stat()
-				if err != nil {
-					log.Errorf("Error getting file info for section %d: %v", sec.ID, err)
+				// Check if section has any data
+				sec.Lock.RLock()
+				hasInMemoryData := sec.CurrentBlock != nil && len(sec.CurrentBlock.Rows) > 0
+				sec.Lock.RUnlock()
+				hasFlushedData := len(sec.Blocks) > 0
+				if !hasInMemoryData && !hasFlushedData {
+					logrus.Debugf("Skipping empty section %d (%s).", sec.ID, handle.Name())
 					return
 				}
-				// Check for an empty file before attempting the mmap.
-				if fileInfo.Size() == 0 {
-					log.Debugf("Skipping empty file for section %d (%s).", sec.ID, handle.Name())
-					return
-				}
-				_, err = handle.Seek(0, io.SeekStart)
-				if err != nil {
-					log.Errorln("Error in scan seek:", err)
-					return
-				}
-				m, err := mmap.Map(handle, mmap.RDONLY, 0)
-				if err != nil {
-					log.Errorln("Error mapping file:", err)
-					return
-				}
-				defer m.Unmap()
 
-				var offset uint32 = 0
-				for offset+benchtop.ROW_HSIZE <= uint32(len(m)) {
-					header := m[offset : offset+benchtop.ROW_HSIZE]
-					nextOffset := binary.LittleEndian.Uint32(header[:benchtop.ROW_OFFSET_HSIZE])
-					bSize := binary.LittleEndian.Uint32(header[benchtop.ROW_OFFSET_HSIZE:benchtop.ROW_HSIZE])
-
-					// Skip deleted rows (bSize == 0)
-					if bSize == 0 {
-						if nextOffset == 0 || nextOffset <= offset {
-							break // End of valid data or corrupted nextOffset
+				// Process in-memory block first
+				if hasInMemoryData {
+					var rowWG sync.WaitGroup
+					rowSem := make(chan struct{}, rowWorkers)
+					sec.Lock.RLock()
+					for _, rowData := range sec.CurrentBlock.Rows {
+						if len(rowData) == 0 {
+							continue // Skip deleted or empty rows
 						}
-						offset = nextOffset
-						continue
+						rowWG.Add(1)
+						rowSem <- struct{}{}
+						go func(data []byte) {
+							defer rowWG.Done()
+							defer func() { <-rowSem }()
+							processErr := b.processJSONRowData(data, loadData, filter, outChan)
+							if processErr != nil {
+								logrus.Debugf("Skipping malformed in-memory row at section %d: %v", sec.ID, processErr)
+							}
+						}(rowData)
 					}
+					sec.Lock.RUnlock()
+					rowWG.Wait()
+				}
 
-					/*if bSize == 0 || bSize == nextOffset-benchtop.ROW_HSIZE {
-						offset = nextOffset
-						continue
-					}*/
-
-					jsonStart := offset + benchtop.ROW_HSIZE
-					jsonEnd := jsonStart + bSize
-					// Ensure the row data fits within the file
-					//fmt.Println("START: ", jsonStart, "END: ", jsonEnd, "SEC: ", sec.ID)
-					if jsonEnd > uint32(len(m)) {
-						log.Debugf("Incomplete record at section %d, offset %d", sec.ID, offset)
-						break
+				// Process flushed blocks from disk
+				if hasFlushedData {
+					var rowWG sync.WaitGroup
+					rowSem := make(chan struct{}, rowWorkers)
+					for _, blk := range sec.Blocks {
+						_, err := handle.Seek(int64(blk.FileOffset), io.SeekStart)
+						if err != nil {
+							logrus.Errorf("Failed to seek to block offset %d in section %d: %v", blk.FileOffset, sec.ID, err)
+							continue
+						}
+						blockData := make([]byte, blk.Size)
+						_, err = io.ReadFull(handle, blockData)
+						if err != nil {
+							logrus.Errorf("Failed to read block data at offset %d in section %d: %v", blk.FileOffset, sec.ID, err)
+							continue
+						}
+						it := block.NewMemBlock().Iterator(blockData)
+						for {
+							rowData, err := it.Next()
+							if err != nil {
+								if err != io.EOF {
+									logrus.Errorf("Error reading row in block at section %d, offset %d: %v", sec.ID, blk.FileOffset, err)
+								}
+								break
+							}
+							if len(rowData) == 0 {
+								continue // Skip deleted or empty rows
+							}
+							rowWG.Add(1)
+							rowSem <- struct{}{}
+							go func(data []byte) {
+								defer rowWG.Done()
+								defer func() { <-rowSem }()
+								processErr := b.processJSONRowData(data, loadData, filter, outChan)
+								if processErr != nil {
+									log.Debugf("Skipping malformed row in block at section %d, offset %d: %v", sec.ID, blk.FileOffset, processErr)
+								}
+							}(rowData)
+						}
 					}
-
-					rowData := m[jsonStart:jsonEnd]
-					err = b.processJSONRowData(rowData, loadData, filter, outChan)
-					if err != nil {
-						log.Debugf("Skipping malformed row at section %d, offset %d: %v", sec.ID, offset, err)
-					}
-
-					if nextOffset == 0 || nextOffset <= offset {
-						break
-					}
-					offset = nextOffset
+					rowWG.Wait()
 				}
 			}(sec)
 		}
@@ -384,6 +593,7 @@ func (b *JSONTable) Scan(loadData bool, filter benchtop.RowFilter) chan any {
 // processBSONRowData handles the parsing of row bytes,
 // applying filters, and sending the result to the output channel.
 // It returns an error if the row is malformed or cannot be processed.
+// Updated processJSONRowData without decompression
 func (b *JSONTable) processJSONRowData(
 	rowData []byte,
 	loadData bool,
@@ -392,15 +602,14 @@ func (b *JSONTable) processJSONRowData(
 ) error {
 	var val any
 
-	newData, err := zstd.Decompress(nil, rowData)
-	if err != nil {
-		return err
-	}
+	newData := rowData // No decompression, as rows are uncompressed within block
 
 	if loadData || filter != nil && !filter.IsNoOp() {
 		var m RowData
-
-		sonic.ConfigFastest.Unmarshal(newData, &m)
+		err := sonic.ConfigFastest.Unmarshal(newData, &m)
+		if err != nil {
+			return err
+		}
 		val, err = b.unpackData(true, true, &m)
 		if err != nil {
 			return err
@@ -513,7 +722,7 @@ func (b *JSONTable) CompactSection(secId uint16) error {
 		if err != nil {
 			return fmt.Errorf("failed to unmarshal ID field at section %d, offset %d: %w", sec.ID, offset, err)
 		}
-		inputChan <- benchtop.Index{Key: []byte(key), Loc: benchtop.RowLoc{Offset: newOffset, Size: bSize}}
+		inputChan <- benchtop.Index{Key: []byte(key), Loc: benchtop.RowLoc{BlockIndex: uint16(newOffset), Size: bSize}}
 
 		newOffsetBytes := make([]byte, benchtop.ROW_OFFSET_HSIZE)
 		binary.LittleEndian.PutUint32(newOffsetBytes, newOffset+bSize+benchtop.ROW_HSIZE)

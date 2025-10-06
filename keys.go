@@ -33,8 +33,23 @@ var FieldPrefix = []byte{'F'}
 // used for reverse indexing specific field keys in order to be able to efficiently delete indices
 var RFieldPrefix = []byte{'R'}
 
+// Block Index
+// key: B
+// used for indexing the order of the rows as they are stored, compressed in the DB.
+// if size is 0 then the row has been marked for delete.
+var BlockPrefix = byte('B')
+
 // The '0x1F' invisible character unit seperator not supposed to appear in ASCII text
 var FieldSep = []byte{0x1F}
+
+func BlockKey(table uint16, section uint16, count uint16) []byte {
+	var out [7]byte
+	out[0] = BlockPrefix
+	binary.LittleEndian.PutUint16(out[1:], table)
+	binary.LittleEndian.PutUint16(out[3:], section)
+	binary.LittleEndian.PutUint16(out[5:], count)
+	return out[:]
+}
 
 func RFieldKey(label, field, rowID string) []byte {
 	return bytes.Join([][]byte{
@@ -124,16 +139,16 @@ func EncodeRowLoc(loc *RowLoc) []byte {
 	var out [12]byte
 	binary.LittleEndian.PutUint16(out[0:], loc.TableId)
 	binary.LittleEndian.PutUint16(out[2:], loc.Section)
-	binary.LittleEndian.PutUint32(out[4:], loc.Offset)
-	binary.LittleEndian.PutUint32(out[8:], loc.Size)
+	binary.LittleEndian.PutUint16(out[4:], loc.BlockIndex)
+	binary.LittleEndian.PutUint32(out[6:], loc.Size)
 	return out[:]
 }
 
 func DecodeRowLoc(v []byte) *RowLoc {
 	return &RowLoc{
-		TableId: binary.LittleEndian.Uint16(v[0:]),
-		Section: binary.LittleEndian.Uint16(v[2:]),
-		Offset:  binary.LittleEndian.Uint32(v[4:]),
-		Size:    binary.LittleEndian.Uint32(v[8:]),
+		TableId:    binary.LittleEndian.Uint16(v[0:]),
+		Section:    binary.LittleEndian.Uint16(v[2:]),
+		BlockIndex: binary.LittleEndian.Uint16(v[4:]),
+		Size:       binary.LittleEndian.Uint32(v[6:]),
 	}
 }

@@ -1,7 +1,6 @@
 package section
 
 import (
-	"encoding/binary"
 	"fmt"
 	"io"
 	"os"
@@ -9,24 +8,109 @@ import (
 
 	"github.com/DataDog/zstd"
 	"github.com/bmeg/benchtop"
-	"github.com/bytedance/sonic"
+	"github.com/bmeg/benchtop/jsontable/block"
 )
 
-// Section represents a physical file within a partition
-type Section struct {
-	ID          uint16 // Global unique section ID (for RowLoc)
-	PartitionID uint8  // Partition this section belongs to
-	Path        string // File path (e.g., table.data.partition0.section1)
-	File        *os.File
-	Writer      *zstd.Writer  // Main file handle for writes
-	FilePool    chan *os.File // Pool for read/write access
-	Lock        sync.RWMutex  // Per-section lock
-	TotalRows   uint32        // Total rows (live + deleted)
-	DeletedRows uint32        // Deleted rows (for compaction trigger)
-	LiveBytes   uint32        // Live data size (bytes)
-	Active      bool          // True unless compacted/merged
+const (
+	MAX_BLOCK_SIZE uint32 = 52_428_800 // 50 MB
+)
+
+type BlockMeta struct {
+	FileOffset uint32 // Offset in the section file where the block starts
+	Size       uint32 // Compressed block size
+	RowCount   uint16 // Number of rows in the block
 }
 
+type Section struct {
+	ID           uint16
+	PartitionID  uint8
+	Path         string
+	File         *os.File
+	Writer       *zstd.Writer
+	FilePool     chan *os.File
+	Lock         sync.RWMutex
+	TotalRows    uint32
+	LiveBytes    uint32
+	Active       bool
+	CurrentBlock *block.MemBlock
+	Blocks       []BlockMeta
+	DeletedRows  int
+}
+
+// Update AppendRow to check size before appending
+func (s *Section) AppendRow(row []byte) (*benchtop.RowLoc, error) {
+	s.Lock.Lock()
+	defer s.Lock.Unlock()
+
+	/*  Validate JSON
+	var tmp any
+	if err := sonic.ConfigFastest.Unmarshal(row, &tmp); err != nil {
+		return nil, fmt.Errorf("invalid JSON row: %w", err)
+	}*/
+
+	// Check if adding this row would exceed MaxBlockSize (approximate serialized size: len(row) + 4)
+	if s.CurrentBlock.Size+uint32(len(row))+4 > MAX_BLOCK_SIZE {
+		if flushErr := s.flushBlock(); flushErr != nil {
+			return nil, flushErr
+		}
+	}
+
+	s.TotalRows++
+	// BlockIndex points to the current (potentially future) block index
+	return &benchtop.RowLoc{
+		Section:    s.ID,
+		BlockIndex: uint16(len(s.Blocks)),
+		RowIndex:   s.CurrentBlock.Append(row),
+		Size:       uint32(len(row)),
+	}, nil
+}
+
+// Update flushBlock to track LiveBytes accurately
+func (s *Section) flushBlock() error {
+	if s.CurrentBlock == nil || len(s.CurrentBlock.Rows) == 0 {
+		return nil
+	}
+
+	data, err := s.CurrentBlock.Finalize()
+	if err != nil {
+		return fmt.Errorf("failed to finalize block: %w", err)
+	}
+
+	// Compress the entire block
+	cData, err := zstd.Compress(nil, data)
+	if err != nil {
+		return fmt.Errorf("failed to compress block: %w", err)
+	}
+
+	offset, err := s.File.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return fmt.Errorf("failed to get file offset: %w", err)
+	}
+
+	n, err := s.File.Write(cData)
+	if err != nil {
+		return fmt.Errorf("failed to write compressed block: %w", err)
+	}
+
+	// Track block metadata with compressed size
+	s.Blocks = append(s.Blocks, BlockMeta{
+		FileOffset: uint32(offset),
+		Size:       uint32(n),
+		RowCount:   uint16(len(s.CurrentBlock.Rows)),
+	})
+
+	s.LiveBytes += uint32(n)
+
+	s.CurrentBlock = block.NewMemBlock()
+	return nil
+}
+
+// BlockIterator returns an iterator over the current in-memory block
+func (s *Section) BlockIterator(blockBytes []byte) *block.MemBlockIterator {
+	return block.NewMemBlock().Iterator(blockBytes)
+}
+
+/*
 func (s *Section) WriteJsonEntryToSection(payload []byte) (*benchtop.RowLoc, error) {
 	// Validate payload is valid JSON (for debugging)
 	var temp any
@@ -61,16 +145,4 @@ func (s *Section) WriteJsonEntryToSection(payload []byte) (*benchtop.RowLoc, err
 		Size:    compressedLen,                                      // Compressed data size only
 	}, nil
 }
-
-func (w *Section) GetCompressedFileOffset() (uint32, error) {
-	// You need to flush first to ensure all data is written to the file.
-	if err := w.Writer.Flush(); err != nil { // Flush ensures data is written to w.file
-		return 0, fmt.Errorf("failed to flush zstd writer before getting file offset: %w", err)
-	}
-	// Get the current position of the underlying file.
-	pos, err := w.File.Seek(0, io.SeekCurrent) // Use SeekCurrent
-	if err != nil {
-		return 0, fmt.Errorf("failed to get current file offset: %w", err)
-	}
-	return uint32(pos), nil
-}
+*/

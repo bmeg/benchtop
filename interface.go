@@ -16,7 +16,6 @@ type ColumnDef struct {
 /*
 	 Keep this code as a reminder for what the table field type architecture when bson was used
 		 type FieldType bsontype.Type
-
 		 const (
 			Double      FieldType = FieldType(bson.TypeDouble)
 			Int64       FieldType = FieldType(bson.TypeInt64)
@@ -38,10 +37,11 @@ type Index struct {
 }
 
 type RowLoc struct {
-	TableId uint16
-	Section uint16 // Sectioning allows for smaller Offset, Size
-	Offset  uint32 // Max offset, size is 4GB
-	Size    uint32
+	TableId    uint16
+	Section    uint16
+	BlockIndex uint16
+	RowIndex   uint16
+	Size       uint32
 }
 
 type RowFilter interface {
