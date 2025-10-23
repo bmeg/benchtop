@@ -68,7 +68,8 @@ type TableStore interface {
 	GetRow(loc *RowLoc) (map[string]any, error)
 	DeleteRow(loc *RowLoc, id []byte) error
 
-	Scan(key bool, filter RowFilter) chan any
+	ScanRows(filter RowFilter) chan map[string]any
+	ScanIDs(filter RowFilter) chan string
 
 	Compact() error
 	Close()

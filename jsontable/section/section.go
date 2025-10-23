@@ -5,14 +5,16 @@ import (
 	"io"
 	"os"
 	"sync"
+	"time"
 
 	"github.com/DataDog/zstd"
 	"github.com/bmeg/benchtop"
 	"github.com/bmeg/benchtop/jsontable/block"
+	"github.com/caarlos0/log"
 )
 
 const (
-	MAX_BLOCK_SIZE uint32 = 52_428_800 // 50 MB
+	MAX_BLOCK_SIZE uint32 = 10_485_760 //52_428_800 // 50 MB
 )
 
 type BlockMeta struct {
@@ -35,6 +37,7 @@ type Section struct {
 	CurrentBlock *block.MemBlock
 	Blocks       []BlockMeta
 	DeletedRows  int
+	cachedBlocks map[int][]byte
 }
 
 // Update AppendRow to check size before appending
@@ -110,39 +113,75 @@ func (s *Section) BlockIterator(blockBytes []byte) *block.MemBlockIterator {
 	return block.NewMemBlock().Iterator(blockBytes)
 }
 
-/*
-func (s *Section) WriteJsonEntryToSection(payload []byte) (*benchtop.RowLoc, error) {
-	// Validate payload is valid JSON (for debugging)
-	var temp any
-	if err := sonic.ConfigFastest.Unmarshal(payload, &temp); err != nil {
-		return nil, fmt.Errorf("input payload is not valid JSON: %w", err)
+// getDecompressedBlock retrieves or loads and caches a decompressed block
+func (sec *Section) GetDecompressedBlock(blockIndex int, section uint16) ([]byte, error) {
+	start := time.Now()
+	cacheHit := false
+	defer func() {
+		log.Debugf("getDecompressedBlock(section=%d, block=%d): total_duration=%dµs, cache_hit=%t", section, blockIndex, time.Since(start).Microseconds(), cacheHit)
+	}()
+
+	decompressed, ok := sec.cachedBlocks[blockIndex]
+	if ok {
+		cacheHit = true
+		return decompressed, nil
 	}
 
-	// Compress payload with explicit compression level
-	cPayload, err := zstd.Compress(nil, payload)
+	// Double-check under write lock
+	decompressed, ok = sec.cachedBlocks[blockIndex]
+	if ok {
+		cacheHit = true
+		return decompressed, nil
+	}
+
+	tFile := time.Now()
+	file := <-sec.FilePool
+	defer func() { sec.FilePool <- file }()
+	log.Debugf("getDecompressedBlock(section=%d, block=%d): file_acquire_duration=%dµs", section, blockIndex, time.Since(tFile).Microseconds())
+
+	blockMeta := sec.Blocks[blockIndex]
+
+	tSeek := time.Now()
+	if _, err := file.Seek(int64(blockMeta.FileOffset), io.SeekStart); err != nil {
+		log.Debugf("getDecompressedBlock(section=%d, block=%d): seek_duration=%dµs", section, blockIndex, time.Since(tSeek).Microseconds())
+		return nil, fmt.Errorf("failed to seek to block offset %d in section %d: %w", blockMeta.FileOffset, section, err)
+	}
+	log.Debugf("getDecompressedBlock(section=%d, block=%d): seek_duration=%dµs", section, blockIndex, time.Since(tSeek).Microseconds())
+
+	tRead := time.Now()
+	cData := make([]byte, blockMeta.Size)
+	if _, err := io.ReadFull(file, cData); err != nil {
+		log.Debugf("getDecompressedBlock(section=%d, block=%d): read_duration=%dµs", section, blockIndex, time.Since(tRead).Microseconds())
+		return nil, fmt.Errorf("failed to read compressed block data at offset %d in section %d: %w", blockMeta.FileOffset, section, err)
+	}
+	log.Debugf("getDecompressedBlock(section=%d, block=%d): read_duration=%dµs", section, blockIndex, time.Since(tRead).Microseconds())
+
+	tDecompress := time.Now()
+	decompressed, err := zstd.Decompress(nil, cData)
 	if err != nil {
-		return nil, fmt.Errorf("failed to compress payload: %w", err)
+		log.Debugf("getDecompressedBlock(section=%d, block=%d): decompress_duration=%dµs", section, blockIndex, time.Since(tDecompress).Microseconds())
+		return nil, fmt.Errorf("failed to decompress block at offset %d in section %d: %w", blockMeta.FileOffset, section, err)
 	}
-	compressedLen := uint32(len(cPayload))
+	log.Debugf("getDecompressedBlock(section=%d, block=%d): decompress_duration=%dµs", section, blockIndex, time.Since(tDecompress).Microseconds())
 
-	// Build header
-	header := make([]byte, benchtop.ROW_HSIZE)                                              // ROW_HSIZE == 8
-	binary.LittleEndian.PutUint32(header[:4], s.LiveBytes+compressedLen+benchtop.ROW_HSIZE) // Next offset
-	binary.LittleEndian.PutUint32(header[4:], compressedLen)                                // Compressed data length
-	cPayload = append(header, cPayload...)
+	// Initialize cache if nil
+	if sec.cachedBlocks == nil {
+		sec.cachedBlocks = make(map[int][]byte)
+	}
+	sec.cachedBlocks[blockIndex] = decompressed
 
-	// Write to file
-	_, err = s.File.Write(cPayload)
-	if err != nil {
-		return nil, fmt.Errorf("failed to write payload: %w", err)
+	// Simple eviction: limit to 100 blocks
+	const maxCachedBlocks = 100
+	if len(sec.cachedBlocks) > maxCachedBlocks {
+		// Evict the smallest index
+		minIndex := blockIndex
+		for idx := range sec.cachedBlocks {
+			if idx < minIndex {
+				minIndex = idx
+			}
+		}
+		delete(sec.cachedBlocks, minIndex)
 	}
 
-	// Update LiveBytes and return
-	s.LiveBytes += compressedLen + benchtop.ROW_HSIZE
-	return &benchtop.RowLoc{
-		Section: s.ID,
-		Offset:  s.LiveBytes - (compressedLen + benchtop.ROW_HSIZE), // Start of this row
-		Size:    compressedLen,                                      // Compressed data size only
-	}, nil
+	return decompressed, nil
 }
-*/

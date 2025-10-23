@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/DataDog/zstd"
 	"github.com/bmeg/benchtop"
@@ -20,7 +21,6 @@ import (
 	"github.com/bmeg/grip/log"
 	"github.com/edsrzf/mmap-go"
 	multierror "github.com/hashicorp/go-multierror"
-	"github.com/sirupsen/logrus"
 
 	"github.com/bytedance/sonic"
 )
@@ -139,7 +139,6 @@ func (b *JSONTable) CreateNewSection(partitionId uint8) (*section.Section, error
 	localSecId := len(b.PartitionMap[partitionId])
 	secId := uint16(partitionId)*SECTION_ID_MULT + uint16(localSecId)
 
-	// Ensure the generated ID is not already in use (edge case sanity check)
 	if _, exists := b.Sections[secId]; exists {
 		return nil, fmt.Errorf("section ID conflict: ID %d already exists", secId)
 	}
@@ -176,105 +175,108 @@ func (b *JSONTable) CreateNewSection(partitionId uint8) (*section.Section, error
 	b.PartitionMap[partitionId] = append(b.PartitionMap[partitionId], secId)
 	return sec, nil
 }
-
 func (b *JSONTable) GetRow(loc *benchtop.RowLoc) (map[string]any, error) {
+	start := time.Now()
+	defer func() {
+		log.Debugf("GetRow(section=%d, block=%d, row=%d): total_duration=%dµs", loc.Section, loc.BlockIndex, loc.RowIndex, time.Since(start).Microseconds())
+	}()
+
+	//tSection := time.Now()
 	sec, exists := b.Sections[loc.Section]
 	if !exists {
+		//log.Debugf("GetRow(section=%d, block=%d, row=%d): section_lookup_duration=%dµs", loc.Section, loc.BlockIndex, loc.RowIndex, time.Since(tSection).Microseconds())
 		return nil, fmt.Errorf("section %d not found", loc.Section)
 	}
+	//log.Debugf("GetRow(section=%d, block=%d, row=%d): section_lookup_duration=%dµs", loc.Section, loc.BlockIndex, loc.RowIndex, time.Since(tSection).Microseconds())
 
-	sec.Lock.RLock()
-	defer sec.Lock.RUnlock()
+	// sec.Lock.RLock()
+	// defer sec.Lock.RUnlock()
 
-	// Check if the row is in the in-memory CurrentBlock
+	//tBoundsCheck := time.Now()
 	if int(loc.BlockIndex) == len(sec.Blocks) && sec.CurrentBlock != nil {
 		if int(loc.RowIndex) >= len(sec.CurrentBlock.Rows) {
+			//log.Debugf("GetRow(section=%d, block=current, row=%d): bounds_check_duration=%dµs", loc.Section, loc.RowIndex, time.Since(tBoundsCheck).Microseconds())
 			return nil, fmt.Errorf("row index %d out of range in current block of section %d", loc.RowIndex, loc.Section)
 		}
 		rowData := sec.CurrentBlock.Rows[loc.RowIndex]
 		if len(rowData) == 0 {
+			//log.Debugf("GetRow(section=%d, block=current, row=%d): bounds_check_duration=%dµs", loc.Section, loc.RowIndex, time.Since(tBoundsCheck).Microseconds())
 			return nil, fmt.Errorf("row %d in current block of section %d is deleted or invalid", loc.RowIndex, loc.Section)
 		}
-		// Verify row size matches loc.Size
 		if uint32(len(rowData)) != loc.Size {
+			//log.Debugf("GetRow(section=%d, block=current, row=%d): bounds_check_duration=%dµs", loc.Section, loc.RowIndex, time.Since(tBoundsCheck).Microseconds())
 			return nil, fmt.Errorf("row size mismatch in current block of section %d: expected %d, got %d", loc.Section, loc.Size, len(rowData))
 		}
-		// Decode the JSON (no decompress needed)
+		//log.Debugf("GetRow(section=%d, block=current, row=%d): bounds_check_duration=%dµs", loc.Section, loc.RowIndex, time.Since(tBoundsCheck).Microseconds())
+		//tUnmarshal := time.Now()
 		var m RowData
 		err := sonic.ConfigFastest.Unmarshal(rowData, &m)
 		if err != nil {
+			//log.Debugf("GetRow(section=%d, block=current, row=%d): unmarshal_duration=%dµs", loc.Section, loc.RowIndex, time.Since(tUnmarshal).Microseconds())
 			return nil, fmt.Errorf("failed to decode JSON row %d in current block of section %d: %w", loc.RowIndex, loc.Section, err)
 		}
-		out, err := b.unpackData(true, false, &m)
+		//log.Debugf("GetRow(section=%d, block=current, row=%d): unmarshal_duration=%dµs", loc.Section, loc.RowIndex, time.Since(tUnmarshal).Microseconds())
+		//tUnpack := time.Now()
+		out, err := b.unpackData(&m)
 		if err != nil {
+			//log.Debugf("GetRow(section=%d, block=current, row=%d): unpack_duration=%dµs", loc.Section, loc.RowIndex, time.Since(tUnpack).Microseconds())
 			return nil, fmt.Errorf("failed to unpack data for row %d in current block of section %d: %w", loc.RowIndex, loc.Section, err)
 		}
-		return out.(map[string]any), nil
+		//log.Debugf("GetRow(section=%d, block=current, row=%d): unpack_duration=%dµs", loc.Section, loc.RowIndex, time.Since(tUnpack).Microseconds())
+		return out, nil
 	}
+	//log.Debugf("GetRow(section=%d, block=%d, row=%d): bounds_check_duration=%dµs", loc.Section, loc.BlockIndex, loc.RowIndex, time.Since(tBoundsCheck).Microseconds())
 
-	// Ensure BlockIndex is valid for flushed blocks
 	if int(loc.BlockIndex) >= len(sec.Blocks) {
 		return nil, fmt.Errorf("block index %d out of range in section %d", loc.BlockIndex, loc.Section)
 	}
 
-	// Handle flushed block on disk
-	file := <-sec.FilePool
-	defer func() { sec.FilePool <- file }()
-
-	// Get block metadata
-	blockMeta := sec.Blocks[loc.BlockIndex]
-
-	// Seek to the start of the block
-	_, err := file.Seek(int64(blockMeta.FileOffset), io.SeekStart)
+	//tDecompress := time.Now()
+	decompressed, err := sec.GetDecompressedBlock(int(loc.BlockIndex), loc.Section)
 	if err != nil {
-		return nil, fmt.Errorf("failed to seek to block offset %d in section %d: %w", blockMeta.FileOffset, loc.Section, err)
+		//log.Debugf("GetRow(section=%d, block=%d, row=%d): decompress_duration=%dµs", loc.Section, loc.BlockIndex, loc.RowIndex, time.Since(tDecompress).Microseconds())
+		return nil, err
 	}
+	//log.Debugf("GetRow(section=%d, block=%d, row=%d): decompress_duration=%dµs", loc.Section, loc.BlockIndex, loc.RowIndex, time.Since(tDecompress).Microseconds())
 
-	// Read the compressed block
-	cData := make([]byte, blockMeta.Size)
-	_, err = io.ReadFull(file, cData)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read compressed block data at offset %d in section %d: %w", blockMeta.FileOffset, loc.Section, err)
-	}
-
-	// Decompress the block
-	decompressed, err := zstd.Decompress(nil, cData)
-	if err != nil {
-		return nil, fmt.Errorf("failed to decompress block at offset %d in section %d: %w", blockMeta.FileOffset, loc.Section, err)
-	}
-
-	// Create iterator for the decompressed block
+	//tIterator := time.Now()
 	it := block.NewMemBlock().Iterator(decompressed)
-
-	// Iterate to the desired row
-	var rowData []byte
-	for i := uint16(0); i <= loc.RowIndex; i++ {
-		data, err := it.Next()
-		if err != nil {
-			return nil, fmt.Errorf("failed to read row %d in block %d of section %d: %w", loc.RowIndex, loc.BlockIndex, loc.Section, err)
-		}
-		if i == loc.RowIndex {
-			rowData = data
-		}
+	//log.Debugf("GetRow(section=%d, block=%d, row=%d): iterator_create_duration=%dµs", loc.Section, loc.BlockIndex, loc.RowIndex, time.Since(tIterator).Microseconds())
+	//tLookup := time.Now()
+	rowData, err := it.Lookup(loc.RowIndex)
+	if err != nil {
+		//log.Debugf("GetRow(section=%d, block=%d, row=%d): iterator_lookup_duration=%dµs", loc.Section, loc.BlockIndex, loc.RowIndex, time.Since(tLookup).Microseconds())
+		return nil, fmt.Errorf("failed to lookup row %d in block %d of section %d: %w", loc.RowIndex, loc.BlockIndex, loc.Section, err)
 	}
+	//log.Debugf("GetRow(section=%d, block=%d, row=%d): iterator_lookup_duration=%dµs", loc.Section, loc.BlockIndex, loc.RowIndex, time.Since(tLookup).Microseconds())
 
-	// Verify row size matches loc.Size
+	//tSizeCheck := time.Now()
 	if uint32(len(rowData)) != loc.Size {
+		//log.Debugf("GetRow(section=%d, block=%d, row=%d): size_check_duration=%dµs", loc.Section, loc.BlockIndex, loc.RowIndex, time.Since(tSizeCheck).Microseconds())
 		return nil, fmt.Errorf("row size mismatch in block %d of section %d: expected %d, got %d", loc.BlockIndex, loc.Section, loc.Size, len(rowData))
 	}
+	//log.Debugf("GetRow(section=%d, block=%d, row=%d): size_check_duration=%dµs", loc.Section, loc.BlockIndex, loc.RowIndex, time.Since(tSizeCheck).Microseconds())
 
-	// Decode the JSON
+	//tUnmarshal := time.Now()
 	var m RowData
 	err = sonic.ConfigFastest.Unmarshal(rowData, &m)
 	if err != nil {
+		//log.Debugf("GetRow(section=%d, block=%d, row=%d): unmarshal_duration=%dµs", loc.Section, loc.BlockIndex, loc.RowIndex, time.Since(tUnmarshal).Microseconds())
 		return nil, fmt.Errorf("failed to decode JSON row %d in block %d of section %d: %w", loc.RowIndex, loc.BlockIndex, loc.Section, err)
 	}
+	//log.Debugf("GetRow(section=%d, block=%d, row=%d): unmarshal_duration=%dµs", loc.Section, loc.BlockIndex, loc.RowIndex, time.Since(tUnmarshal).Microseconds())
 
-	out, err := b.unpackData(true, false, &m)
+	//tUnpack := time.Now()
+	out, err := b.unpackData(&m)
 	if err != nil {
+		//log.Debugf("GetRow(section=%d, block=%d, row=%d): unpack_duration=%dµs", loc.Section, loc.BlockIndex, loc.RowIndex, time.Since(tUnpack).Microseconds())
 		return nil, fmt.Errorf("failed to unpack data for row %d in block %d of section %d: %w", loc.RowIndex, loc.BlockIndex, loc.Section, err)
 	}
-	return out.(map[string]any), nil
+	//log.Debugf("GetRow(section=%d, block=%d, row=%d): unpack_duration=%dµs", loc.Section, loc.BlockIndex, loc.RowIndex, time.Since(tUnpack).Microseconds())
+
+	//tReturn := time.Now()
+	//log.Debugf("GetRow(section=%d, block=%d, row=%d): return_duration=%dµs", loc.Section, loc.BlockIndex, loc.RowIndex, time.Since(tReturn).Microseconds())
+	return out, nil
 }
 
 func (b *JSONTable) MarkDeleteTable(loc *benchtop.RowLoc) error {
@@ -472,14 +474,25 @@ func (b *JSONTable) DeleteRow(loc *benchtop.RowLoc, id []byte) error {
 	return nil
 }
 
-// Scan scans through all blocks and sections in the table, applying the filter if provided.
+/*
+// Scan scans through all blocks and sections, applying the filter if provided.
+// Optimized for speed using streaming row processing via MemBlockIterator,
+// lazy unmarshaling, and sequential fallback for low section counts.
 func (b *JSONTable) Scan(loadData bool, filter benchtop.RowFilter) chan any {
+	log.Println("ENTERING OPTIMIZED HYBRID SCAN FUNCTION")
+	// Buffer size for output channel (tune based on consumer speed).
 	outChan := make(chan any, 100*len(b.Sections))
 	var wg sync.WaitGroup
-	sem := make(chan struct{}, b.MaxConcurrentSections)
 
-	// Number of workers for parallel row processing within a block
-	const rowWorkers = 4
+	// Fallback to sequential if few sections to avoid goroutine overhead.
+	// Tune threshold based on profiling (e.g., 8 for 4-core CPU).
+	if len(b.Sections) < 8 {
+		b.scanSequential(loadData, filter, outChan)
+		return outChan
+	}
+
+	// Concurrent mode: Semaphore limits goroutines (tune to CPU cores / 2).
+	sem := make(chan struct{}, runtime.NumCPU()/2)
 
 	partitions := make(map[uint8]bool)
 	for i := uint8(0); i < uint8(b.NumPartitions); i++ {
@@ -490,151 +503,542 @@ func (b *JSONTable) Scan(loadData bool, filter benchtop.RowFilter) chan any {
 		for _, secId := range b.PartitionMap[pId] {
 			sec, exists := b.Sections[secId]
 			if !exists {
-				logrus.Debugf("SECTION: %d does not exist in %#v", secId, b.Sections)
+				log.Debugf("SECTION: %d does not exist in %#v", secId, b.Sections)
 				continue
 			}
 			wg.Add(1)
 			go func(sec *section.Section) {
 				defer wg.Done()
-				sem <- struct{}{}
+				sem <- struct{}{} // Acquire semaphore slot
+
+				// Get file handle from pool.
 				handle := <-sec.FilePool
 				defer func() {
 					sec.FilePool <- handle
 					<-sem
 				}()
 
-				// Check if section has any data
+				// Check if section has data.
 				sec.Lock.RLock()
 				hasInMemoryData := sec.CurrentBlock != nil && len(sec.CurrentBlock.Rows) > 0
-				sec.Lock.RUnlock()
 				hasFlushedData := len(sec.Blocks) > 0
+				sec.Lock.RUnlock()
+
 				if !hasInMemoryData && !hasFlushedData {
-					logrus.Debugf("Skipping empty section %d (%s).", sec.ID, handle.Name())
+					log.Debugf("Skipping empty section %d (%s).", sec.ID, handle.Name())
 					return
 				}
 
-				// Process in-memory block first
+				// Process in-memory block.
 				if hasInMemoryData {
-					var rowWG sync.WaitGroup
-					rowSem := make(chan struct{}, rowWorkers)
+					sec.Lock.RLock()
+					for _, rowData := range sec.CurrentBlock.Rows {
+						if len(rowData) == 0 {
+							continue // Skip deleted/empty rows.
+						}
+						if err := b.processJSONRowData(rowData, loadData, filter, outChan); err != nil {
+							log.Debugf("Skipping malformed in-memory row at section %d: %v", sec.ID, err)
+						}
+					}
+					sec.Lock.RUnlock()
+				}
+
+				// Process flushed blocks with streaming.
+				if hasFlushedData {
+					for _, blk := range sec.Blocks {
+						// Read compressed block.
+						if _, err := handle.Seek(int64(blk.FileOffset), io.SeekStart); err != nil {
+							log.Errorf("Failed to seek to block offset %d in section %d: %v", blk.FileOffset, sec.ID, err)
+							continue
+						}
+						blockData := make([]byte, blk.Size)
+						if _, err := io.ReadFull(handle, blockData); err != nil {
+							log.Errorf("Failed to read block data at offset %d in section %d: %v", blk.FileOffset, sec.ID, err)
+							continue
+						}
+
+						// Decompress using pooled buffer.
+						buf := decompressPool.Get().([]byte)[:0]
+						decompressed, err := zstd.Decompress(buf, blockData)
+						if err != nil {
+							log.Errorf("Failed to decompress block at offset %d in section %d: %v", blk.FileOffset, sec.ID, err)
+							decompressPool.Put(decompressed[:0])
+							continue
+						}
+
+						// Stream rows with iterator.
+						it := block.NewMemBlock().Iterator(decompressed)
+						if it == nil {
+							log.Errorf("Corrupt block at offset %d in section %d: invalid data", blk.FileOffset, sec.ID)
+							decompressPool.Put(decompressed[:0])
+							continue
+						}
+
+						for {
+							rowBytes, err := it.Next()
+							if err == io.EOF {
+								break
+							}
+							if err != nil {
+								log.Debugf("Skipping malformed row in block at offset %d in section %d: %v", blk.FileOffset, sec.ID, err)
+								continue
+							}
+							if len(rowBytes) == 0 {
+								continue // Skip empty/deleted.
+							}
+
+							if err := b.processJSONRowData(rowBytes, loadData, filter, outChan); err != nil {
+								log.Debugf("Skipping malformed row in block at offset %d in section %d: %v", blk.FileOffset, sec.ID, err)
+							}
+						}
+						decompressPool.Put(decompressed[:0])
+					}
+				}
+			}(sec)
+		}
+	}
+
+	// Close output channel when done.
+	go func() {
+		wg.Wait()
+		close(outChan)
+	}()
+	return outChan
+}
+
+// scanSequential is a fallback for low section counts to avoid goroutine overhead.
+func (b *JSONTable) scanSequential(loadData bool, filter benchtop.RowFilter, outChan chan any) {
+	for pId := uint8(0); pId < uint8(b.NumPartitions); pId++ {
+		for _, secId := range b.PartitionMap[pId] {
+			sec, exists := b.Sections[secId]
+			if !exists {
+				log.Debugf("SECTION: %d does not exist in %#v", secId, b.Sections)
+				continue
+			}
+
+			// Get file handle.
+			handle := <-sec.FilePool
+			defer func() {
+				sec.FilePool <- handle
+			}()
+
+			// Check if section has data.
+			sec.Lock.RLock()
+			hasInMemoryData := sec.CurrentBlock != nil && len(sec.CurrentBlock.Rows) > 0
+			hasFlushedData := len(sec.Blocks) > 0
+			sec.Lock.RUnlock()
+
+			if !hasInMemoryData && !hasFlushedData {
+				log.Debugf("Skipping empty section %d (%s).", sec.ID, handle.Name())
+				continue
+			}
+
+			// Process in-memory block.
+			if hasInMemoryData {
+				sec.Lock.RLock()
+				for _, rowData := range sec.CurrentBlock.Rows {
+					if len(rowData) == 0 {
+						continue
+					}
+					if err := b.processJSONRowData(rowData, loadData, filter, outChan); err != nil {
+						log.Debugf("Skipping malformed in-memory row at section %d: %v", sec.ID, err)
+					}
+				}
+				sec.Lock.RUnlock()
+			}
+
+			// Process flushed blocks.
+			if hasFlushedData {
+				for _, blk := range sec.Blocks {
+					if _, err := handle.Seek(int64(blk.FileOffset), io.SeekStart); err != nil {
+						log.Errorf("Failed to seek to block offset %d in section %d: %v", blk.FileOffset, sec.ID, err)
+						continue
+					}
+					blockData := make([]byte, blk.Size)
+					if _, err := io.ReadFull(handle, blockData); err != nil {
+						log.Errorf("Failed to read block data at offset %d in section %d: %v", blk.FileOffset, sec.ID, err)
+						continue
+					}
+
+					buf := decompressPool.Get().([]byte)[:0]
+					decompressed, err := zstd.Decompress(buf, blockData)
+					if err != nil {
+						log.Errorf("Failed to decompress block at offset %d in section %d: %v", blk.FileOffset, sec.ID, err)
+						decompressPool.Put(decompressed[:0])
+						continue
+					}
+
+					it := block.NewMemBlock().Iterator(decompressed)
+					if it == nil {
+						log.Errorf("Corrupt block at offset %d in section %d: invalid data", blk.FileOffset, sec.ID)
+						decompressPool.Put(decompressed[:0])
+						continue
+					}
+
+					for {
+						rowBytes, err := it.Next()
+						if err == io.EOF {
+							break
+						}
+						if err != nil {
+							log.Debugf("Skipping malformed row in block at offset %d in section %d: %v", blk.FileOffset, sec.ID, err)
+							continue
+						}
+						if len(rowBytes) == 0 {
+							continue
+						}
+
+						if err := b.processJSONRowData(rowBytes, loadData, filter, outChan); err != nil {
+							log.Debugf("Skipping malformed row in block at offset %d in section %d: %v", blk.FileOffset, sec.ID, err)
+						}
+					}
+					decompressPool.Put(decompressed[:0])
+				}
+			}
+		}
+	}
+	close(outChan)
+}
+
+// processJSONRowData parses row bytes and sends to outChan if it matches the filter.
+// Optimized for speed with lazy key parsing when possible.
+func (b *JSONTable) processJSONRowData(rowData []byte, loadData bool, filter benchtop.RowFilter, outChan chan any) error {
+	if !loadData && (filter == nil || filter.IsNoOp()) {
+		// Fast path: Parse only the key field.
+		var partial struct {
+			Key string `json:"key"`
+		}
+		if err := sonic.ConfigFastest.Unmarshal(rowData, &partial); err != nil {
+			return fmt.Errorf("failed to unmarshal key: %w", err)
+		}
+		outChan <- partial.Key
+		return nil
+	}
+
+	// Full unmarshal for filtering or loading.
+	var m RowData
+	if err := sonic.ConfigFastest.Unmarshal(rowData, &m); err != nil {
+		return fmt.Errorf("failed to unmarshal row: %w", err)
+	}
+
+	var val any
+	var err error
+	if loadData || (filter != nil && !filter.IsNoOp()) {
+		// Fixed bug: Use the unmarshaled m instead of a fresh RowData.
+		val, err = b.unpackData(true, true, &m)
+		if err != nil {
+			return fmt.Errorf("failed to unpack data: %w", err)
+		}
+	} else {
+		val = m.Key
+	}
+
+	if filter == nil || filter.IsNoOp() || filter.Matches(val) {
+		outChan <- val
+	}
+	return nil
+}
+
+*/
+
+// ScanIDs scans through all blocks and sections in the table, returning only row IDs as strings.
+// Optimized to avoid full unmarshaling and type casting for minimal CPU and memory usage.
+
+// ScanIDs scans through all blocks and sections in the table, returning only row IDs as strings.
+// Optimized to avoid unmarshaling and type casting for minimal CPU and memory usage.
+func (b *JSONTable) ScanIDs(filter benchtop.RowFilter) chan string {
+	fmt.Println("ENTERING OPTIMIZED SCAN_IDS FUNCTION")
+	outChan := make(chan string, 100*len(b.Sections))
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, b.MaxConcurrentSections)
+
+	partitions := make(map[uint8]bool)
+	for i := uint8(0); i < uint8(b.NumPartitions); i++ {
+		partitions[i] = true
+	}
+
+	for pId := range partitions {
+		for _, secId := range b.PartitionMap[pId] {
+			sec, exists := b.Sections[secId]
+			if !exists {
+				log.Debugf("SECTION: %d does not exist in %#v", secId, b.Sections)
+				continue
+			}
+			wg.Add(1)
+			go func(sec *section.Section) {
+				defer wg.Done()
+				sem <- struct{}{} // Acquire semaphore slot
+
+				// Get file handle from the pool
+				handle := <-sec.FilePool
+
+				defer func() {
+					// Release file handle back to the pool
+					sec.FilePool <- handle
+					// Release semaphore slot
+					<-sem
+				}()
+
+				// Check if section has any data
+				sec.Lock.RLock()
+				hasInMemoryData := sec.CurrentBlock != nil && len(sec.CurrentBlock.Rows) > 0
+				hasFlushedData := len(sec.Blocks) > 0
+				sec.Lock.RUnlock()
+
+				if !hasInMemoryData && !hasFlushedData {
+					log.Debugf("Skipping empty section %d (%s).", sec.ID, handle.Name())
+					return
+				}
+
+				// --- 1. Process in-memory block (Sequential) ---
+				if hasInMemoryData {
 					sec.Lock.RLock()
 					for _, rowData := range sec.CurrentBlock.Rows {
 						if len(rowData) == 0 {
 							continue // Skip deleted or empty rows
 						}
-						rowWG.Add(1)
-						rowSem <- struct{}{}
-						go func(data []byte) {
-							defer rowWG.Done()
-							defer func() { <-rowSem }()
-							processErr := b.processJSONRowData(data, loadData, filter, outChan)
-							if processErr != nil {
-								logrus.Debugf("Skipping malformed in-memory row at section %d: %v", sec.ID, processErr)
-							}
-						}(rowData)
+						if err := b.processJSONRowDataForIDs(rowData, filter, outChan); err != nil {
+							log.Debugf("Skipping malformed in-memory row at section %d: %v", sec.ID, err)
+						}
 					}
 					sec.Lock.RUnlock()
-					rowWG.Wait()
 				}
 
-				// Process flushed blocks from disk
+				// --- 2. Process flushed blocks from disk (Sequential Block Processing) ---
 				if hasFlushedData {
-					var rowWG sync.WaitGroup
-					rowSem := make(chan struct{}, rowWorkers)
 					for _, blk := range sec.Blocks {
+						// Read compressed data from disk
 						_, err := handle.Seek(int64(blk.FileOffset), io.SeekStart)
 						if err != nil {
-							logrus.Errorf("Failed to seek to block offset %d in section %d: %v", blk.FileOffset, sec.ID, err)
+							log.Errorf("Failed to seek to block offset %d in section %d: %v", blk.FileOffset, sec.ID, err)
 							continue
 						}
 						blockData := make([]byte, blk.Size)
 						_, err = io.ReadFull(handle, blockData)
 						if err != nil {
-							logrus.Errorf("Failed to read block data at offset %d in section %d: %v", blk.FileOffset, sec.ID, err)
+							log.Errorf("Failed to read block data at offset %d in section %d: %v", blk.FileOffset, sec.ID, err)
 							continue
 						}
-						it := block.NewMemBlock().Iterator(blockData)
-						for {
-							rowData, err := it.Next()
-							if err != nil {
-								if err != io.EOF {
-									logrus.Errorf("Error reading row in block at section %d, offset %d: %v", sec.ID, blk.FileOffset, err)
-								}
-								break
-							}
-							if len(rowData) == 0 {
-								continue // Skip deleted or empty rows
-							}
-							rowWG.Add(1)
-							rowSem <- struct{}{}
-							go func(data []byte) {
-								defer rowWG.Done()
-								defer func() { <-rowSem }()
-								processErr := b.processJSONRowData(data, loadData, filter, outChan)
-								if processErr != nil {
-									log.Debugf("Skipping malformed row in block at section %d, offset %d: %v", sec.ID, blk.FileOffset, processErr)
-								}
-							}(rowData)
+
+						// Decompress the entire block
+						decompressed, err := zstd.Decompress(nil, blockData)
+						if err != nil {
+							log.Errorf("Failed to decompress block data at offset %d in section %d: %v", blk.FileOffset, sec.ID, err)
+							continue
 						}
+
+						// Identify JSON array payload (strip binary footer)
+						if len(decompressed) < 2 {
+							log.Errorf("Corrupt block: too short for section %d offset %d", sec.ID, blk.FileOffset)
+							continue
+						}
+						rowCount := binary.LittleEndian.Uint16(decompressed[len(decompressed)-2:])
+						indexSize := 2 + int(rowCount)*4
+						jsonEnd := len(decompressed) - indexSize
+						if jsonEnd <= 0 {
+							log.Errorf("Corrupt block (bad offset table) section %d offset %d", sec.ID, blk.FileOffset)
+							continue
+						}
+
+						jsonPayload := decompressed[:jsonEnd]
+
+						// Fast path: Extract IDs directly if no filter
+
+						// Unmarshal for filtering
+						var rows []RowData
+						if err := sonic.ConfigFastest.Unmarshal(jsonPayload, &rows); err != nil {
+							log.Errorf("Failed to unmarshal full block array in section %d: %v", sec.ID, err)
+							continue
+						}
+						for _, rowData := range rows {
+							if filter == nil || filter.IsNoOp() || filter.Matches(rowData) {
+								outChan <- rowData.Key
+							}
+						}
+
 					}
-					rowWG.Wait()
 				}
 			}(sec)
 		}
 	}
+
+	// Wait for all section workers to finish and close the output channel
 	go func() {
 		wg.Wait()
 		close(outChan)
 	}()
-
 	return outChan
 }
 
-// processBSONRowData handles the parsing of row bytes,
-// applying filters, and sending the result to the output channel.
-// It returns an error if the row is malformed or cannot be processed.
-// Updated processJSONRowData without decompression
-func (b *JSONTable) processJSONRowData(
-	rowData []byte,
-	loadData bool,
-	filter benchtop.RowFilter,
-	outChan chan any,
-) error {
-	var val any
+// ScanData scans through all blocks and sections in the table, returning full map[string]any data.
+// Processes rows sequentially within blocks and applies filters as needed.
+func (b *JSONTable) ScanRows(filter benchtop.RowFilter) chan map[string]any {
+	fmt.Println("ENTERING OPTIMIZED SCAN_DATA FUNCTION")
+	outChan := make(chan map[string]any, 100*len(b.Sections))
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, b.MaxConcurrentSections)
 
-	newData := rowData // No decompression, as rows are uncompressed within block
-
-	if loadData || filter != nil && !filter.IsNoOp() {
-		var m RowData
-		err := sonic.ConfigFastest.Unmarshal(newData, &m)
-		if err != nil {
-			return err
-		}
-		val, err = b.unpackData(true, true, &m)
-		if err != nil {
-			return err
-		}
-	} else {
-		val = newData
+	partitions := make(map[uint8]bool)
+	for i := uint8(0); i < uint8(b.NumPartitions); i++ {
+		partitions[i] = true
 	}
 
-	if filter == nil || filter.IsNoOp() || (!filter.IsNoOp() && filter.Matches(val)) {
-		if loadData {
-			outChan <- val
-			return nil
-		}
+	for pId := range partitions {
+		for _, secId := range b.PartitionMap[pId] {
+			sec, exists := b.Sections[secId]
+			if !exists {
+				log.Debugf("SECTION: %d does not exist in %#v", secId, b.Sections)
+				continue
+			}
+			wg.Add(1)
+			go func(sec *section.Section) {
+				defer wg.Done()
+				sem <- struct{}{} // Acquire semaphore slot
 
-		node, err := sonic.Get(newData, "1")
+				// Get file handle from the pool
+				handle := <-sec.FilePool
+
+				defer func() {
+					// Release file handle back to the pool
+					sec.FilePool <- handle
+					// Release semaphore slot
+					<-sem
+				}()
+
+				// Check if section has any data
+				sec.Lock.RLock()
+				hasInMemoryData := sec.CurrentBlock != nil && len(sec.CurrentBlock.Rows) > 0
+				hasFlushedData := len(sec.Blocks) > 0
+				sec.Lock.RUnlock()
+
+				if !hasInMemoryData && !hasFlushedData {
+					log.Debugf("Skipping empty section %d (%s).", sec.ID, handle.Name())
+					return
+				}
+
+				// --- 1. Process in-memory block (Sequential) ---
+				if hasInMemoryData {
+					sec.Lock.RLock()
+					for _, rowData := range sec.CurrentBlock.Rows {
+						if len(rowData) == 0 {
+							continue // Skip deleted or empty rows
+						}
+						if err := b.processJSONRowDataForData(rowData, filter, outChan); err != nil {
+							log.Debugf("Skipping malformed in-memory row at section %d: %v", sec.ID, err)
+						}
+					}
+					sec.Lock.RUnlock()
+				}
+
+				// --- 2. Process flushed blocks from disk (Sequential Block Processing) ---
+				if hasFlushedData {
+					for _, blk := range sec.Blocks {
+						// Read compressed data from disk
+						_, err := handle.Seek(int64(blk.FileOffset), io.SeekStart)
+						if err != nil {
+							log.Errorf("Failed to seek to block offset %d in section %d: %v", blk.FileOffset, sec.ID, err)
+							continue
+						}
+						blockData := make([]byte, blk.Size)
+						_, err = io.ReadFull(handle, blockData)
+						if err != nil {
+							log.Errorf("Failed to read block data at offset %d in section %d: %v", blk.FileOffset, sec.ID, err)
+							continue
+						}
+
+						// Decompress the entire block
+						decompressed, err := zstd.Decompress(nil, blockData)
+						if err != nil {
+							log.Errorf("Failed to decompress block data at offset %d in section %d: %v", blk.FileOffset, sec.ID, err)
+							continue
+						}
+
+						// Identify JSON array payload (strip binary footer)
+						if len(decompressed) < 2 {
+							log.Errorf("Corrupt block: too short for section %d offset %d", sec.ID, blk.FileOffset)
+							continue
+						}
+						rowCount := binary.LittleEndian.Uint16(decompressed[len(decompressed)-2:])
+						indexSize := 2 + int(rowCount)*4
+						jsonEnd := len(decompressed) - indexSize
+						if jsonEnd <= 0 {
+							log.Errorf("Corrupt block (bad offset table) section %d offset %d", sec.ID, blk.FileOffset)
+							continue
+						}
+
+						jsonPayload := decompressed[:jsonEnd]
+
+						fmt.Println("PAYLOAD > 0", len(jsonPayload))
+						// Unmarshal full JSON array
+						var rows []RowData
+						if err := sonic.ConfigFastest.Unmarshal(jsonPayload, &rows); err != nil {
+							log.Errorf("Failed to unmarshal full block array in section %d: %v", sec.ID, err)
+							continue
+						}
+						for _, rowData := range rows {
+							val, err := b.unpackData(&rowData)
+							if err != nil {
+								log.Errorf("Failed to unpack row data in section %d: %v", sec.ID, err)
+								continue
+							}
+							if filter == nil || filter.IsNoOp() || (!filter.IsNoOp() && filter.Matches(val)) {
+								fmt.Println("WE HERE!!!")
+								outChan <- val
+							}
+						}
+					}
+				}
+			}(sec)
+		}
+	}
+
+	// Wait for all section workers to finish and close the output channel
+	go func() {
+		wg.Wait()
+		close(outChan)
+	}()
+	return outChan
+}
+
+// processJSONRowDataForIDs processes a single row for ScanIDs, extracting the ID directly or applying a filter.
+func (b *JSONTable) processJSONRowDataForIDs(rowData []byte, filter benchtop.RowFilter, outChan chan string) error {
+	if filter != nil && !filter.IsNoOp() {
+		var m RowData
+		err := sonic.ConfigFastest.Unmarshal(rowData, &m)
 		if err != nil {
-			log.Errorf("Error accessing JSON path for row data %s: %v\n", string(newData), err)
 			return err
 		}
-		ID, err := node.Interface()
-		if err != nil {
-			log.Errorf("Error unmarshaling node: %v\n", err)
-			return err
+		if filter.Matches(m.Data) {
+			outChan <- m.Key
 		}
-		outChan <- ID
+		return nil
+	}
+
+	// Fast path: Extract ID directly without full unmarshaling
+	node, err := sonic.Get(rowData, "1")
+	if err != nil {
+		log.Errorf("Error accessing JSON path for row data %s: %v", string(rowData), err)
+		return err
+	}
+	id, err := node.String()
+	if err != nil {
+		log.Errorf("Error unmarshaling node to string: %v", err)
+		return err
+	}
+	outChan <- id
+	return nil
+}
+
+// processJSONRowDataForData processes a single row for ScanData, unmarshaling and unpacking to map[string]any.
+func (b *JSONTable) processJSONRowDataForData(rowData []byte, filter benchtop.RowFilter, outChan chan map[string]any) error {
+	var m RowData
+	err := sonic.ConfigFastest.Unmarshal(rowData, &m)
+	if err != nil {
+		return err
+	}
+	m.Data["_id"] = m.Key
+	if filter == nil || filter.IsNoOp() || (!filter.IsNoOp() && filter.Matches(m.Data)) {
+		outChan <- m.Data
 	}
 	return nil
 }
