@@ -1,7 +1,6 @@
 package table
 
 import (
-	"bufio"
 	"bytes"
 	"encoding/binary"
 	"fmt"
@@ -18,7 +17,6 @@ import (
 	"github.com/bmeg/benchtop/jsontable/section"
 	"github.com/bmeg/grip/log"
 	"github.com/edsrzf/mmap-go"
-	multierror "github.com/hashicorp/go-multierror"
 
 	"github.com/bytedance/sonic"
 )
@@ -27,8 +25,7 @@ const (
 	PART_FILE_SUFFIX    string = ".partition"
 	SECTION_FILE_SUFFIX string = ".section"
 	SECTION_ID_MULT     uint16 = 256
-	MAX_SECTION_SIZE           = 1 << 26 // 64MB
-	MAX_COMPACT_RATIO          = 0.2     // 20% deleted rows triggers compaction
+	MAX_COMPACT_RATIO          = 0.2 // 20% deleted rows triggers compaction
 	FLUSH_THRESHOLD            = 1000
 )
 
@@ -50,6 +47,9 @@ type JSONTable struct {
 	NumPartitions         uint32                      // Number of partitions
 	PartitionFunc         func(id []byte) uint8       // Assigns row to partition
 	MaxConcurrentSections uint8                       // Limit for parallel operations
+
+	ActiveSections map[uint8]*section.Section // one per partition
+	FlushCounter   map[uint8]int              // per-partition flush counter
 }
 
 // DefaultPartitionFunc assigns rows to partitions using FNV hash
@@ -61,75 +61,94 @@ func DefaultPartitionFunc(numPartitions uint32) func(id []byte) uint8 {
 	}
 }
 
-func (b *JSONTable) Close() {
+func (b *JSONTable) Close() error {
 	for _, sec := range b.Sections {
-		if sec.Writer != nil {
-			sec.Writer.Close()
+		if sec.MMap != nil {
+			err := sec.MMap.Unmap()
+			if err != nil {
+				fmt.Printf("ERROR ON UNMAP: %s", err)
+				return err
+			}
 		}
 		if sec.File != nil {
-			sec.File.Close()
+			err := sec.File.Sync()
+			if err != nil {
+				fmt.Printf("ERROR ON FILE HANDLE SYNC: %s", err)
+				return err
+			}
+			err = sec.File.Close()
+			if err != nil {
+				fmt.Printf("ERROR ON FILE HANDLE CLOSE: %s", err)
+				return err
+			}
 		}
 		if sec.FilePool != nil {
-			for len(sec.FilePool) > 0 {
-				if file, ok := <-sec.FilePool; ok {
-					file.Close()
+			close(sec.FilePool)
+			for f := range sec.FilePool {
+				err := f.Close()
+				if err != nil {
+					fmt.Printf("ERROR ON FILE POOL FILE HANDLE CLOSE: %s", err)
+					return err
 				}
 			}
-			close(sec.FilePool)
 		}
 	}
 	b.Fields = map[string]struct{}{}
+	return nil
 }
 
 // AddRow adds a single row to the JSONTable, writing it as zstd-compressed data.
 func (b *JSONTable) AddRow(elem benchtop.Row) (*benchtop.RowLoc, error) {
-	// partitionId returned as uint8
 	partitionId := b.PartitionFunc(elem.Id)
-	if int(partitionId) < 0 || partitionId >= uint8(b.NumPartitions) {
-		return nil, fmt.Errorf("invalid partition ID: %d", partitionId)
+	if partitionId >= uint8(b.NumPartitions) {
+		return nil, fmt.Errorf("invalid partition")
 	}
 
-	// Ensure partition has at least one section
-	if len(b.PartitionMap[uint8(partitionId)]) == 0 {
-		_, err := b.CreateNewSection(partitionId)
+	// Get or create active section
+	sec := b.ActiveSections[partitionId]
+	if sec == nil {
+		var err error
+		sec, err = b.CreateNewSection(partitionId)
 		if err != nil {
-			return nil, fmt.Errorf("failed to create new section for partition %d: %w", partitionId, err)
+			return nil, err
 		}
 	}
+	//fmt.Println("SECTION: %v\n", sec)
 
-	secId := b.PartitionMap[partitionId][len(b.PartitionMap[partitionId])-1]
-	sec, exists := b.Sections[secId]
-	if !exists {
-		return nil, fmt.Errorf("section %d not found", secId)
-	}
-
-	// Marshal the row payload to compute size
 	bData, err := sonic.ConfigFastest.Marshal(b.PackData(elem.Data, string(elem.Id)))
 	if err != nil {
-		return nil, fmt.Errorf("failed to marshal row data for ID %s: %w", elem.Id, err)
+		return nil, err
 	}
-	totalUncompressedSize := uint32(len(bData)) + benchtop.ROW_HSIZE
+	totalSize := uint32(len(bData)) + benchtop.ROW_HSIZE
 
 	sec.Lock.Lock()
-	defer sec.Lock.Unlock()
 
-	if sec.LiveBytes+totalUncompressedSize > MAX_SECTION_SIZE {
+	// Check size and rotate if needed
+	if sec.LiveBytes+totalSize > section.MAX_SECTION_SIZE {
+		// Close current
+		sec.CloseSection()
+		//sec.RemapReadOnly() // now RDONLY
+
+		// Create new active
 		newSec, err := b.CreateNewSection(partitionId)
 		if err != nil {
-			return nil, fmt.Errorf("failed to create new section for partition %d: %w", partitionId, err)
+			sec.Lock.Unlock()
+			return nil, err
 		}
 		sec = newSec
-
+		b.ActiveSections[partitionId] = sec
 	}
 
 	loc, err := sec.WriteJsonEntryToSection(bData)
 	if err != nil {
-		return nil, fmt.Errorf("failed to write payload for row %s in section %d: %w", elem.Id, sec.ID, err)
+		sec.Lock.Unlock()
+		return nil, err
 	}
 
 	sec.TotalRows++
-	loc.TableId = b.TableId
+	sec.Lock.Unlock()
 
+	loc.TableId = b.TableId
 	return loc, nil
 }
 
@@ -139,51 +158,51 @@ func (b *JSONTable) CreateNewSection(partitionId uint8) (*section.Section, error
 
 	localSecId := len(b.PartitionMap[partitionId])
 	secId := uint16(partitionId)*SECTION_ID_MULT + uint16(localSecId)
-
-	// Ensure the generated ID is not already in use (edge case sanity check)
 	if _, exists := b.Sections[secId]; exists {
-		return nil, fmt.Errorf("section ID conflict: ID %d already exists", secId)
+		return nil, fmt.Errorf("section ID conflict: %d", secId)
 	}
 
 	path := fmt.Sprintf("%s%s%d.section%d", b.FileName, PART_FILE_SUFFIX, partitionId, localSecId)
 	handle, err := os.Create(path)
 	if err != nil {
-		log.Errorf("Failed to create section file %s: %v", path, err)
 		return nil, err
+	}
+	handle.Truncate(section.INITIAL_SECTION_SIZE) // pre-allocate
+
+	m, err := mmap.Map(handle, mmap.RDWR, 0)
+	if err != nil {
+		return nil, fmt.Errorf("mmap failed on new section: %w", err)
+	}
+
+	filePool := make(chan *os.File, 10)
+	for i := 0; i < cap(filePool); i++ {
+		f, err := os.OpenFile(path, os.O_RDWR, 0666)
+		if err != nil {
+			m.Unmap()
+			handle.Close()
+			return nil, err
+		}
+		filePool <- f
 	}
 
 	sec := &section.Section{
-		ID:          secId,
-		PartitionID: partitionId,
-		Path:        path,
-		Writer:      zstd.NewWriter(handle),
-		Active:      true,
-		File:        handle,
-	}
-	sec.FilePool = make(chan *os.File, 10)
-	for range cap(sec.FilePool) {
-		file, err := os.OpenFile(path, os.O_RDWR, 0666)
-		if err != nil {
-			log.Errorf("Failed to init file pool for %s: %v", path, err)
-			handle.Close() // Clean up the create handle
-			return nil, err
-		}
-		sec.FilePool <- file
+		ID:              secId,
+		PartitionID:     partitionId,
+		Path:            path,
+		File:            handle,
+		FilePool:        filePool,
+		MMap:            m,
+		MMapMode:        mmap.RDWR,
+		Active:          true,
+		LiveBytes:       0,
+		CompressScratch: make([]byte, 0),
 	}
 
 	b.Sections[secId] = sec
 	b.PartitionMap[partitionId] = append(b.PartitionMap[partitionId], secId)
+	b.ActiveSections[partitionId] = sec
+	b.FlushCounter[partitionId] = 0
 	return sec, nil
-}
-
-func NewSecPayload(offset uint32, data []byte) []byte {
-	dataLen := uint32(len(data))
-	payload := make([]byte, benchtop.ROW_HSIZE+dataLen)
-	nextOffset := offset + benchtop.ROW_HSIZE + dataLen
-	binary.LittleEndian.PutUint32(payload[:benchtop.ROW_OFFSET_HSIZE], nextOffset)
-	binary.LittleEndian.PutUint32(payload[benchtop.ROW_OFFSET_HSIZE:benchtop.ROW_HSIZE], dataLen)
-	copy(payload[benchtop.ROW_HSIZE:], data)
-	return payload
 }
 
 func (b *JSONTable) GetRow(loc *benchtop.RowLoc) (map[string]any, error) {
@@ -192,49 +211,31 @@ func (b *JSONTable) GetRow(loc *benchtop.RowLoc) (map[string]any, error) {
 		return nil, fmt.Errorf("section %d not found", loc.Section)
 	}
 
-	file := <-sec.FilePool
-	defer func() { sec.FilePool <- file }()
-
-	// Seek to the start of the row (uncompressed header + compressed data)
-	_, err := file.Seek(int64(loc.Offset), io.SeekStart)
-	if err != nil {
-		return nil, fmt.Errorf("failed to seek to offset %d in section %d: %w", loc.Offset, loc.Section, err)
+	// --- DIRECT MMAP ACCESS ---
+	if len(sec.MMap) == 0 {
+		return nil, fmt.Errorf("section %d is empty or not mapped", loc.Section)
 	}
 
-	// Read the entire row in one go: header + compressed data
-	rowData := make([]byte, benchtop.ROW_HSIZE+loc.Size)
-	_, err = io.ReadFull(file, rowData)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read row data at offset %d in section %d: %w", loc.Offset, loc.Section, err)
+	start := loc.Offset + benchtop.ROW_HSIZE
+	end := start + loc.Size
+	if end > uint32(len(sec.MMap)) {
+		return nil, fmt.Errorf("row out of bounds: %d > %d", end, len(sec.MMap))
 	}
 
-	// Parse the 8-byte header
-	header := rowData[:benchtop.ROW_HSIZE]
-	// nextOffset := binary.LittleEndian.Uint32(header[:4]) // Ignored for now
-	compressedSize := binary.LittleEndian.Uint32(header[4:8])
-
-	// Verify compressed size matches loc.Size
-	if compressedSize != loc.Size {
-		return nil, fmt.Errorf("compressed size mismatch at offset %d in section %d: header says %d, RowLoc says %d", loc.Offset, loc.Section, compressedSize, loc.Size)
-	}
-
-	// Decompress the compressed section
-	compressed := rowData[benchtop.ROW_HSIZE:]
+	compressed := sec.MMap[start:end]
 	decompressed, err := zstd.Decompress(nil, compressed)
 	if err != nil {
-		return nil, fmt.Errorf("failed to decompress data at offset %d in section %d: %w", loc.Offset, loc.Section, err)
+		return nil, fmt.Errorf("decompress failed: %w", err)
 	}
 
-	// Decode the JSON
 	var m RowData
-	err = sonic.ConfigFastest.Unmarshal(decompressed, &m)
-	if err != nil {
-		return nil, fmt.Errorf("failed to decode JSON row at section %d, offset %d, size %d: %w", loc.Section, loc.Offset, loc.Size, err)
+	if err := sonic.ConfigFastest.Unmarshal(decompressed, &m); err != nil {
+		return nil, fmt.Errorf("unmarshal failed: %w", err)
 	}
 
 	out, err := b.unpackData(true, false, &m)
 	if err != nil {
-		return nil, fmt.Errorf("failed to unpack data for row at section %d, offset %d: %w", loc.Section, loc.Offset, err)
+		return nil, err
 	}
 	return out.(map[string]any), nil
 }
@@ -272,7 +273,7 @@ func (b *JSONTable) DeleteRow(loc *benchtop.RowLoc, id []byte) error {
 	if err != nil {
 		return err
 	}
-	_, err = sec.Writer.Write(bytes.Repeat([]byte{0x00}, 4))
+	_, err = sec.File.Write(bytes.Repeat([]byte{0x00}, 4))
 	if err != nil {
 		return fmt.Errorf("writeAt failed: %w", err)
 	}
@@ -286,83 +287,41 @@ func (b *JSONTable) Scan(loadData bool, filter benchtop.RowFilter) chan any {
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, b.MaxConcurrentSections)
 
-	partitions := make(map[uint8]bool)
-	for i := uint8(0); i < uint8(b.NumPartitions); i++ {
-		partitions[i] = true
-	}
-
-	for pId := range partitions {
+	for pId := uint8(0); pId < uint8(b.NumPartitions); pId++ {
 		for _, secId := range b.PartitionMap[pId] {
 			sec, exists := b.Sections[secId]
-			if !exists {
-				log.Debugf("SECTION: %s does not exist in %s", secId, b.Sections)
+			if !exists || len(sec.MMap) == 0 {
 				continue
 			}
 			wg.Add(1)
 			go func(sec *section.Section) {
 				sem <- struct{}{}
-				handle := <-sec.FilePool
-				defer func() {
-					<-sem
-					sec.FilePool <- handle
-					wg.Done()
-				}()
+				defer func() { <-sem; wg.Done() }()
 
-				fileInfo, err := handle.Stat()
-				if err != nil {
-					log.Errorf("Error getting file info for section %d: %v", sec.ID, err)
-					return
-				}
-				// Check for an empty file before attempting the mmap.
-				if fileInfo.Size() == 0 {
-					log.Debugf("Skipping empty file for section %d (%s).", sec.ID, handle.Name())
-					return
-				}
-				_, err = handle.Seek(0, io.SeekStart)
-				if err != nil {
-					log.Errorln("Error in scan seek:", err)
-					return
-				}
-				m, err := mmap.Map(handle, mmap.RDONLY, 0)
-				if err != nil {
-					log.Errorln("Error mapping file:", err)
-					return
-				}
-				defer m.Unmap()
-
+				m := sec.MMap
 				var offset uint32 = 0
 				for offset+benchtop.ROW_HSIZE <= uint32(len(m)) {
 					header := m[offset : offset+benchtop.ROW_HSIZE]
 					nextOffset := binary.LittleEndian.Uint32(header[:benchtop.ROW_OFFSET_HSIZE])
 					bSize := binary.LittleEndian.Uint32(header[benchtop.ROW_OFFSET_HSIZE:benchtop.ROW_HSIZE])
 
-					// Skip deleted rows (bSize == 0)
 					if bSize == 0 {
 						if nextOffset == 0 || nextOffset <= offset {
-							break // End of valid data or corrupted nextOffset
+							break
 						}
 						offset = nextOffset
 						continue
 					}
 
-					/*if bSize == 0 || bSize == nextOffset-benchtop.ROW_HSIZE {
-						offset = nextOffset
-						continue
-					}*/
-
 					jsonStart := offset + benchtop.ROW_HSIZE
 					jsonEnd := jsonStart + bSize
-					// Ensure the row data fits within the file
-					//fmt.Println("START: ", jsonStart, "END: ", jsonEnd, "SEC: ", sec.ID)
 					if jsonEnd > uint32(len(m)) {
-						log.Debugf("Incomplete record at section %d, offset %d", sec.ID, offset)
 						break
 					}
 
 					rowData := m[jsonStart:jsonEnd]
-					err = b.processJSONRowData(rowData, loadData, filter, outChan)
-					if err != nil {
-						log.Debugf("Skipping malformed row at section %d, offset %d: %v", sec.ID, offset, err)
+					if err := b.processJSONRowData(rowData, loadData, filter, outChan); err != nil {
+						log.Debugf("skip row in section %d: %v", sec.ID, err)
 					}
 
 					if nextOffset == 0 || nextOffset <= offset {
@@ -373,11 +332,8 @@ func (b *JSONTable) Scan(loadData bool, filter benchtop.RowFilter) chan any {
 			}(sec)
 		}
 	}
-	go func() {
-		wg.Wait()
-		close(outChan)
-	}()
 
+	go func() { wg.Wait(); close(outChan) }()
 	return outChan
 }
 
@@ -430,6 +386,7 @@ func (b *JSONTable) processJSONRowData(
 	return nil
 }
 
+/*
 func (b *JSONTable) CompactSection(secId uint16) error {
 	sec, exists := b.Sections[secId]
 	if !exists {
@@ -456,14 +413,13 @@ func (b *JSONTable) CompactSection(secId uint16) error {
 	var newOffset uint32 = 0
 	inputChan := make(chan benchtop.Index, 100)
 
-	/* todo: figure out how to set indices from the driver instead of the table
+	// todo: figure out how to set indices from the driver instead of the table
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		b.setDataIndices(inputChan)
 	}()
-	*/
 
 	var offset uint32 = 0
 	for offset+benchtop.ROW_HSIZE <= uint32(len(m)) {
@@ -594,6 +550,7 @@ func (b *JSONTable) Compact() error {
 	}
 	return errs.ErrorOrNil()
 }
+*/
 
 func ConvertJSONPathToArray(path string) ([]any, error) {
 	path = strings.TrimLeft(path, "./")

@@ -3,13 +3,18 @@ package section
 import (
 	"encoding/binary"
 	"fmt"
-	"io"
 	"os"
 	"sync"
 
 	"github.com/DataDog/zstd"
 	"github.com/bmeg/benchtop"
-	"github.com/bytedance/sonic"
+	"github.com/edsrzf/mmap-go"
+)
+
+const (
+	INITIAL_SECTION_SIZE  = 1 << 20          // 1 MB
+	GROWTH_INCREMENT_SIZE = 1 << 24          // 16 MB
+	MAX_SECTION_SIZE      = 65 * 1024 * 1024 // 65MB
 )
 
 // Section represents a physical file within a partition
@@ -18,59 +23,129 @@ type Section struct {
 	PartitionID uint8  // Partition this section belongs to
 	Path        string // File path (e.g., table.data.partition0.section1)
 	File        *os.File
-	Writer      *zstd.Writer  // Main file handle for writes
 	FilePool    chan *os.File // Pool for read/write access
 	Lock        sync.RWMutex  // Per-section lock
 	TotalRows   uint32        // Total rows (live + deleted)
 	DeletedRows uint32        // Deleted rows (for compaction trigger)
 	LiveBytes   uint32        // Live data size (bytes)
 	Active      bool          // True unless compacted/merged
+
+	MMap            mmap.MMap // cached read-only mmap
+	MMapMode        int       // mmap.RDWR or mmap.RDONLY
+	CompressScratch []byte
 }
 
 func (s *Section) WriteJsonEntryToSection(payload []byte) (*benchtop.RowLoc, error) {
-	// Validate payload is valid JSON (for debugging)
-	var temp any
-	if err := sonic.ConfigFastest.Unmarshal(payload, &temp); err != nil {
-		return nil, fmt.Errorf("input payload is not valid JSON: %w", err)
+	cPayload, err := zstd.Compress(s.CompressScratch[:0], payload)
+	if err != nil {
+		return nil, fmt.Errorf("compress failed: %w", err)
 	}
 
-	// Compress payload with explicit compression level
-	cPayload, err := zstd.Compress(nil, payload)
-	if err != nil {
-		return nil, fmt.Errorf("failed to compress payload: %w", err)
-	}
 	compressedLen := uint32(len(cPayload))
+	writeEnd := s.LiveBytes + benchtop.ROW_HSIZE + compressedLen
 
-	// Build header
-	header := make([]byte, benchtop.ROW_HSIZE)                                              // ROW_HSIZE == 8
-	binary.LittleEndian.PutUint32(header[:4], s.LiveBytes+compressedLen+benchtop.ROW_HSIZE) // Next offset
-	binary.LittleEndian.PutUint32(header[4:], compressedLen)                                // Compressed data length
-	cPayload = append(header, cPayload...)
+	// Check if write is outside the CURRENT mapped region
+	if writeEnd > uint32(len(s.MMap)) {
+		currentSize := int64(len(s.MMap))
+		requiredSize := int64(writeEnd)
 
-	// Write to file
-	_, err = s.File.Write(cPayload)
-	if err != nil {
-		return nil, fmt.Errorf("failed to write payload: %w", err)
+		newSize := requiredSize
+		if newSize%GROWTH_INCREMENT_SIZE != 0 {
+			newSize = (requiredSize/GROWTH_INCREMENT_SIZE + 1) * GROWTH_INCREMENT_SIZE
+		}
+		if newSize > MAX_SECTION_SIZE {
+			newSize = MAX_SECTION_SIZE
+		}
+		if newSize > currentSize {
+			if err := s.GrowAndRemap(newSize); err != nil {
+				return nil, fmt.Errorf("failed to grow section to %d: %w", newSize, err)
+			}
+		} else {
+			// This should not happen if logic is correct, but safe to check
+			return nil, fmt.Errorf("mmap too small even after considering max size: %d < %d", len(s.MMap), writeEnd)
+		}
 	}
 
-	// Update LiveBytes and return
-	s.LiveBytes += compressedLen + benchtop.ROW_HSIZE
+	oldLiveBytes := s.LiveBytes
+	nextOffset := s.LiveBytes + benchtop.ROW_HSIZE + compressedLen
+
+	headerTarget := s.MMap[oldLiveBytes : oldLiveBytes+benchtop.ROW_HSIZE]
+	binary.LittleEndian.PutUint32(headerTarget[:4], nextOffset)    // next row offset
+	binary.LittleEndian.PutUint32(headerTarget[4:], compressedLen) // compressed size
+	copy(s.MMap[oldLiveBytes+benchtop.ROW_HSIZE:], cPayload)
+	s.LiveBytes = nextOffset
+	// Save the buffer for next time. If the buffer allocated to be larger, use the larger one.
+	s.CompressScratch = cPayload
 	return &benchtop.RowLoc{
 		Section: s.ID,
-		Offset:  s.LiveBytes - (compressedLen + benchtop.ROW_HSIZE), // Start of this row
-		Size:    compressedLen,                                      // Compressed data size only
+		Offset:  oldLiveBytes,
+		Size:    compressedLen,
 	}, nil
 }
 
-func (w *Section) GetCompressedFileOffset() (uint32, error) {
-	// You need to flush first to ensure all data is written to the file.
-	if err := w.Writer.Flush(); err != nil { // Flush ensures data is written to w.file
-		return 0, fmt.Errorf("failed to flush zstd writer before getting file offset: %w", err)
+func (s *Section) CloseSection() error {
+	if !s.Active {
+		return nil
 	}
-	// Get the current position of the underlying file.
-	pos, err := w.File.Seek(0, io.SeekCurrent) // Use SeekCurrent
+	if err := s.MMap.Flush(); err != nil {
+		return err
+	}
+	if s.File != nil {
+		if err := s.File.Sync(); err != nil {
+			return err
+		}
+	}
+	s.Active = false
+	return nil
+}
+
+// RemapReadOnly converts RDWR → RDONLY mmap
+func (s *Section) RemapReadOnly() error {
+	if s.MMap != nil {
+		s.MMap.Unmap()
+	}
+
+	roFile, err := os.Open(s.Path)
 	if err != nil {
-		return 0, fmt.Errorf("failed to get current file offset: %w", err)
+		return err
 	}
-	return uint32(pos), nil
+	defer roFile.Close()
+
+	m, err := mmap.Map(roFile, mmap.RDONLY, 0)
+	if err != nil {
+		return err
+	}
+
+	s.MMap = m
+	s.MMapMode = mmap.RDONLY
+	return nil
+}
+
+func (s *Section) GrowAndRemap(newSize int64) error {
+	// 1. Unmap the old region
+	if s.MMap != nil {
+		// Crucial: ensure any pending data is flushed before unmap
+		if err := s.MMap.Flush(); err != nil {
+			return fmt.Errorf("flush before unmap failed: %w", err)
+		}
+		if err := s.MMap.Unmap(); err != nil {
+			return fmt.Errorf("unmap failed: %w", err)
+		}
+		s.MMap = nil // Clear the old map object
+	}
+
+	// 2. Truncate the file to the new, larger size
+	// Note: Use s.File (the main handle) for Truncate
+	if err := s.File.Truncate(newSize); err != nil {
+		return fmt.Errorf("truncate to size %d failed: %w", newSize, err)
+	}
+
+	// 3. Map the new, larger region
+	newMMap, err := mmap.Map(s.File, s.MMapMode, 0)
+	if err != nil {
+		return fmt.Errorf("mmap failed after resize: %w", err)
+	}
+
+	s.MMap = newMMap
+	return nil
 }

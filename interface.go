@@ -70,6 +70,6 @@ type TableStore interface {
 
 	Scan(key bool, filter RowFilter) chan any
 
-	Compact() error
-	Close()
+	//Compact() error
+	Close() error
 }

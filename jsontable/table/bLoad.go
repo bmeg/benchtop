@@ -5,7 +5,9 @@ import (
 	"sync"
 
 	"github.com/bmeg/benchtop"
+	"github.com/bmeg/benchtop/jsontable/section"
 	"github.com/bmeg/benchtop/jsontable/tpath"
+	"github.com/bmeg/grip/log"
 	"github.com/bytedance/sonic"
 	"github.com/cockroachdb/pebble"
 	multierror "github.com/hashicorp/go-multierror"
@@ -34,13 +36,33 @@ func (b *JSONTable) StartTableGoroutine(
 	wg.Add(1)
 	go func() {
 		defer func() {
+			// --- FINAL FLUSH ON EXIT ---
+			b.SectionLock.Lock()
+			for secId := range b.ActiveSections {
+				if sec, exists := b.Sections[uint16(secId)]; exists && sec.Active {
+					sec.Lock.Lock()
+					if sec.LiveBytes > 0 {
+						if err := sec.MMap.Flush(); err != nil {
+							log.Errorf("Final flush failed for section %d: %v", sec.ID, err)
+						}
+					}
+					err := sec.File.Sync()
+					if err != nil {
+						log.Errorf("File Sync failed in bulk load: %v", err)
+					}
+					sec.Lock.Unlock()
+				}
+			}
+			b.SectionLock.Unlock()
 			wg.Done()
 		}()
 
-		var allFieldIndexKeyElements = make([]FieldKeyElements, 0, batchSize*len(b.Fields)) // Pre-allocate
+		const FLUSH_EVERY = 1000
+		var allFieldIndexKeyElements = make([]FieldKeyElements, 0, batchSize*len(b.Fields))
 		allMetadata := make(map[string]*benchtop.RowLoc, batchSize)
 		var localErr *multierror.Error
 
+		var flushCounter uint32 = 0
 		for {
 			batch := make([]*benchtop.Row, 0, batchSize)
 			for range batchSize {
@@ -64,7 +86,7 @@ func (b *JSONTable) StartTableGoroutine(
 				if info == nil {
 					newRows = append(newRows, row)
 					for field := range b.Fields {
-						if val := tpath.PathLookup(row.Data, field); val != nil { // Assumes PathLookup exists
+						if val := tpath.PathLookup(row.Data, field); val != nil {
 							allFieldIndexKeyElements = append(allFieldIndexKeyElements, FieldKeyElements{
 								Field:     field,
 								TableName: b.Name,
@@ -103,22 +125,35 @@ func (b *JSONTable) StartTableGoroutine(
 					}
 					bDatas = append(bDatas, bData)
 					rowIds = append(rowIds, string(row.Id))
-					totalUncompressedSize += uint32(len(bData)) + 8 // 8-byte header
+					totalUncompressedSize += uint32(len(bData)) + 8
 				}
 				if len(bDatas) == 0 {
 					continue
 				}
 
-				// Get the current active section for this partition.
-				b.SectionLock.Lock()
-				secId := b.PartitionMap[partitionId][len(b.PartitionMap[partitionId])-1]
-				sec := b.Sections[secId]
-				b.SectionLock.Unlock()
-
+				sec := b.ActiveSections[partitionId] // This is the section active for writing
+				if sec == nil {
+					// This should not happen if Init is correct, but add recovery/guard
+					b.SectionLock.Lock()
+					var err error
+					sec, err = b.CreateNewSection(partitionId)
+					if err != nil {
+						b.SectionLock.Unlock()
+						localErr = multierror.Append(localErr, fmt.Errorf("failed to get or create active section for partition %d: %v", partitionId, err))
+						continue
+					}
+					b.SectionLock.Unlock()
+				}
 				sec.Lock.Lock()
 
-				// Use uncompressed size for section size check (conservative estimate)
-				if sec.LiveBytes+totalUncompressedSize > MAX_SECTION_SIZE {
+				// --- ROTATE SECTION IF FULL ---
+				if sec.LiveBytes+totalUncompressedSize > section.MAX_SECTION_SIZE {
+					// Flush old section before rotating
+					if sec.LiveBytes > 0 {
+						if err := sec.MMap.Flush(); err != nil {
+							log.Errorf("Flush failed on rotate for section %d: %v", sec.ID, err)
+						}
+					}
 					sec.Lock.Unlock()
 
 					newSec, err := b.CreateNewSection(partitionId)
@@ -139,12 +174,22 @@ func (b *JSONTable) StartTableGoroutine(
 					}
 					rowLoc.TableId = b.TableId
 					allMetadata[rowIds[i]] = rowLoc
+
+					// --- PERIODIC FLUSH ---
+					flushCounter++
+					if flushCounter >= FLUSH_EVERY {
+						if err := sec.MMap.Flush(); err != nil {
+							log.Errorf("Periodic flush failed for section %d: %v", sec.ID, err)
+						}
+						flushCounter = 0
+					}
 				}
 
-				sec.TotalRows++
+				sec.TotalRows += uint32(len(bDatas))
 				sec.Lock.Unlock()
 			}
 		}
+
 		metadataChan <- &KitchenSink{
 			FieldIndexKeyElements: allFieldIndexKeyElements,
 			Metadata:              allMetadata,

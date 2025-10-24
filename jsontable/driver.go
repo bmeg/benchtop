@@ -10,6 +10,7 @@ import (
 
 	"github.com/bmeg/benchtop"
 	"github.com/bmeg/benchtop/jsontable/cache"
+	"github.com/bmeg/benchtop/jsontable/section"
 	jTable "github.com/bmeg/benchtop/jsontable/table"
 	"github.com/bmeg/benchtop/pebblebulk"
 	"github.com/bmeg/benchtop/util"
@@ -148,13 +149,15 @@ func (dr *JSONDriver) New(name string, columns []benchtop.ColumnDef) (benchtop.T
 	tPath := filepath.Join(dr.base, "TABLES", formattedName)
 
 	out := &jTable.JSONTable{
-		Columns:   columns,
-		ColumnMap: map[string]int{},
-		Path:      tPath,
-		Name:      name,
-		FileName:  tPath, // Base name for partition/section files
-		TableId:   newId,
-		Fields:    map[string]struct{}{},
+		Columns:        columns,
+		ColumnMap:      map[string]int{},
+		Path:           tPath,
+		Name:           name,
+		FileName:       tPath, // Base name for partition/section files
+		TableId:        newId,
+		Fields:         map[string]struct{}{},
+		ActiveSections: map[uint8]*section.Section{},
+		FlushCounter:   map[uint8]int{},
 	}
 	for n, d := range columns {
 		out.ColumnMap[d.Key] = n
@@ -284,13 +287,15 @@ func (dr *JSONDriver) Get(name string) (benchtop.TableStore, error) {
 	log.Debugf("Opening Table: %#v\n", tinfo)
 	tPath := filepath.Join(dr.base, "TABLES", string(tinfo.FileName))
 	out := &jTable.JSONTable{
-		Columns:   tinfo.Columns,
-		ColumnMap: map[string]int{},
-		TableId:   tinfo.TableId,
-		Path:      tPath,
-		FileName:  tPath,
-		Name:      name,
-		Fields:    map[string]struct{}{},
+		Columns:        tinfo.Columns,
+		ColumnMap:      map[string]int{},
+		TableId:        tinfo.TableId,
+		Path:           tPath,
+		FileName:       tPath,
+		Name:           name,
+		Fields:         map[string]struct{}{},
+		ActiveSections: map[uint8]*section.Section{},
+		FlushCounter:   map[uint8]int{},
 	}
 	for n, d := range out.Columns {
 		out.ColumnMap[d.Key] = n
