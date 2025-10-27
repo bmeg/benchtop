@@ -7,7 +7,7 @@ import (
 	"hash/fnv"
 	"io"
 	"os"
-	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -53,7 +53,7 @@ type JSONTable struct {
 }
 
 // DefaultPartitionFunc assigns rows to partitions using FNV hash
-func DefaultPartitionFunc(numPartitions uint32) func(id []byte) uint8 {
+func defaultPartitionFunc(numPartitions uint32) func(id []byte) uint8 {
 	return func(id []byte) uint8 {
 		h := fnv.New32a()
 		h.Write(id)
@@ -113,7 +113,6 @@ func (b *JSONTable) AddRow(elem benchtop.Row) (*benchtop.RowLoc, error) {
 			return nil, err
 		}
 	}
-	//fmt.Println("SECTION: %v\n", sec)
 
 	bData, err := sonic.ConfigFastest.Marshal(b.PackData(elem.Data, string(elem.Id)))
 	if err != nil {
@@ -121,18 +120,17 @@ func (b *JSONTable) AddRow(elem benchtop.Row) (*benchtop.RowLoc, error) {
 	}
 	totalSize := uint32(len(bData)) + benchtop.ROW_HSIZE
 
-	sec.Lock.Lock()
-
 	// Check size and rotate if needed
 	if sec.LiveBytes+totalSize > section.MAX_SECTION_SIZE {
 		// Close current
-		sec.CloseSection()
-		//sec.RemapReadOnly() // now RDONLY
-
+		err := sec.CloseSection()
+		if err != nil {
+			sec.Lock.Unlock()
+			return nil, err
+		}
 		// Create new active
 		newSec, err := b.CreateNewSection(partitionId)
 		if err != nil {
-			sec.Lock.Unlock()
 			return nil, err
 		}
 		sec = newSec
@@ -141,13 +139,10 @@ func (b *JSONTable) AddRow(elem benchtop.Row) (*benchtop.RowLoc, error) {
 
 	loc, err := sec.WriteJsonEntryToSection(bData)
 	if err != nil {
-		sec.Lock.Unlock()
 		return nil, err
 	}
 
 	sec.TotalRows++
-	sec.Lock.Unlock()
-
 	loc.TableId = b.TableId
 	return loc, nil
 }
@@ -175,7 +170,7 @@ func (b *JSONTable) CreateNewSection(partitionId uint8) (*section.Section, error
 	}
 
 	filePool := make(chan *os.File, 10)
-	for i := 0; i < cap(filePool); i++ {
+	for range cap(filePool) {
 		f, err := os.OpenFile(path, os.O_RDWR, 0666)
 		if err != nil {
 			m.Unmap()
@@ -211,7 +206,6 @@ func (b *JSONTable) GetRow(loc *benchtop.RowLoc) (map[string]any, error) {
 		return nil, fmt.Errorf("section %d not found", loc.Section)
 	}
 
-	// --- DIRECT MMAP ACCESS ---
 	if len(sec.MMap) == 0 {
 		return nil, fmt.Errorf("section %d is empty or not mapped", loc.Section)
 	}
@@ -233,11 +227,7 @@ func (b *JSONTable) GetRow(loc *benchtop.RowLoc) (map[string]any, error) {
 		return nil, fmt.Errorf("unmarshal failed: %w", err)
 	}
 
-	out, err := b.unpackData(true, false, &m)
-	if err != nil {
-		return nil, err
-	}
-	return out.(map[string]any), nil
+	return m.Data, nil
 }
 
 func (b *JSONTable) MarkDeleteTable(loc *benchtop.RowLoc) error {
@@ -282,6 +272,156 @@ func (b *JSONTable) DeleteRow(loc *benchtop.RowLoc, id []byte) error {
 	return nil
 }
 
+func (b *JSONTable) ScanDoc(filter benchtop.RowFilter) chan map[string]any {
+	outChan := make(chan map[string]any, 100*len(b.Sections))
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, b.MaxConcurrentSections)
+	for pId := uint8(0); pId < uint8(b.NumPartitions); pId++ {
+		for _, secId := range b.PartitionMap[pId] {
+			sec, exists := b.Sections[secId]
+			if !exists || len(sec.MMap) == 0 {
+				continue
+			}
+			wg.Add(1)
+			go func(sec *section.Section) {
+				sem <- struct{}{}
+				defer func() { <-sem; wg.Done() }()
+				m := sec.MMap
+				var offset uint32 = 0
+				for offset+benchtop.ROW_HSIZE <= uint32(len(m)) {
+					header := m[offset : offset+benchtop.ROW_HSIZE]
+					nextOffset := binary.LittleEndian.Uint32(header[:benchtop.ROW_OFFSET_HSIZE])
+					bSize := binary.LittleEndian.Uint32(header[benchtop.ROW_OFFSET_HSIZE:benchtop.ROW_HSIZE])
+					if bSize == 0 {
+						if nextOffset == 0 || nextOffset <= offset {
+							break
+						}
+						offset = nextOffset
+						continue
+					}
+					jsonStart := offset + benchtop.ROW_HSIZE
+					jsonEnd := jsonStart + bSize
+					if jsonEnd > uint32(len(m)) {
+						break
+					}
+					rowData := m[jsonStart:jsonEnd]
+					if err := b.processJSONRowDataDoc(rowData, filter, outChan); err != nil {
+						log.Debugf("skip row in section %d: %v", sec.ID, err)
+					}
+					if nextOffset == 0 || nextOffset <= offset {
+						break
+					}
+					offset = nextOffset
+				}
+			}(sec)
+		}
+	}
+	go func() { wg.Wait(); close(outChan) }()
+	return outChan
+}
+
+// processJSONRowDataDoc handles parsing of row bytes for ScanDoc, applying filters, and sending RowData to the output channel.
+func (b *JSONTable) processJSONRowDataDoc(rowData []byte, filter benchtop.RowFilter, outChan chan map[string]any) error {
+	newData, err := zstd.Decompress(nil, rowData)
+	if err != nil {
+		return err
+	}
+	if filter != nil && !filter.IsNoOp() {
+		if !filter.Matches(newData, b.Name) {
+			return nil
+		}
+	}
+	var m RowData
+	err = sonic.ConfigFastest.Unmarshal(newData, &m)
+	if err != nil {
+		return err
+	}
+	if m.Data != nil {
+		m.Data["_id"] = m.Key
+	}
+	outChan <- m.Data
+	return nil
+}
+
+// ScanId scans the JSONTable and returns IDs (as string) that match the filter.
+func (b *JSONTable) ScanId(filter benchtop.RowFilter) chan string {
+	outChan := make(chan string, 100*len(b.Sections))
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, b.MaxConcurrentSections)
+	for pId := uint8(0); pId < uint8(b.NumPartitions); pId++ {
+		for _, secId := range b.PartitionMap[pId] {
+			sec, exists := b.Sections[secId]
+			if !exists || len(sec.MMap) == 0 {
+				continue
+			}
+			wg.Add(1)
+			go func(sec *section.Section) {
+				sem <- struct{}{}
+				defer func() { <-sem; wg.Done() }()
+				m := sec.MMap
+				var offset uint32 = 0
+				for offset+benchtop.ROW_HSIZE <= uint32(len(m)) {
+					header := m[offset : offset+benchtop.ROW_HSIZE]
+					nextOffset := binary.LittleEndian.Uint32(header[:benchtop.ROW_OFFSET_HSIZE])
+					bSize := binary.LittleEndian.Uint32(header[benchtop.ROW_OFFSET_HSIZE:benchtop.ROW_HSIZE])
+					if bSize == 0 {
+						if nextOffset == 0 || nextOffset <= offset {
+							break
+						}
+						offset = nextOffset
+						continue
+					}
+					jsonStart := offset + benchtop.ROW_HSIZE
+					jsonEnd := jsonStart + bSize
+					if jsonEnd > uint32(len(m)) {
+						break
+					}
+					rowData := m[jsonStart:jsonEnd]
+					if err := b.processJSONRowDataId(rowData, filter, outChan); err != nil {
+						log.Debugf("skip row in section %d: %v", sec.ID, err)
+					}
+					if nextOffset == 0 || nextOffset <= offset {
+						break
+					}
+					offset = nextOffset
+				}
+			}(sec)
+		}
+	}
+	go func() { wg.Wait(); close(outChan) }()
+	return outChan
+}
+
+// processJSONRowDataId handles parsing of row bytes for ScanId, applying filters, and sending IDs to the output channel.
+func (b *JSONTable) processJSONRowDataId(rowData []byte, filter benchtop.RowFilter, outChan chan string) error {
+	newData, err := zstd.Decompress(nil, rowData)
+	if err != nil {
+		return err
+	}
+
+	if filter != nil && !filter.IsNoOp() {
+		if !filter.Matches(newData, b.Name) {
+			return nil
+		}
+	}
+
+	node, err := sonic.Get(newData, "1")
+	if err != nil {
+		log.Errorf("Error accessing JSON path for row data %s: %v\n", string(newData), err)
+		return err
+	}
+
+	ID, err := node.String()
+	if err != nil {
+		log.Errorf("Error unmarshaling node: %v\n", err)
+		return err
+	}
+
+	outChan <- ID
+	return nil
+}
+
+/*
 func (b *JSONTable) Scan(loadData bool, filter benchtop.RowFilter) chan any {
 	outChan := make(chan any, 100*len(b.Sections))
 	var wg sync.WaitGroup
@@ -346,45 +486,41 @@ func (b *JSONTable) processJSONRowData(
 	filter benchtop.RowFilter,
 	outChan chan any,
 ) error {
-	var val any
-
 	newData, err := zstd.Decompress(nil, rowData)
 	if err != nil {
 		return err
 	}
 
-	if loadData || filter != nil && !filter.IsNoOp() {
-		var m RowData
-
-		sonic.ConfigFastest.Unmarshal(newData, &m)
-		val, err = b.unpackData(true, true, &m)
-		if err != nil {
-			return err
-		}
-	} else {
-		val = newData
-	}
-
-	if filter == nil || filter.IsNoOp() || (!filter.IsNoOp() && filter.Matches(val)) {
-		if loadData {
-			outChan <- val
+	if filter != nil && !filter.IsNoOp() {
+		if !filter.Matches(newData) {
 			return nil
 		}
-
-		node, err := sonic.Get(newData, "1")
-		if err != nil {
-			log.Errorf("Error accessing JSON path for row data %s: %v\n", string(newData), err)
-			return err
-		}
-		ID, err := node.Interface()
-		if err != nil {
-			log.Errorf("Error unmarshaling node: %v\n", err)
-			return err
-		}
-		outChan <- ID
 	}
+
+	if loadData {
+		var m RowData
+		err := sonic.ConfigFastest.Unmarshal(newData, &m)
+		if err != nil {
+			return err
+		}
+		outChan <- b.unpackData(true, &m)
+		return nil
+	}
+
+	node, err := sonic.Get(newData, "1")
+	if err != nil {
+		log.Errorf("Error accessing JSON path for row data %s: %v\n", string(newData), err)
+		return err
+	}
+	ID, err := node.Interface()
+	if err != nil {
+		log.Errorf("Error unmarshaling node: %v\n", err)
+		return err
+	}
+	outChan <- ID
 	return nil
 }
+*/
 
 /*
 func (b *JSONTable) CompactSection(secId uint16) error {
@@ -554,24 +690,164 @@ func (b *JSONTable) Compact() error {
 
 func ConvertJSONPathToArray(path string) ([]any, error) {
 	path = strings.TrimLeft(path, "./")
-	result := []any{"0"}
+	if path == "" {
+		return []any{"0"}, nil // Handle empty path after trimming
+	}
 
-	re := regexp.MustCompile(`[^.\[\]]+|\[\d+\]`)
-	matches := re.FindAllString(path, -1)
-	for _, token := range matches {
-		if strings.HasPrefix(token, "[") && strings.HasSuffix(token, "]") {
-			numStr := token[1 : len(token)-1]
+	result := make([]any, 1, len(path)/2+1)
+	result[0] = "0"
+	var start int = 0
+	var length int = len(path)
+
+	for i := 0; i < length; i++ {
+		char := path[i]
+
+		switch char {
+		case '.':
+			// Found a dot separator. The preceding characters (if any) are a key.
+			if i > start {
+				token := path[start:i]
+				if token != "" {
+					result = append(result, token)
+				}
+			}
+			start = i + 1 // Start the next token after the dot
+
+		case '[':
+			// Found the start of an array index. The preceding characters (if any) are a key.
+			if i > start {
+				token := path[start:i]
+				if token != "" {
+					result = append(result, token)
+				}
+			}
+
+			// Look for the closing bracket
+			j := i + 1
+			for j < length && path[j] != ']' {
+				j++
+			}
+
+			if j == length || j == i+1 {
+				// Error: missing closing bracket or empty brackets '[]'
+				return nil, fmt.Errorf("invalid path format: missing array closing bracket or empty index at position %d", i)
+			}
+
+			// Extract and convert the index string
+			numStr := path[i+1 : j]
 			index, err := strconv.Atoi(numStr)
 			if err != nil {
-				return nil, fmt.Errorf("invalid array index: %s", token)
+				return nil, fmt.Errorf("invalid array index: %s", numStr)
 			}
 			result = append(result, index)
-		} else {
+
+			// Skip past the index token, including the ']'
+			i = j // Loop's i++ will make it j+1
+			start = i + 1
+		}
+	}
+
+	// Handle the final token if the path didn't end with a separator
+	if start < length {
+		token := path[start:length]
+		if token != "" {
 			result = append(result, token)
 		}
 	}
+
 	return result, nil
 }
+
+func (b *JSONTable) GetRows(locs []*benchtop.RowLoc, sectionId uint16) ([]map[string]any, []error) {
+	results := make([]map[string]any, len(locs))
+	errors := make([]error, len(locs))
+	sec, exists := b.Sections[sectionId]
+	if !exists || len(sec.MMap) == 0 {
+		return nil, []error{fmt.Errorf("sectionId not found in sections: %d", sectionId)}
+	}
+
+	sec.Lock.RLock()
+	defer sec.Lock.RUnlock()
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, runtime.NumCPU()) // Per-section concurrency
+	chunkSize := 100                             // Adjust based on profiling
+	for i := 0; i < len(locs); i += chunkSize {
+		end := i + chunkSize
+		if end > len(locs) {
+			end = len(locs)
+		}
+		chunk := locs[i:end]
+		wg.Add(1)
+		go func(start int, chunk []*benchtop.RowLoc) {
+			sem <- struct{}{}
+			defer func() { <-sem; wg.Done() }()
+			for j, loc := range chunk {
+				idx := start + j
+				if loc.Section != sectionId {
+					errors[idx] = fmt.Errorf("Expected sectionId %d but got %d instead", sectionId, loc.Section)
+					continue
+				}
+				startOffset := loc.Offset + benchtop.ROW_HSIZE
+				endOffset := startOffset + loc.Size
+				if endOffset > uint32(len(sec.MMap)) {
+					errors[idx] = fmt.Errorf("row out of bounds: %d > %d", endOffset, len(sec.MMap))
+					continue
+				}
+				compressed := sec.MMap[startOffset:endOffset]
+				decompressed, err := zstd.Decompress(nil, compressed)
+				if err != nil {
+					errors[idx] = fmt.Errorf("decompress failed: %w", err)
+					continue
+				}
+				var m RowData
+				if err := sonic.ConfigFastest.Unmarshal(decompressed, &m); err != nil {
+					errors[idx] = fmt.Errorf("unmarshal failed: %w", err)
+					continue
+				}
+				results[idx] = m.Data
+			}
+		}(i, chunk)
+	}
+	wg.Wait()
+	return results, errors
+}
+
+/*func (b *JSONTable) GetRows(locs []*benchtop.RowLoc, sectionId uint16) ([]map[string]any, []error) {
+	results := make([]map[string]any, len(locs))
+	errors := make([]error, len(locs))
+	sec, exists := b.Sections[sectionId]
+	if !exists || len(sec.MMap) == 0 {
+		return nil, []error{fmt.Errorf("sectionId not found in sections: %d", sectionId)}
+	}
+
+	sec.Lock.RLock()
+	defer sec.Lock.RUnlock()
+	var m RowData
+	var start, end uint32 = 0, 0
+	for i, loc := range locs {
+		if loc.Section != sectionId {
+			errors[i] = fmt.Errorf("Expected sectionId %d but got %d instead", sectionId, loc.Section)
+			continue
+		}
+		start = loc.Offset + benchtop.ROW_HSIZE
+		end = start + loc.Size
+		if end > uint32(len(sec.MMap)) {
+			errors[i] = fmt.Errorf("row out of bounds: %d > %d", end, len(sec.MMap))
+			continue
+		}
+		decompressed, err := zstd.Decompress(nil, sec.MMap[start:end])
+		if err != nil {
+			errors[i] = fmt.Errorf("decompress failed: %w", err)
+			continue
+		}
+		if err := sonic.ConfigFastest.Unmarshal(decompressed, &m); err != nil {
+			errors[i] = fmt.Errorf("unmarshal failed: %w", err)
+			continue
+		}
+		results[i] = m.Data
+	}
+	return results, errors
+}*/
 
 func (b *JSONTable) GetColumnDefs() []benchtop.ColumnDef {
 	return b.Columns

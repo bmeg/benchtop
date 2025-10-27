@@ -45,7 +45,7 @@ type RowLoc struct {
 }
 
 type RowFilter interface {
-	Matches(row any) bool
+	Matches(row []byte, tableStr string) bool
 	GetFilter() any
 	IsNoOp() bool
 	RequiredFields() []string
@@ -68,7 +68,8 @@ type TableStore interface {
 	GetRow(loc *RowLoc) (map[string]any, error)
 	DeleteRow(loc *RowLoc, id []byte) error
 
-	Scan(key bool, filter RowFilter) chan any
+	ScanDoc(filter RowFilter) chan map[string]any
+	ScanId(filter RowFilter) chan string
 
 	//Compact() error
 	Close() error

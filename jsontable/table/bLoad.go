@@ -38,19 +38,15 @@ func (b *JSONTable) StartTableGoroutine(
 		defer func() {
 			// --- FINAL FLUSH ON EXIT ---
 			b.SectionLock.Lock()
-			for secId := range b.ActiveSections {
-				if sec, exists := b.Sections[uint16(secId)]; exists && sec.Active {
-					sec.Lock.Lock()
-					if sec.LiveBytes > 0 {
-						if err := sec.MMap.Flush(); err != nil {
-							log.Errorf("Final flush failed for section %d: %v", sec.ID, err)
-						}
+			for _, sec := range b.ActiveSections {
+				if sec.LiveBytes > 0 {
+					if err := sec.MMap.Flush(); err != nil {
+						log.Errorf("Final flush failed for section %d: %v", sec.ID, err)
 					}
 					err := sec.File.Sync()
 					if err != nil {
 						log.Errorf("File Sync failed in bulk load: %v", err)
 					}
-					sec.Lock.Unlock()
 				}
 			}
 			b.SectionLock.Unlock()
@@ -134,27 +130,23 @@ func (b *JSONTable) StartTableGoroutine(
 				sec := b.ActiveSections[partitionId] // This is the section active for writing
 				if sec == nil {
 					// This should not happen if Init is correct, but add recovery/guard
-					b.SectionLock.Lock()
 					var err error
 					sec, err = b.CreateNewSection(partitionId)
 					if err != nil {
-						b.SectionLock.Unlock()
 						localErr = multierror.Append(localErr, fmt.Errorf("failed to get or create active section for partition %d: %v", partitionId, err))
 						continue
 					}
-					b.SectionLock.Unlock()
 				}
-				sec.Lock.Lock()
 
 				// --- ROTATE SECTION IF FULL ---
 				if sec.LiveBytes+totalUncompressedSize > section.MAX_SECTION_SIZE {
 					// Flush old section before rotating
 					if sec.LiveBytes > 0 {
-						if err := sec.MMap.Flush(); err != nil {
-							log.Errorf("Flush failed on rotate for section %d: %v", sec.ID, err)
+						err := sec.CloseSection()
+						if err != nil {
+							localErr = multierror.Append(localErr, err)
 						}
 					}
-					sec.Lock.Unlock()
 
 					newSec, err := b.CreateNewSection(partitionId)
 					if err != nil {
@@ -162,13 +154,11 @@ func (b *JSONTable) StartTableGoroutine(
 						continue
 					}
 					sec = newSec
-					sec.Lock.Lock()
 				}
 
 				for i, bData := range bDatas {
 					rowLoc, err := sec.WriteJsonEntryToSection(bData)
 					if err != nil {
-						sec.Lock.Unlock()
 						localErr = multierror.Append(localErr, fmt.Errorf("write error for row %s in section %d: %v", rowIds[i], sec.ID, err))
 						continue
 					}
@@ -177,16 +167,16 @@ func (b *JSONTable) StartTableGoroutine(
 
 					// --- PERIODIC FLUSH ---
 					flushCounter++
-					if flushCounter >= FLUSH_EVERY {
-						if err := sec.MMap.Flush(); err != nil {
-							log.Errorf("Periodic flush failed for section %d: %v", sec.ID, err)
-						}
-						flushCounter = 0
+					/*if flushCounter >= FLUSH_EVERY {
+					sec.Lock.Lock()
+					if err := sec.MMap.Flush(); err != nil {
+						log.Errorf("Periodic flush failed for section %d: %v", sec.ID, err)
 					}
+					sec.Lock.Unlock()
+					flushCounter = 0
+					}*/
 				}
-
 				sec.TotalRows += uint32(len(bDatas))
-				sec.Lock.Unlock()
 			}
 		}
 

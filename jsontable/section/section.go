@@ -36,6 +36,9 @@ type Section struct {
 }
 
 func (s *Section) WriteJsonEntryToSection(payload []byte) (*benchtop.RowLoc, error) {
+	s.Lock.Lock()
+	defer s.Lock.Unlock()
+
 	cPayload, err := zstd.Compress(s.CompressScratch[:0], payload)
 	if err != nil {
 		return nil, fmt.Errorf("compress failed: %w", err)
@@ -87,6 +90,7 @@ func (s *Section) CloseSection() error {
 	if !s.Active {
 		return nil
 	}
+	s.Lock.Lock()
 	if err := s.MMap.Flush(); err != nil {
 		return err
 	}
@@ -95,6 +99,7 @@ func (s *Section) CloseSection() error {
 			return err
 		}
 	}
+	s.Lock.Unlock()
 	s.Active = false
 	return nil
 }
@@ -127,6 +132,9 @@ func (s *Section) GrowAndRemap(newSize int64) error {
 		// Crucial: ensure any pending data is flushed before unmap
 		if err := s.MMap.Flush(); err != nil {
 			return fmt.Errorf("flush before unmap failed: %w", err)
+		}
+		if err := s.File.Sync(); err != nil {
+			return fmt.Errorf("sync failed: %w", err)
 		}
 		if err := s.MMap.Unmap(); err != nil {
 			return fmt.Errorf("unmap failed: %w", err)

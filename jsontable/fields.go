@@ -58,9 +58,9 @@ func (dr *JSONDriver) AddField(label, field string) error {
 		log.Debugf("Found table %s writing indices for field %s", label, field)
 		err := dr.Pkv.BulkWrite(func(tx *pebblebulk.PebbleBulk) error {
 			var filter benchtop.RowFilter = nil
-			for r := range foundTable.Scan(true, filter) {
-				fieldValue := tpath.PathLookup(r.(map[string]any), field)
-				rowId, ok := r.(map[string]any)["_id"].(string)
+			for r := range foundTable.ScanDoc(filter) {
+				fieldValue := tpath.PathLookup(r, field)
+				rowId, ok := r["_id"].(string)
 				if !ok {
 					return fmt.Errorf("_id field not found or is not string in map %s", r)
 				}
@@ -351,8 +351,8 @@ func (dr *JSONDriver) GetIDsForLabel(label string) chan string {
 		}
 
 		var filter benchtop.RowFilter = nil
-		for id := range table.Scan(false, filter) {
-			out <- id.(string)
+		for id := range table.ScanId(filter) {
+			out <- id
 		}
 	}()
 	return out

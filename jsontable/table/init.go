@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -23,10 +22,8 @@ func (b *JSONTable) Init(poolSize int) error {
 		}
 	}
 
-	b.PartitionFunc = DefaultPartitionFunc(b.NumPartitions)
+	b.PartitionFunc = defaultPartitionFunc(b.NumPartitions)
 	b.Sections = map[uint16]*section.Section{}
-	b.PartitionMap = map[uint8][]uint16{}
-	b.MaxConcurrentSections = uint8(runtime.NumCPU())
 
 	dir := filepath.Dir(b.FileName)
 	base := filepath.Base(b.FileName)
@@ -137,8 +134,6 @@ func (b *JSONTable) Init(poolSize int) error {
 		b.PartitionMap[s.pId] = append(b.PartitionMap[s.pId], secId)
 
 	}
-	b.ActiveSections = map[uint8]*section.Section{}
-	b.FlushCounter = map[uint8]int{}
 
 	for pId, secIds := range b.PartitionMap {
 		if len(secIds) > 0 {
