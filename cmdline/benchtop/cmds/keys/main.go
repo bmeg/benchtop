@@ -36,7 +36,7 @@ var Cmd = &cobra.Command{
 			return err
 		}
 		for k := range keys {
-			fmt.Printf("%s\n", k)
+			fmt.Printf("%s\n", k.Key)
 		}
 		return nil
 	},

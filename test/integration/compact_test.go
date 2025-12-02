@@ -1,11 +1,14 @@
 package test
 
 import (
+	"context"
 	"os"
 	"testing"
 
 	"github.com/bmeg/benchtop"
 	"github.com/bmeg/benchtop/jsontable"
+	jTable "github.com/bmeg/benchtop/jsontable/table"
+
 	"github.com/bmeg/benchtop/test/fixtures"
 	"github.com/bmeg/benchtop/util"
 )
@@ -27,20 +30,26 @@ func TestCompact(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	jT, _ := ts.(*jsontable.JSONTable)
+	jDR, _ := dr.(*jsontable.JSONDriver)
+	jT, _ := ts.(*jTable.JSONTable)
+
 	for k, r := range fixtures.ScanData {
 		loc, err := jT.AddRow(benchtop.Row{Id: []byte(k), TableName: "table_1", Data: r})
 		if err != nil {
 			t.Fatal(err)
 		}
-		err = jT.AddTableEntryInfo(nil, []byte(k), loc)
-
+		err = jDR.AddTableEntryInfo(nil, []byte(k), loc)
+		_, ok := jDR.LocCache.Set(k, loc)
+		if !ok {
+			t.Fatalf("Cache set failed for : %#v", loc)
+		}
 	}
 
-	loc, err := jT.GetBlockPos([]byte("key4"))
+	loc, err := jDR.LocCache.Get(context.Background(), "key4")
 	if err != nil {
 		t.Error(err)
 	}
+
 	err = ts.DeleteRow(loc, []byte("key4"))
 	if err != nil {
 		t.Fatal(err)

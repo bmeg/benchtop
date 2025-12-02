@@ -331,7 +331,6 @@ func (dr *JSONDriver) RowIdsByLabelFieldValue(fltLabel string, fltField string, 
 		if err != nil {
 			log.Errorf("Error in View for field %s: %s", fltField, err)
 		}
-		return
 	}()
 	return out
 }

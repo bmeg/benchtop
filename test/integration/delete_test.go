@@ -1,12 +1,14 @@
 package test
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"testing"
 
 	"github.com/bmeg/benchtop"
 	"github.com/bmeg/benchtop/jsontable"
+	jTable "github.com/bmeg/benchtop/jsontable/table"
 	"github.com/bmeg/benchtop/util"
 )
 
@@ -23,14 +25,15 @@ func TestDelete(t *testing.T) {
 		{Key: "data"},
 		{Key: "id"},
 	})
-
 	if err != nil {
 		t.Error(err)
 	}
 
 	totalCount := 100
-	jT, _ := ts.(*jsontable.JSONTable)
-	for i := 0; i < totalCount; i++ {
+	jT, _ := ts.(*jTable.JSONTable)
+	jDr, _ := dr.(*jsontable.JSONDriver)
+
+	for i := range totalCount {
 		key := fmt.Sprintf("key_%d", i)
 		loc, err := jT.AddRow(benchtop.Row{Id: []byte(key), Data: map[string]any{
 			"id":   key,
@@ -39,19 +42,23 @@ func TestDelete(t *testing.T) {
 		if err != nil {
 			t.Error(err)
 		}
-		err = jT.AddTableEntryInfo(nil, []byte(key), loc)
+		err = jDr.AddTableEntryInfo(nil, []byte(key), loc)
 		if err != nil {
 			t.Error(err)
+		}
+		_, ok := jDr.LocCache.Set(key, loc)
+		if !ok {
+			t.Fatalf("Failed to set loc: %#v", loc)
 		}
 	}
 
 	count := 0
-	r, err := jT.Keys()
+	r, err := jDr.ListTableKeys(jT.TableId)
 	if err != nil {
 		t.Error(err)
 	}
 	for i := range r {
-		loc, err := jT.GetBlockPos(i.Key)
+		loc, err := jDr.LocCache.Get(context.Background(), string(i.Key))
 		if err != nil {
 			t.Error(err)
 		}
@@ -66,28 +73,35 @@ func TestDelete(t *testing.T) {
 	}
 
 	var deleteCount = 0
-	keys, err := jT.Keys()
+	fmt.Println("TABLE ID: ", jT.TableId)
+	keys, err := jDr.ListTableKeys(jT.TableId)
 	if err != nil {
 		t.Error(err)
 	}
 	i := 0
 	for k := range keys {
 		if i%3 == 0 {
-			loc, err := jT.GetBlockPos(k.Key)
+			loc, err := jDr.LocCache.Get(context.Background(), string(k.Key))
 			if err != nil {
 				t.Error(err)
+			}
+
+			err = jDr.Pkv.Delete(benchtop.NewPosKey(jT.TableId, k.Key), nil)
+			if err != nil {
+				t.Fatal(err)
 			}
 			err = jT.DeleteRow(loc, k.Key)
 			if err != nil {
 				t.Errorf("delete %s error: %s", string(k.Key), err)
 			}
+			jDr.LocCache.Invalidate(string(k.Key))
 			deleteCount++
 		}
 		i++
 	}
 
 	count = 0
-	r, err = jT.Keys()
+	r, err = jDr.ListTableKeys(jT.TableId)
 	if err != nil {
 		t.Error(err)
 	}

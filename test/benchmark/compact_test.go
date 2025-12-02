@@ -1,22 +1,12 @@
 package test
 
-import (
-	"fmt"
-	"os"
-	"testing"
-
-	"github.com/bmeg/benchtop"
-	"github.com/bmeg/benchtop/jsontable"
-	"github.com/bmeg/benchtop/test/fixtures"
-	"github.com/bmeg/benchtop/util"
-)
-
 const (
 	numKeys       = 1000
 	valueSize     = 5024
 	NumDeleteKeys = 200
 )
 
+/*  Compact not implemented currently
 func BenchmarkCompactJson(b *testing.B) {
 	var compactjsoname = "test.json" + util.RandomString(5)
 	defer os.RemoveAll(compactjsoname)
@@ -35,24 +25,38 @@ func BenchmarkCompactJson(b *testing.B) {
 		b.Fatal(err)
 	}
 
-	inputChan := make(chan benchtop.Row, 100)
+	inputChan := make(chan *benchtop.Row, 100)
 	go func() {
 		count := 0
 		for j := 0; j < numKeys; j++ {
 			key := []byte(fmt.Sprintf("key_%d", j))
 			value := fixtures.GenerateRandomBytes(valueSize)
-			inputChan <- benchtop.Row{Id: key, Data: map[string]any{"data": value}}
+			inputChan <- &benchtop.Row{Id: key, Data: map[string]any{"data": value}}
 			count++
 		}
 		b.Logf("Inserted %d entries into inputChan", count)
 		close(inputChan)
 	}()
 
+	//func (dr *JSONDriver) BulkLoad(inputs chan *benchtop.Row, tx *pebblebulk.PebbleBulk) error {
+
+	jsonDriver, ok := compactjsonDriver.(*jsontable.JSONDriver)
+	if !ok {
+		b.Fatalf("invalid table type for %s", compactjsoname)
+	}
+
+	jT, ok := compactjsonTable.(*jTable.JSONTable)
+	if !ok {
+		b.Fatalf("invalid table type for %s", compactjsoname)
+	}
+
 	b.Log("start load")
-	if err := compactjsonTable.Load(inputChan); err != nil {
+	if err := jsonDriver.BulkLoad(inputChan, nil); err != nil {
 		b.Fatal(err)
 	}
 	b.Log("Load completed successfully")
+
+	jT, _ = compactjsonTable.(*jTable.JSONTable)
 
 	keys, err := compactjsonTable.Keys()
 	if err != nil {
@@ -63,8 +67,6 @@ func BenchmarkCompactJson(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
-
-	jT, _ := compactjsonTable.(*jsontable.JSONTable)
 
 	count := 0
 	deleted := 0
@@ -105,3 +107,4 @@ func BenchmarkCompactJson(b *testing.B) {
 
 	b.Logf("Keys after compaction: %d", keyCount)
 }
+*/

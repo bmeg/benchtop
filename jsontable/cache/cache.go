@@ -94,7 +94,7 @@ func (ca *JSONCache) PreloadCache() error {
 	}
 	_, err = ca.pageCache.BulkGet(context.Background(), keys, ca.bulkPageLoader)
 	if err == nil {
-		log.Debugf("Successfully loaded %d keys in RowLoc cache in %s", len(keys), time.Now().Sub(L_Start).String())
+		log.Debugf("Successfully loaded %d keys in RowLoc cache in %s", len(keys), time.Since(L_Start).String())
 	}
 	return err
 }

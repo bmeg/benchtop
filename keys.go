@@ -36,6 +36,7 @@ var RFieldPrefix = []byte{'R'}
 // The '0x1F' invisible character unit seperator not supposed to appear in ASCII text
 var FieldSep = []byte{0x1F}
 
+// builds a RFieldKey in the format "R 0x1F label 0x1F field 0x1F rowId"
 func RFieldKey(label, field, rowID string) []byte {
 	return bytes.Join([][]byte{
 		RFieldPrefix,
@@ -120,6 +121,16 @@ func NewPosKeyPrefix(table uint16) []byte {
 	return out[:]
 }
 
+/*
+Builds a 12 byte row loc encoding
+
+	Each encoding in order contains:
+
+	2 bytes for TableId
+	2 bytes for SectionId
+	4 bytes for Offset
+	4 bytes for Size
+*/
 func EncodeRowLoc(loc *RowLoc) []byte {
 	var out [12]byte
 	binary.LittleEndian.PutUint16(out[0:], loc.TableId)
