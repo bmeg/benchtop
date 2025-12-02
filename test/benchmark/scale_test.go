@@ -7,6 +7,8 @@ import (
 
 	"github.com/bmeg/benchtop"
 	"github.com/bmeg/benchtop/jsontable"
+	jTable "github.com/bmeg/benchtop/jsontable/table"
+	"github.com/bmeg/benchtop/pebblebulk"
 	"github.com/bmeg/benchtop/test/fixtures"
 	"github.com/bmeg/benchtop/util"
 	"github.com/bmeg/grip/log"
@@ -14,7 +16,7 @@ import (
 )
 
 var Jsonname = "test.json" + util.RandomString(5)
-var jsonTable *jsontable.JSONTable
+var jsonTable *jTable.JSONTable
 var jsonDriver *jsontable.JSONDriver
 
 const (
@@ -47,7 +49,7 @@ func BenchmarkScaleWriteJson(b *testing.B) {
 		}
 
 		var ok bool
-		jsonTable, ok = table.(*jsontable.JSONTable)
+		jsonTable, ok = table.(*jTable.JSONTable)
 		if !ok {
 			b.Fatal("Failed to assert type *benchtop.JSONDriver")
 		}
@@ -55,22 +57,24 @@ func BenchmarkScaleWriteJson(b *testing.B) {
 
 	b.ResetTimer()
 
-	for b.Loop() {
-		inputChan := make(chan benchtop.Row, 100)
-		go func() {
-			for j := range scalenumKeys {
-				key := []byte(fmt.Sprintf("key_%d", j))
-				value := fixtures.GenerateRandomBytes(scalevalueSize)
-				inputChan <- benchtop.Row{Id: key, Data: map[string]any{"data": value}}
+	jsonDriver.Pkv.BulkWrite(func(tx *pebblebulk.PebbleBulk) error {
+		for b.Loop() {
+			inputChan := make(chan *benchtop.Row, 100)
+			go func() {
+				for j := range scalenumKeys {
+					key := []byte(fmt.Sprintf("key_%d", j))
+					value := fixtures.GenerateRandomBytes(scalevalueSize)
+					inputChan <- &benchtop.Row{Id: key, Data: map[string]any{"data": value}}
+				}
+				close(inputChan)
+			}()
+			err = jsonDriver.BulkLoad(inputChan, tx)
+			if err != nil {
+				b.Fatal(err)
 			}
-			close(inputChan)
-		}()
-
-		err = jsonTable.Load(inputChan)
-		if err != nil {
-			b.Fatal(err)
 		}
-	}
+		return nil
+	})
 }
 
 func BenchmarkRandomReadJson(b *testing.B) {
@@ -97,24 +101,23 @@ func BenchmarkRandomReadJson(b *testing.B) {
 	selectedValues := make([]map[string]any, 0, len(randomIndexSet))
 	count := 0
 	b.ResetTimer()
-
-	OTKEYS, _ := ot.Keys()
-	bT, _ := ot.(*jsontable.JSONTable)
+	jT, _ := ot.(*jTable.JSONTable)
+	OTKEYS, _ := jsonDriver.ListTableKeys(jT.TableId)
 	for key := range OTKEYS {
 		if _, exists := randomIndexSet[count]; exists {
 
-			pKey := benchtop.NewPosKey(bT.TableId, key.Key)
-			val, closer, err := bT.Pb.Db.Get(pKey)
+			pKey := benchtop.NewPosKey(jT.TableId, key.Key)
+			val, closer, err := jsonDriver.Pkv.Db.Get(pKey)
 			if err != nil {
 				if err != pebble.ErrNotFound {
 					log.Errorf("Err on dr.Pb.Get for key %s in CacheLoader: %v", key.Key, err)
 				}
 				log.Errorln("ERR: ", err)
 			}
-			offset, size := benchtop.ParsePosValue(val)
+			loc := benchtop.DecodeRowLoc(val)
 			closer.Close()
 
-			rOw, err := bT.GetRow(benchtop.RowLoc{Offset: offset, Size: size, Label: 0})
+			rOw, err := jT.GetRow(loc)
 			if err != nil {
 				b.Fatal(err)
 			}
@@ -122,8 +125,6 @@ func BenchmarkRandomReadJson(b *testing.B) {
 		}
 		count++
 	}
-	b.Log("READS:", len(selectedValues), "COUNT: ", count)
-
 }
 
 func BenchmarkRandomKeysJson(b *testing.B) {
@@ -153,7 +154,8 @@ func BenchmarkRandomKeysJson(b *testing.B) {
 	count := 0
 	b.ResetTimer()
 
-	OTKEYS, _ := ot.Keys()
+	jT, _ := ot.(*jTable.JSONTable)
+	OTKEYS, _ := jsonDriver.ListTableKeys(jT.TableId)
 	for key := range OTKEYS {
 		if _, exists := randomIndexSet[count]; exists {
 			selectedValues = append(selectedValues, key.Key)

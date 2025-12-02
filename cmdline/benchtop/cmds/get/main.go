@@ -34,18 +34,16 @@ var Cmd = &cobra.Command{
 
 		TS, _ := driver.(*jsontable.JSONDriver)
 		for _, key := range keys {
-			val, closer, err := TS.Pb.Db.Get([]byte(key))
+			val, closer, err := TS.Pkv.Get([]byte(key))
 			if err != nil {
 				if err != pebble.ErrNotFound {
 					log.Errorf("Err on dr.Pb.Get for key %s in CacheLoader: %v", key, err)
 				}
 				log.Errorln("ERR: ", err)
 			}
-			fmt.Println("VAL: ", val)
-			offset, size := benchtop.ParsePosValue(val)
 			closer.Close()
 
-			data, err := table.GetRow(benchtop.RowLoc{Offset: offset, Size: size})
+			data, err := table.GetRow(benchtop.DecodeRowLoc(val))
 			if err == nil {
 				out, err := json.Marshal(data)
 				if err != nil {

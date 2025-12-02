@@ -5,7 +5,6 @@ import (
 
 	"github.com/bmeg/benchtop/cmdline/benchtop/cmds/get"
 	"github.com/bmeg/benchtop/cmdline/benchtop/cmds/keys"
-	"github.com/bmeg/benchtop/cmdline/benchtop/cmds/load"
 	"github.com/bmeg/benchtop/cmdline/benchtop/cmds/tables"
 
 	"github.com/spf13/cobra"
@@ -20,7 +19,6 @@ var RootCmd = &cobra.Command{
 
 func init() {
 	RootCmd.AddCommand(keys.Cmd)
-	RootCmd.AddCommand(load.Cmd)
 	RootCmd.AddCommand(tables.Cmd)
 	RootCmd.AddCommand(get.Cmd)
 

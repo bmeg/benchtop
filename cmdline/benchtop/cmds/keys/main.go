@@ -4,6 +4,8 @@ import (
 	"fmt"
 
 	"github.com/bmeg/benchtop/jsontable"
+	jTable "github.com/bmeg/benchtop/jsontable/table"
+
 	"github.com/spf13/cobra"
 )
 
@@ -27,12 +29,14 @@ var Cmd = &cobra.Command{
 			return err
 		}
 
-		keys, err := table.Keys()
+		jT, _ := table.(*jTable.JSONTable)
+
+		keys, err := driver.ListTableKeys(jT.TableId)
 		if err != nil {
 			return err
 		}
 		for k := range keys {
-			fmt.Printf("%s\n", k)
+			fmt.Printf("%s\n", k.Key)
 		}
 		return nil
 	},

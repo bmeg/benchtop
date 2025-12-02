@@ -26,16 +26,6 @@ type ColumnDef struct {
 		 )
 */
 
-type TableDriver interface {
-	New(name string, columns []ColumnDef) (TableStore, error)
-	Get(name string) (TableStore, error)
-	GetAllColNames() chan string
-	GetLabels(edges bool, removePrefix bool) chan string
-	List() []string
-	Delete(name string) error
-	Close()
-}
-
 type Row struct {
 	Id        []byte
 	TableName string
@@ -43,42 +33,44 @@ type Row struct {
 }
 
 type Index struct {
-	Key      []byte
-	Position uint64
-	Size     uint64
-}
-
-type BulkResponse struct {
-	Key  []byte
-	Data map[string]any
-	Err  string
+	Key []byte
+	Loc RowLoc
 }
 
 type RowLoc struct {
-	Offset uint64
-	Size   uint64
-	Label  uint16
+	TableId uint16
+	Section uint16 // Sectioning allows for smaller Offset, Size
+	Offset  uint32 // Max offset, size is 4GB
+	Size    uint32
 }
 
 type RowFilter interface {
-	Matches(row any) bool
+	Matches(row []byte, tableStr string) bool
 	GetFilter() any
 	IsNoOp() bool
 	RequiredFields() []string
 }
 
+type TableDriver interface {
+	New(name string, columns []ColumnDef) (TableStore, error)
+	Get(name string) (TableStore, error)
+	ListTableKeys(tableId uint16) (chan Index, error)
+	GetAllColNames() chan string
+	GetLabels(edges bool, removePrefix bool) chan string
+	List() []string
+	Delete(name string) error
+	Close()
+}
+
 type TableStore interface {
 	GetColumnDefs() []ColumnDef
 	AddRow(elem Row) (*RowLoc, error)
-	GetRow(loc RowLoc) (map[string]any, error)
-	DeleteRow(loc RowLoc, id []byte) error
+	GetRow(loc *RowLoc) (map[string]any, error)
+	DeleteRow(loc *RowLoc, id []byte) error
 
-	Fetch(inputs chan Index, workers int) <-chan BulkResponse
-	Remove(inputs chan Index, workers int) <-chan BulkResponse
-	Scan(key bool, filter RowFilter) chan any
-	Load(chan Row) error
-	Keys() (chan Index, error)
+	ScanDoc(filter RowFilter) chan map[string]any
+	ScanId(filter RowFilter) chan string
 
-	Compact() error
-	Close()
+	//Compact() error
+	Close() error
 }

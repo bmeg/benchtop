@@ -7,6 +7,8 @@ import (
 
 	"github.com/bmeg/benchtop"
 	"github.com/bmeg/benchtop/jsontable"
+	jTable "github.com/bmeg/benchtop/jsontable/table"
+
 	"github.com/bmeg/benchtop/util"
 	"github.com/bmeg/grip/log"
 	"github.com/cockroachdb/pebble"
@@ -77,31 +79,33 @@ func TestInsert(t *testing.T) {
 		t.Error(err)
 	}
 
-	bT, _ := ts.(*jsontable.JSONTable)
+	jT, _ := ts.(*jTable.JSONTable)
+	jDR, _ := dr.(*jsontable.JSONDriver)
+
 	for k, r := range data {
-		loc, err := bT.AddRow(benchtop.Row{Id: []byte(k), TableName: "table_1", Data: r})
+		loc, err := jT.AddRow(benchtop.Row{Id: []byte(k), TableName: "table_1", Data: r})
 		if err != nil {
 			t.Error(err)
 		}
-		err = bT.AddTableEntryInfo(nil, []byte(k), *loc)
+		err = jDR.AddTableEntryInfo(nil, []byte(k), loc)
 		if err != nil {
 			t.Error(err)
 		}
 	}
 
 	for k := range data {
-		pKey := benchtop.NewPosKey(bT.TableId, []byte(k))
-		val, closer, err := bT.Pb.Db.Get(pKey)
+		pKey := benchtop.NewPosKey(jT.TableId, []byte(k))
+		val, closer, err := jDR.Pkv.Db.Get(pKey)
 		if err != nil {
 			if err != pebble.ErrNotFound {
 				log.Errorf("Err on dr.Pb.Get for key %s in CacheLoader: %v", k, err)
 			}
 			log.Errorln("ERR: ", err)
 		}
-		offset, size := benchtop.ParsePosValue(val)
+		loc := benchtop.DecodeRowLoc(val)
 		closer.Close()
 
-		post, err := ts.GetRow(benchtop.RowLoc{Offset: offset, Size: size, Label: 0})
+		post, err := ts.GetRow(loc)
 		if err != nil {
 			t.Error(err)
 		}
@@ -114,7 +118,7 @@ func TestInsert(t *testing.T) {
 			}
 		}
 	}
-	keyList, err := ts.Keys()
+	keyList, err := dr.ListTableKeys(jT.TableId)
 	if err != nil {
 		t.Error(err)
 	}

@@ -8,6 +8,11 @@ import (
 	"github.com/bmeg/grip/log"
 )
 
+const (
+	ROW_HSIZE        uint32 = 8 // Header size: 8-byte next offset + 4-byte size
+	ROW_OFFSET_HSIZE uint32 = 4 // Offset part of header
+)
+
 // Vertex TableId
 // key: T | TableId | VtablePrefix'
 // The starting point for vertex table ids in th pebble index
@@ -31,6 +36,7 @@ var RFieldPrefix = []byte{'R'}
 // The '0x1F' invisible character unit seperator not supposed to appear in ASCII text
 var FieldSep = []byte{0x1F}
 
+// builds a RFieldKey in the format "R 0x1F label 0x1F field 0x1F rowId"
 func RFieldKey(label, field, rowID string) []byte {
 	return bytes.Join([][]byte{
 		RFieldPrefix,
@@ -115,13 +121,30 @@ func NewPosKeyPrefix(table uint16) []byte {
 	return out[:]
 }
 
-func NewPosValue(offset uint64, size uint64) []byte {
-	var out [64]byte
-	binary.LittleEndian.PutUint64(out[:], offset)
-	binary.LittleEndian.PutUint64(out[8:], size)
+/*
+Builds a 12 byte row loc encoding
+
+	Each encoding in order contains:
+
+	2 bytes for TableId
+	2 bytes for SectionId
+	4 bytes for Offset
+	4 bytes for Size
+*/
+func EncodeRowLoc(loc *RowLoc) []byte {
+	var out [12]byte
+	binary.LittleEndian.PutUint16(out[0:], loc.TableId)
+	binary.LittleEndian.PutUint16(out[2:], loc.Section)
+	binary.LittleEndian.PutUint32(out[4:], loc.Offset)
+	binary.LittleEndian.PutUint32(out[8:], loc.Size)
 	return out[:]
 }
 
-func ParsePosValue(v []byte) (offset uint64, size uint64) {
-	return binary.LittleEndian.Uint64(v), binary.LittleEndian.Uint64(v[8:])
+func DecodeRowLoc(v []byte) *RowLoc {
+	return &RowLoc{
+		TableId: binary.LittleEndian.Uint16(v[0:]),
+		Section: binary.LittleEndian.Uint16(v[2:]),
+		Offset:  binary.LittleEndian.Uint32(v[4:]),
+		Size:    binary.LittleEndian.Uint32(v[8:]),
+	}
 }

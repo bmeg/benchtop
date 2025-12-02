@@ -1,11 +1,14 @@
 package test
 
 import (
+	"context"
 	"os"
 	"testing"
 
 	"github.com/bmeg/benchtop"
 	"github.com/bmeg/benchtop/jsontable"
+	jTable "github.com/bmeg/benchtop/jsontable/table"
+
 	"github.com/bmeg/benchtop/test/fixtures"
 	"github.com/bmeg/benchtop/util"
 )
@@ -27,21 +30,27 @@ func TestCompact(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	bT, _ := ts.(*jsontable.JSONTable)
+	jDR, _ := dr.(*jsontable.JSONDriver)
+	jT, _ := ts.(*jTable.JSONTable)
+
 	for k, r := range fixtures.ScanData {
-		loc, err := bT.AddRow(benchtop.Row{Id: []byte(k), TableName: "table_1", Data: r})
+		loc, err := jT.AddRow(benchtop.Row{Id: []byte(k), TableName: "table_1", Data: r})
 		if err != nil {
 			t.Fatal(err)
 		}
-		err = bT.AddTableEntryInfo(nil, []byte(k), *loc)
-
+		err = jDR.AddTableEntryInfo(nil, []byte(k), loc)
+		_, ok := jDR.LocCache.Set(k, loc)
+		if !ok {
+			t.Fatalf("Cache set failed for : %#v", loc)
+		}
 	}
 
-	offset, size, err := bT.GetBlockPos([]byte("key4"))
+	loc, err := jDR.LocCache.Get(context.Background(), "key4")
 	if err != nil {
 		t.Error(err)
 	}
-	err = ts.DeleteRow(benchtop.RowLoc{Offset: offset, Size: size, Label: bT.TableId}, []byte("key4"))
+
+	err = ts.DeleteRow(loc, []byte("key4"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,7 +98,7 @@ func TestCompact(t *testing.T) {
 					}
 
 					pKey := benchtop.NewPosKey(uint16(0), []byte("key8"))
-					val, closer, err := bT.Pb.Db.Get(pKey)
+					val, closer, err := jT.Pb.Db.Get(pKey)
 					if err != nil {
 						if err != pebble.ErrNotFound {
 							log.Errorf("Err on dr.Pb.Get for key %s in CacheLoader: %v", pKey, err)
@@ -99,7 +108,7 @@ func TestCompact(t *testing.T) {
 					offset, size := benchtop.ParsePosValue(val)
 					closer.Close()
 
-					gotRow, err := bT.GetRow(benchtop.RowLoc{Offset: offset, Size: size, Label: 0})
+					gotRow, err := jT.GetRow(benchtop.RowLoc{Offset: offset, Size: size, Label: 0})
 					if err != nil {
 						t.Error(err)
 					}
@@ -110,7 +119,7 @@ func TestCompact(t *testing.T) {
 					}
 
 					pKey = benchtop.NewPosKey(uint16(0), []byte("key8"))
-					val, closer, err = bT.Pb.Db.Get(pKey)
+					val, closer, err = jT.Pb.Db.Get(pKey)
 					if err != nil {
 						if err != pebble.ErrNotFound {
 							log.Errorf("Err on dr.Pb.Get for key %s in CacheLoader: %v", pKey, err)
@@ -121,7 +130,7 @@ func TestCompact(t *testing.T) {
 					closer.Close()
 
 					// Get another key to double check that it works
-					gotRow, err = bT.GetRow(benchtop.RowLoc{Offset: offset, Size: size, Label: 0})
+					gotRow, err = jT.GetRow(benchtop.RowLoc{Offset: offset, Size: size, Label: 0})
 					if err != nil {
 						t.Error(err)
 					}
