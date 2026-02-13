@@ -7,7 +7,7 @@ import (
 	"github.com/bmeg/benchtop"
 	jTable "github.com/bmeg/benchtop/jsontable/table"
 	"github.com/bmeg/benchtop/pebblebulk"
-	"github.com/bytedance/sonic"
+	"github.com/bmeg/grip/log"
 	"github.com/hashicorp/go-multierror"
 )
 
@@ -15,88 +15,70 @@ func (dr *JSONDriver) BulkLoad(inputs chan *benchtop.Row, tx *pebblebulk.PebbleB
 	if dr.Pkv == nil || dr.Pkv.Db == nil {
 		return fmt.Errorf("pebble database instance is nil")
 	}
+	if tx == nil {
+		return fmt.Errorf("passed pebble bulk transaction is nil")
+	}
+
 	var wg sync.WaitGroup
-	tableChannels := make(map[string]chan *benchtop.Row)
+	tableChans := make(map[string]chan *benchtop.Row)
+	metadataChan := make(chan *jTable.IngestBatch, 1024)
 
-	metadataChan := make(chan *jTable.KitchenSink, 100)
-
-	snapshot := dr.Pkv.Db.NewSnapshot()
-	defer snapshot.Close()
-
-	for row := range inputs {
-		if _, exists := tableChannels[row.TableName]; !exists {
-			dr.Lock.RLock()
-			table, exists := dr.Tables[row.TableName]
-			dr.Lock.RUnlock()
+	// 1. Dispatcher: Route rows to table-specific goroutines
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for row := range inputs {
+			ch, exists := tableChans[row.TableName]
 			if !exists {
-				var localErr *multierror.Error
-				newTable, err := dr.New(row.TableName, nil)
-				if err != nil {
-					localErr = multierror.Append(localErr, fmt.Errorf("failed to create table %s: %v", row.TableName, err))
-					metadataChan <- &jTable.KitchenSink{
-						FieldIndexKeyElements: nil,
-						Metadata:              nil,
-						Err:                   localErr.ErrorOrNil(),
-					}
-					continue
-				}
-				table = newTable.(*jTable.JSONTable)
-				dr.Lock.Lock()
-				dr.Tables[row.TableName] = table
-				dr.Lock.Unlock()
-			}
-			inputChan := table.StartTableGoroutine(&wg, metadataChan, snapshot, BATCH_SIZE)
-			tableChannels[row.TableName] = inputChan
-		}
-		tableChannels[row.TableName] <- row
-	}
-	for _, ch := range tableChannels {
-		close(ch)
-	}
+				dr.Lock.RLock()
+				table, ok := dr.Tables[row.TableName]
+				dr.Lock.RUnlock()
 
-	var errs *multierror.Error
+				if !ok {
+					t, err := dr.New(row.TableName, nil)
+					if err != nil {
+						log.Errorf("BulkLoad: failed to auto-create table %s: %v", row.TableName, err)
+						continue
+					}
+					table = t.(*jTable.JSONTable)
+				}
+				ch = table.StartTableGoroutine(&wg, metadataChan, BATCH_SIZE)
+				tableChans[row.TableName] = ch
+			}
+			ch <- row
+		}
+		for _, ch := range tableChans {
+			close(ch)
+		}
+	}()
+
+	// 2. Writer: Process metadata and commit to Pebble
+	var writeErr *multierror.Error
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		writeFunc := func(tx *pebblebulk.PebbleBulk) error {
-			for meta := range metadataChan {
-				if meta.Err != nil {
-					errs = multierror.Append(errs, meta.Err)
-					continue
-				}
-				if meta.Metadata == nil {
-					continue
-				}
-				for _, keyElements := range meta.FieldIndexKeyElements {
-					forwardKey := benchtop.FieldKey(keyElements.Field, keyElements.TableName, keyElements.Val, []byte(keyElements.RowId))
-					if err := tx.Set(forwardKey, []byte{}, nil); err != nil {
-						errs = multierror.Append(errs, err)
-					}
-					BVal, err := sonic.ConfigFastest.Marshal(keyElements.Val)
-					if err != nil {
-						errs = multierror.Append(errs, err)
-						continue
-					}
-					if err := tx.Set(benchtop.RFieldKey(keyElements.TableName, keyElements.Field, keyElements.RowId), BVal, nil); err != nil {
-						errs = multierror.Append(errs, err)
-					}
-				}
 
-				// Write row location entries.
-				for id, m := range meta.Metadata {
-					dr.LocCache.Set(id, m)
-					dr.AddTableEntryInfo(tx, []byte(id), m)
+		for batch := range metadataChan {
+			dr.PebbleLock.Lock()
+			if batch.Err != nil {
+				writeErr = multierror.Append(writeErr, batch.Err)
+				dr.PebbleLock.Unlock()
+				continue
+			}
+
+			// Set Indices (forward and reverse pre-constructed in table goroutine)
+			for _, entry := range batch.Indices {
+				if err := tx.Set(entry.Key, entry.Value, nil); err != nil {
+					writeErr = multierror.Append(writeErr, err)
 				}
 			}
-			return nil
-		}
 
-		if tx == nil {
-			errs = multierror.Append(errs, fmt.Errorf("pebble bulk instance passed into BulkLoad function is nil"))
-		} else {
-			dr.PebbleLock.Lock()
-			if err := writeFunc(tx); err != nil {
-				errs = multierror.Append(errs, err)
+			// Set Location metadata
+			for _, entry := range batch.Metadata {
+				dr.LocCache.Set(string(entry.Id), entry.Loc)
+				if err := dr.AddTableEntryInfo(tx, entry.Id, entry.Loc); err != nil {
+					writeErr = multierror.Append(writeErr, err)
+				}
 			}
 			dr.PebbleLock.Unlock()
 		}
@@ -106,5 +88,5 @@ func (dr *JSONDriver) BulkLoad(inputs chan *benchtop.Row, tx *pebblebulk.PebbleB
 	close(metadataChan)
 	<-done
 
-	return errs.ErrorOrNil()
+	return writeErr.ErrorOrNil()
 }

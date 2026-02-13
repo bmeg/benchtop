@@ -10,6 +10,11 @@ import (
 const CURRENT = "_current"
 
 func PathLookup(v map[string]any, path string) any {
+	// Optimization: if it's a simple top-level field, return it directly.
+	if !strings.Contains(path, ".") && !strings.Contains(path, "$") {
+		return v[path]
+	}
+
 	/* Expects that special fields like '_id' and '_label'
 	   are added to the map before reaching this function
 	*/

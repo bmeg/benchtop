@@ -5,8 +5,8 @@ import (
 	"reflect"
 	"strconv"
 
+	"github.com/bmeg/benchtop/util"
 	"github.com/bmeg/grip/gripql"
-	"github.com/bmeg/grip/log"
 	"github.com/spf13/cast"
 )
 
@@ -126,11 +126,7 @@ func ApplyFilterCondition(val any, cond *FieldFilter) bool {
 	case gripql.Condition_WITHIN:
 		// val is the single document value. condVal is the slice of allowed values.
 		// Check if val is EQ to any element in condVal slice.
-		condSlice, ok := condVal.([]any)
-		if !ok {
-			log.Debugf("UserError: expected slice not %T for WITHIN condition value", condVal)
-			return false
-		}
+		condSlice := util.SliceToAny(condVal)
 		for _, v := range condSlice {
 			if ApplyFilterCondition(val, &FieldFilter{Operator: gripql.Condition_EQ, Value: v}) {
 				return true // Found a match
@@ -139,11 +135,7 @@ func ApplyFilterCondition(val any, cond *FieldFilter) bool {
 		return false
 
 	case gripql.Condition_WITHOUT:
-		condSlice, ok := condVal.([]any)
-		if !ok {
-			log.Debugf("UserError: expected slice not %T for WITHIN condition value", condVal)
-			return true
-		}
+		condSlice := util.SliceToAny(condVal)
 		for _, v := range condSlice {
 			if ApplyFilterCondition(val, &FieldFilter{Operator: gripql.Condition_EQ, Value: v}) {
 				return false
@@ -154,11 +146,7 @@ func ApplyFilterCondition(val any, cond *FieldFilter) bool {
 	case gripql.Condition_CONTAINS:
 		// val is the slice from the document. condVal is the single target element.
 		// Check if any element in val slice is EQ to condVal.
-		valSlice, ok := val.([]any)
-		if !ok {
-			log.Debugf("UserError: expected slice not %T for CONTAINS condition value", val)
-			return false
-		}
+		valSlice := util.SliceToAny(val)
 		for _, v := range valSlice {
 			// Use the optimized EQ check recursively instead of reflect.DeepEqual(v, condVal)
 			// Note: Arguments are v (slice element) and condVal (target).

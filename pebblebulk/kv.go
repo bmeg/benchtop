@@ -4,7 +4,6 @@ import (
 	"io"
 	"sync"
 
-	"github.com/bmeg/grip/log"
 	"github.com/cockroachdb/pebble"
 )
 
@@ -25,7 +24,15 @@ type PebbleKV struct {
 }
 
 func NewPebbleKV(path string) (*PebbleKV, error) {
-	db, err := pebble.Open(path, &pebble.Options{})
+	// 512 MB cache
+	cache := pebble.NewCache(512 << 20)
+	opts := &pebble.Options{
+		Cache:                 cache,
+		MemTableSize:          64 << 20,
+		L0CompactionThreshold: 2,
+		L0StopWritesThreshold: 12,
+	}
+	db, err := pebble.Open(path, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -48,12 +55,14 @@ func (pdb *PebbleKV) BulkWrite(u func(tx *PebbleBulk) error) error {
 	batch.Commit(nil)
 	batch.Close()
 
-	pdb.InsertCount += ptx.totalInserts
-	if pdb.InsertCount > pdb.CompactLimit {
-		log.Debugf("Running pebble compact %d > %d", pdb.InsertCount, pdb.CompactLimit)
-		pdb.Db.Compact([]byte{0x00}, []byte{0xFF}, true)
-		pdb.InsertCount = 0
-	}
+	/*
+		pdb.InsertCount += ptx.totalInserts
+		if pdb.InsertCount > pdb.CompactLimit {
+			log.Debugf("Running pebble compact %d > %d", pdb.InsertCount, pdb.CompactLimit)
+			pdb.Db.Compact([]byte{0x00}, []byte{0xFF}, true)
+			pdb.InsertCount = 0
+		}
+	*/
 	return err
 }
 

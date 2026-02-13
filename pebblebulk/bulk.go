@@ -10,7 +10,7 @@ import (
 )
 
 const (
-	maxWriterBuffer = 3 << 30
+	maxWriterBuffer = 64 << 20
 )
 
 type PebbleBulk struct {
@@ -37,13 +37,19 @@ func (pb *PebbleBulk) Set(id []byte, val []byte, opts *pebble.WriteOptions) erro
 	if pb.Lowest == nil || bytes.Compare(id, pb.Lowest) < 0 {
 		pb.Lowest = util.CopyBytes(id)
 	}
-	err := pb.Batch.Set(id, val, nil)
+
+	if err := pb.Batch.Set(id, val, nil); err != nil {
+		return err
+	}
+
 	if pb.CurSize > maxWriterBuffer {
-		pb.Batch.Commit(nil)
+		if err := pb.Batch.Commit(nil); err != nil {
+			return err
+		}
 		pb.Batch.Reset()
 		pb.CurSize = 0
 	}
-	return err
+	return nil
 }
 
 func (pb *PebbleBulk) Get(key []byte) ([]byte, io.Closer, error) {
@@ -52,9 +58,24 @@ func (pb *PebbleBulk) Get(key []byte) ([]byte, io.Closer, error) {
 
 func (pb *PebbleBulk) Delete(key []byte, opts *pebble.WriteOptions) error {
 	pb.mu.Lock()
-	err := pb.Db.Delete(key, nil)
-	pb.mu.Unlock()
-	return err
+	defer pb.mu.Unlock()
+	if pb.Batch == nil {
+		pb.Batch = pb.Db.NewBatch()
+	}
+
+	if err := pb.Batch.Delete(key, nil); err != nil {
+		return err
+	}
+
+	pb.CurSize += len(key)
+	if pb.CurSize > maxWriterBuffer {
+		if err := pb.Batch.Commit(nil); err != nil {
+			return err
+		}
+		pb.Batch.Reset()
+		pb.CurSize = 0
+	}
+	return nil
 }
 
 func (pb *PebbleBulk) BulkRead(fn func(tx *PebbleBulk) error) error {
@@ -62,12 +83,45 @@ func (pb *PebbleBulk) BulkRead(fn func(tx *PebbleBulk) error) error {
 }
 
 func (pb *PebbleBulk) Close() error {
+	if pb.Batch != nil {
+		pb.Batch.Commit(nil)
+		pb.Batch.Close()
+	}
 	return pb.Db.Close()
 }
 
 func (pb *PebbleBulk) DeletePrefix(prefix []byte) error {
-	nextPrefix := append(prefix, 0xFF)
-	return pb.Db.DeleteRange(prefix, nextPrefix, nil)
+	// Standard way to get range end for prefix deletion in Pebble/LevelDB
+	var limit []byte
+	for i := len(prefix) - 1; i >= 0; i-- {
+		if prefix[i] < 0xff {
+			limit = make([]byte, i+1)
+			copy(limit, prefix[:i+1])
+			limit[i]++
+			break
+		}
+	}
+
+	pb.mu.Lock()
+	defer pb.mu.Unlock()
+	if pb.Batch == nil {
+		pb.Batch = pb.Db.NewBatch()
+	}
+
+	// DeleteRange is [start, end) exclusive. limit is the first key that doesn't start with prefix.
+	if err := pb.Batch.DeleteRange(prefix, limit, nil); err != nil {
+		return err
+	}
+
+	pb.CurSize += len(prefix) + len(limit)
+	if pb.CurSize > maxWriterBuffer {
+		if err := pb.Batch.Commit(nil); err != nil {
+			return err
+		}
+		pb.Batch.Reset()
+		pb.CurSize = 0
+	}
+	return nil
 }
 
 func (pb *PebbleBulk) DeleteRange(start, end []byte, opts *pebble.WriteOptions) error {
@@ -89,6 +143,7 @@ func (pb *PebbleBulk) DeleteRange(start, end []byte, opts *pebble.WriteOptions) 
 		return err
 	}
 
+	pb.CurSize += len(start) + len(end)
 	if pb.CurSize > maxWriterBuffer {
 		if err := pb.Batch.Commit(nil); err != nil {
 			return err

@@ -12,17 +12,22 @@ import (
 
 // Specify a table type prefix to differentiate between edge tables and vertex tables
 func (dr *JSONDriver) getMaxTablePrefix() uint16 {
-	// get the max table uint32. Useful for fetching keys.
-	prefix := []byte{benchtop.TablePrefix}
+	// Note: Caller must hold dr.Lock
 
+	prefix := []byte{benchtop.TablePrefix}
 	maxID := uint16(0)
 	dr.Pkv.View(func(it *pebblebulk.PebbleIterator) error {
 		for it.Seek(prefix); it.Valid() && bytes.HasPrefix(it.Key(), prefix); it.Next() {
-			// fishing for edge cases
-			if maxID == ^uint16(0) {
-				log.Errorf("getMaxTablePrefix( maxID exceeds uint16 max value")
+			val, err := it.Value()
+			if err != nil {
+				continue
 			}
-			maxID++
+			var tinfo benchtop.TableInfo
+			if err := sonic.Unmarshal(val, &tinfo); err == nil {
+				if tinfo.TableId >= maxID {
+					maxID = tinfo.TableId + 1
+				}
+			}
 		}
 		return nil
 	})

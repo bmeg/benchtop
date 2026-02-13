@@ -6,7 +6,6 @@ import (
 	"os"
 	"sync"
 
-	"github.com/DataDog/zstd"
 	"github.com/bmeg/benchtop"
 	"github.com/edsrzf/mmap-go"
 )
@@ -39,13 +38,8 @@ func (s *Section) WriteJsonEntryToSection(payload []byte) (*benchtop.RowLoc, err
 	s.Lock.Lock()
 	defer s.Lock.Unlock()
 
-	cPayload, err := zstd.Compress(s.CompressScratch[:0], payload)
-	if err != nil {
-		return nil, fmt.Errorf("compress failed: %w", err)
-	}
-
-	compressedLen := uint32(len(cPayload))
-	writeEnd := s.LiveBytes + benchtop.ROW_HSIZE + compressedLen
+	dataLen := uint32(len(payload))
+	writeEnd := s.LiveBytes + benchtop.ROW_HSIZE + dataLen
 
 	// Check if write is outside the CURRENT mapped region
 	if writeEnd > uint32(len(s.MMap)) {
@@ -70,19 +64,18 @@ func (s *Section) WriteJsonEntryToSection(payload []byte) (*benchtop.RowLoc, err
 	}
 
 	oldLiveBytes := s.LiveBytes
-	nextOffset := s.LiveBytes + benchtop.ROW_HSIZE + compressedLen
+	nextOffset := s.LiveBytes + benchtop.ROW_HSIZE + dataLen
 
 	headerTarget := s.MMap[oldLiveBytes : oldLiveBytes+benchtop.ROW_HSIZE]
-	binary.LittleEndian.PutUint32(headerTarget[:4], nextOffset)    // next row offset
-	binary.LittleEndian.PutUint32(headerTarget[4:], compressedLen) // compressed size
-	copy(s.MMap[oldLiveBytes+benchtop.ROW_HSIZE:], cPayload)
+	binary.LittleEndian.PutUint32(headerTarget[:4], nextOffset) // next row offset
+	binary.LittleEndian.PutUint32(headerTarget[4:], dataLen)    // data size
+	copy(s.MMap[oldLiveBytes+benchtop.ROW_HSIZE:], payload)
 	s.LiveBytes = nextOffset
-	// Save the buffer for next time. If the buffer allocated to be larger, use the larger one.
-	s.CompressScratch = cPayload
+
 	return &benchtop.RowLoc{
 		Section: s.ID,
 		Offset:  oldLiveBytes,
-		Size:    compressedLen,
+		Size:    dataLen,
 	}, nil
 }
 
@@ -129,13 +122,6 @@ func (s *Section) RemapReadOnly() error {
 func (s *Section) GrowAndRemap(newSize int64) error {
 	// 1. Unmap the old region
 	if s.MMap != nil {
-		// Crucial: ensure any pending data is flushed before unmap
-		if err := s.MMap.Flush(); err != nil {
-			return fmt.Errorf("flush before unmap failed: %w", err)
-		}
-		if err := s.File.Sync(); err != nil {
-			return fmt.Errorf("sync failed: %w", err)
-		}
 		if err := s.MMap.Unmap(); err != nil {
 			return fmt.Errorf("unmap failed: %w", err)
 		}

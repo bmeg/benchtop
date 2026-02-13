@@ -1,9 +1,9 @@
 package util
 
 import (
+	"fmt"
 	"os"
-	"strconv"
-	"strings"
+	"reflect"
 	"time"
 
 	"golang.org/x/exp/rand"
@@ -11,11 +11,11 @@ import (
 
 // RandomString generates a random string of length n.
 func RandomString(n int) string {
-	rand.NewSource(uint64(time.Now().UnixNano()))
+	r := rand.New(rand.NewSource(uint64(time.Now().UnixNano())))
 	var letter = []rune("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
 	b := make([]rune, n)
 	for i := range b {
-		b[i] = letter[rand.Intn(len(letter))]
+		b[i] = letter[r.Intn(len(letter))]
 	}
 	return string(b)
 }
@@ -46,10 +46,17 @@ func CopyBytes(in []byte) []byte {
 }
 
 func PadToSixDigits(number int) string {
-	numStr := strconv.Itoa(number)
-	numZeros := 6 - len(numStr)
-	if numZeros < 0 {
-		return numStr
+	return fmt.Sprintf("%06d", number)
+}
+
+func SliceToAny(v any) []any {
+	rv := reflect.ValueOf(v)
+	if rv.Kind() != reflect.Slice && rv.Kind() != reflect.Array {
+		return []any{v}
 	}
-	return strings.Repeat("0", numZeros) + numStr
+	out := make([]any, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		out[i] = rv.Index(i).Interface()
+	}
+	return out
 }

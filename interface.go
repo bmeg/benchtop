@@ -34,14 +34,21 @@ type Row struct {
 
 type Index struct {
 	Key []byte
-	Loc RowLoc
+	Loc *RowLoc
+}
+
+type RowLocData struct {
+	Data    []byte
+	DataMap map[string]any
+	Loc     *RowLoc
 }
 
 type RowLoc struct {
 	TableId uint16
 	Section uint16 // Sectioning allows for smaller Offset, Size
 	Offset  uint32 // Max offset, size is 4GB
-	Size    uint32
+	Size    uint32 // Compressed size
+	Index   uint16 // Index within the block
 }
 
 type RowFilter interface {
@@ -65,11 +72,15 @@ type TableDriver interface {
 type TableStore interface {
 	GetColumnDefs() []ColumnDef
 	AddRow(elem Row) (*RowLoc, error)
+	AddRows(elems []Row) ([]*RowLoc, error)
 	GetRow(loc *RowLoc) (map[string]any, error)
+	GetRows(locs []*RowLoc, section uint16) ([]map[string]any, []error)
 	DeleteRow(loc *RowLoc, id []byte) error
+	MarkDeleteTable(loc *RowLoc) error
 
 	ScanDoc(filter RowFilter) chan map[string]any
 	ScanId(filter RowFilter) chan string
+	ScanFull(filter RowFilter) chan RowLocData
 
 	//Compact() error
 	Close() error

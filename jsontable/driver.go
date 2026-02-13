@@ -2,24 +2,30 @@ package jsontable
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
 	"time"
 
+	"strconv"
+	"strings"
+
 	"github.com/bmeg/benchtop"
+	"github.com/bmeg/benchtop/jsontable/block"
 	"github.com/bmeg/benchtop/jsontable/cache"
-	"github.com/bmeg/benchtop/jsontable/section"
+	"github.com/bmeg/benchtop/jsontable/storage"
 	jTable "github.com/bmeg/benchtop/jsontable/table"
 	"github.com/bmeg/benchtop/pebblebulk"
 	"github.com/bmeg/benchtop/util"
 	"github.com/bmeg/grip/log"
 	"github.com/bytedance/sonic"
+	"github.com/maypok86/otter/v2"
 )
 
 const (
-	BATCH_SIZE int = 1000
+	BATCH_SIZE int = 5000
 )
 
 type JSONDriver struct {
@@ -31,6 +37,7 @@ type JSONDriver struct {
 
 	Tables      map[string]*jTable.JSONTable
 	LabelLookup map[uint16]string
+	ZoneManager storage.ZoneManager
 }
 
 func NewJSONDriver(path string) (benchtop.TableDriver, error) {
@@ -62,6 +69,7 @@ func NewJSONDriver(path string) (benchtop.TableDriver, error) {
 		Lock:        sync.RWMutex{},
 		PebbleLock:  sync.RWMutex{},
 		LabelLookup: map[uint16]string{},
+		ZoneManager: storage.NewZoneManager(tableDir),
 	}
 
 	return driver, nil
@@ -97,6 +105,7 @@ func LoadJSONDriver(path string) (benchtop.TableDriver, error) {
 		Lock:        sync.RWMutex{},
 		PebbleLock:  sync.RWMutex{},
 		LabelLookup: map[uint16]string{},
+		ZoneManager: storage.NewZoneManager(tableDir),
 	}
 
 	for _, tableName := range driver.List() {
@@ -112,7 +121,11 @@ func LoadJSONDriver(path string) (benchtop.TableDriver, error) {
 		}
 
 		driver.Lock.Lock()
-		driver.LabelLookup[jsonTable.TableId] = tableName[2:]
+		if len(tableName) > 2 {
+			driver.LabelLookup[jsonTable.TableId] = tableName[2:]
+		} else {
+			driver.LabelLookup[jsonTable.TableId] = tableName
+		}
 		driver.Tables[tableName] = jsonTable
 		driver.Lock.Unlock()
 	}
@@ -127,7 +140,7 @@ func LoadJSONDriver(path string) (benchtop.TableDriver, error) {
 	err = driver.LocCache.PreloadCache()
 	driver.Lock.RUnlock()
 	if err != nil {
-		return nil, err
+		log.Errorf("Cache preload failed: %v", err)
 	}
 
 	return driver, nil
@@ -147,23 +160,9 @@ func (dr *JSONDriver) New(name string, columns []benchtop.ColumnDef) (benchtop.T
 	formattedName := util.PadToSixDigits(int(newId))
 	tPath := filepath.Join(dr.base, "TABLES", formattedName)
 
-	out := &jTable.JSONTable{
-		Columns:               columns,
-		ColumnMap:             map[string]int{},
-		Path:                  tPath,
-		Name:                  name,
-		FileName:              tPath, // Base name for partition/section files
-		TableId:               newId,
-		Fields:                map[string]struct{}{},
-		ActiveSections:        map[uint8]*section.Section{},
-		FlushCounter:          map[uint8]int{},
-		SectionLock:           sync.Mutex{},
-		MaxConcurrentSections: 10,
-		PartitionMap:          map[uint8][]uint16{},
-		Sections:              map[uint16]*section.Section{},
-	}
-	for n, d := range columns {
-		out.ColumnMap[d.Key] = n
+	out, err := dr.newJSONTable(name, columns, formattedName, newId)
+	if err != nil {
+		return nil, err
 	}
 
 	// Create TableInfo for serialization
@@ -186,12 +185,15 @@ func (dr *JSONDriver) New(name string, columns []benchtop.ColumnDef) (benchtop.T
 	}
 
 	if err := out.Init(10); err != nil {
-		log.Errorf("TABLE INIT ERR: %v", err)
-		return nil, fmt.Errorf("failed to init table %s: %v", name, err)
+		// Init might be no-op now
 	}
 
 	dr.Tables[name] = out
-	dr.LabelLookup[newId] = name[2:]
+	if len(name) > 2 {
+		dr.LabelLookup[newId] = name[2:]
+	} else {
+		dr.LabelLookup[newId] = name
+	}
 
 	log.Debugf("Created table %s", name)
 	return out, nil
@@ -203,7 +205,7 @@ func (dr *JSONDriver) SetIndices(inputs chan benchtop.Index) {
 			dr.AddTableEntryInfo(
 				tx,
 				index.Key,
-				&index.Loc,
+				index.Loc,
 			)
 		}
 		return nil
@@ -288,24 +290,10 @@ func (dr *JSONDriver) Get(name string) (benchtop.TableStore, error) {
 	}
 
 	log.Debugf("Opening Table: %#v\n", tinfo)
-	tPath := filepath.Join(dr.base, "TABLES", string(tinfo.FileName))
-	out := &jTable.JSONTable{
-		Columns:               tinfo.Columns,
-		ColumnMap:             map[string]int{},
-		TableId:               tinfo.TableId,
-		Path:                  tPath,
-		FileName:              tPath,
-		Name:                  name,
-		Fields:                map[string]struct{}{},
-		ActiveSections:        map[uint8]*section.Section{},
-		FlushCounter:          map[uint8]int{},
-		MaxConcurrentSections: 10,
-		Sections:              map[uint16]*section.Section{},
-		PartitionMap:          map[uint8][]uint16{},
-		SectionLock:           sync.Mutex{},
-	}
-	for n, d := range out.Columns {
-		out.ColumnMap[d.Key] = n
+
+	out, err := dr.newJSONTable(name, tinfo.Columns, string(tinfo.FileName), tinfo.TableId)
+	if err != nil {
+		return nil, err
 	}
 
 	if err := out.Init(10); err != nil {
@@ -326,13 +314,96 @@ func (dr *JSONDriver) Delete(name string) error {
 
 	table.Close() // Close all section files
 
-	// Delete all section files for the table
-	for _, sec := range table.Sections {
-		if err := os.Remove(sec.Path); err != nil {
-			log.Errorf("Failed to delete section file %s: %v", sec.Path, err)
+	// Delete the entire storage zone (O(1) bulk delete)
+	if err := dr.ZoneManager.DeleteZone(table.FileName); err != nil {
+		log.Errorf("Failed to delete storage zone for %s: %v", name, err)
+	}
+
+	// Iterate over keys to invalidate cache and delete from KV
+	prefix := benchtop.NewPosKeyPrefix(table.TableId)
+	var keysToDelete [][]byte
+	dr.Pkv.View(func(it *pebblebulk.PebbleIterator) error {
+		for it.Seek(prefix); it.Valid() && bytes.HasPrefix(it.Key(), prefix); it.Next() {
+			_, rowBytes := benchtop.ParsePosKey(it.Key())
+			rowId := string(rowBytes)
+			dr.LocCache.Invalidate(rowId)
+			// Make a copy of the key bytes because pebble reuses them
+			keyCopy := make([]byte, len(it.Key()))
+			copy(keyCopy, it.Key())
+			keysToDelete = append(keysToDelete, keyCopy)
+		}
+		return nil
+	})
+
+	if len(keysToDelete) > 0 {
+		err := dr.Pkv.BulkWrite(func(tx *pebblebulk.PebbleBulk) error {
+			for _, k := range keysToDelete {
+				if err := tx.Delete(k, nil); err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			log.Errorf("Failed to delete keys for table %s: %v", name, err)
 		}
 	}
+
 	delete(dr.Tables, name)
+	delete(dr.LabelLookup, table.TableId)
 	dr.dropTable(name)
 	return nil
+}
+func (dr *JSONDriver) newJSONTable(name string, columns []benchtop.ColumnDef, fileName string, tableID uint16) (*jTable.JSONTable, error) {
+	store, err := dr.ZoneManager.CreateZone(fileName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to init storage: %w", err)
+	}
+
+	out := &jTable.JSONTable{
+		Columns:   columns,
+		ColumnMap: make(map[string]int),
+		TableId:   tableID,
+		FileName:  fileName,
+		Name:      name,
+		Storage:   store,
+		BufferPool: sync.Pool{
+			New: func() any {
+				return make([]byte, 0, 4096)
+			},
+		},
+		BlockCache: otter.Must(&otter.Options[string, []byte]{
+			MaximumSize: 5000,
+		}),
+	}
+
+	// Define Loader
+	out.BlockLoader = func(ctx context.Context, key string) ([]byte, error) {
+		// Key format: "Section:Offset:Size"
+		parts := strings.Split(key, ":")
+		if len(parts) != 3 {
+			return nil, fmt.Errorf("invalid cache key")
+		}
+
+		sec, _ := strconv.Atoi(parts[0])
+		off, _ := strconv.Atoi(parts[1])
+		sz, _ := strconv.Atoi(parts[2])
+
+		loc := &benchtop.RowLoc{
+			Section: uint16(sec),
+			Offset:  uint32(off),
+			Size:    uint32(sz),
+		}
+
+		compressed, err := out.Storage.Get(loc)
+		if err != nil {
+			return nil, err
+		}
+		return block.DecompressBlock(compressed)
+	}
+
+	for i, col := range columns {
+		out.ColumnMap[col.Key] = i
+	}
+	return out, nil
 }

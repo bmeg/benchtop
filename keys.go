@@ -132,19 +132,27 @@ Builds a 12 byte row loc encoding
 	4 bytes for Size
 */
 func EncodeRowLoc(loc *RowLoc) []byte {
-	var out [12]byte
+	var out [14]byte
 	binary.LittleEndian.PutUint16(out[0:], loc.TableId)
 	binary.LittleEndian.PutUint16(out[2:], loc.Section)
 	binary.LittleEndian.PutUint32(out[4:], loc.Offset)
 	binary.LittleEndian.PutUint32(out[8:], loc.Size)
+	binary.LittleEndian.PutUint16(out[12:], loc.Index)
 	return out[:]
 }
 
 func DecodeRowLoc(v []byte) *RowLoc {
-	return &RowLoc{
+	if len(v) < 12 {
+		return nil
+	}
+	loc := &RowLoc{
 		TableId: binary.LittleEndian.Uint16(v[0:]),
 		Section: binary.LittleEndian.Uint16(v[2:]),
 		Offset:  binary.LittleEndian.Uint32(v[4:]),
 		Size:    binary.LittleEndian.Uint32(v[8:]),
 	}
+	if len(v) >= 14 {
+		loc.Index = binary.LittleEndian.Uint16(v[12:])
+	}
+	return loc
 }

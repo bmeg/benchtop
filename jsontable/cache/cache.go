@@ -3,6 +3,7 @@ package cache
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/bmeg/benchtop"
@@ -22,6 +23,36 @@ type JSONCache struct {
 // it is automatically loaded from the underlying KV store.
 func (ca *JSONCache) Get(ctx context.Context, key string) (*benchtop.RowLoc, error) {
 	return ca.pageCache.Get(ctx, key, ca.pageLoader)
+}
+
+// GetBatch retrieves multiple items from the cache.
+func (ca *JSONCache) GetBatch(ctx context.Context, keys []string) (map[string]*benchtop.RowLoc, error) {
+	result := make(map[string]*benchtop.RowLoc, len(keys))
+	var missing []string
+	// Dummy loader that just returns an error so we can detect cache misses
+	// without triggering a real (sequential) load.
+	dummyLoader := otter.LoaderFunc[string, *benchtop.RowLoc](func(ctx context.Context, key string) (*benchtop.RowLoc, error) {
+		return nil, fmt.Errorf("miss")
+	})
+
+	for _, k := range keys {
+		if loc, err := ca.pageCache.Get(ctx, k, dummyLoader); err == nil {
+			result[k] = loc
+		} else {
+			missing = append(missing, k)
+		}
+	}
+	if len(missing) > 0 {
+		missed, err := ca.bulkPageLoader(ctx, missing)
+		if err != nil {
+			return result, err
+		}
+		for k, loc := range missed {
+			ca.pageCache.Set(k, loc)
+			result[k] = loc
+		}
+	}
+	return result, nil
 }
 
 // Set adds or updates an item in the cache.
@@ -55,23 +86,21 @@ func NewJSONCache(kv pebblebulk.KVStore) *JSONCache {
 	})
 
 	cache.bulkPageLoader = otter.BulkLoaderFunc[string, *benchtop.RowLoc](func(ctx context.Context, keys []string) (map[string]*benchtop.RowLoc, error) {
-		prefix := []byte{benchtop.PosPrefix}
 		result := make(map[string]*benchtop.RowLoc, len(keys))
-		err := kv.View(func(it *pebblebulk.PebbleIterator) error {
-			for it.Seek(prefix); it.Valid() && bytes.HasPrefix(it.Key(), prefix); it.Next() {
-				_, id := benchtop.ParsePosKey(it.Key())
-				val, err := it.Value()
-				if err != nil {
-					log.Errorf("Err on it.Value() in bulkLoader: %v", err)
-					continue
+		// Iterate over specific keys to load from KV
+		for _, key := range keys {
+			val, closer, err := kv.Get([]byte(key))
+			if err != nil {
+				if err.Error() != "pebble: not found" {
+					log.Errorf("Err on kv.Get for key %s in bulkLoader: %v", key, err)
 				}
-				loc := benchtop.DecodeRowLoc(val)
-				result[string(id)] = loc
+				continue
 			}
-			return nil
-		})
-		if err != nil {
-			return nil, err
+			loc := benchtop.DecodeRowLoc(val)
+			if loc != nil && loc.Size > 0 {
+				result[key] = loc
+			}
+			closer.Close()
 		}
 		return result, nil
 	})
@@ -79,22 +108,35 @@ func NewJSONCache(kv pebblebulk.KVStore) *JSONCache {
 }
 
 func (ca *JSONCache) PreloadCache() error {
-	var keys []string
 	prefix := []byte{benchtop.PosPrefix}
 	L_Start := time.Now()
+
+	count := 0
 	err := ca.kv.View(func(it *pebblebulk.PebbleIterator) error {
 		for it.Seek(prefix); it.Valid() && bytes.HasPrefix(it.Key(), prefix); it.Next() {
 			_, id := benchtop.ParsePosKey(it.Key())
-			keys = append(keys, string(id))
+			rowId := string(id)
+
+			val, err := it.Value()
+			if err != nil {
+				log.Errorf("PreloadCache: error reading value for key %s: %v", rowId, err)
+				continue
+			}
+
+			loc := benchtop.DecodeRowLoc(val)
+			if loc == nil || loc.Size == 0 {
+				// Skip invalid/zero locations
+				continue
+			}
+
+			ca.pageCache.Set(rowId, loc)
+			count++
 		}
 		return nil
 	})
-	if err != nil {
-		return err
-	}
-	_, err = ca.pageCache.BulkGet(context.Background(), keys, ca.bulkPageLoader)
+
 	if err == nil {
-		log.Debugf("Successfully loaded %d keys in RowLoc cache in %s", len(keys), time.Since(L_Start).String())
+		log.Debugf("Successfully preloaded %d keys in RowLoc cache in %v", count, time.Since(L_Start))
 	}
 	return err
 }

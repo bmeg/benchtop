@@ -5,186 +5,122 @@ import (
 	"sync"
 
 	"github.com/bmeg/benchtop"
-	"github.com/bmeg/benchtop/jsontable/section"
 	"github.com/bmeg/benchtop/jsontable/tpath"
 	"github.com/bmeg/grip/log"
 	"github.com/bytedance/sonic"
-	"github.com/cockroachdb/pebble"
 	multierror "github.com/hashicorp/go-multierror"
 )
 
-type FieldKeyElements struct {
-	Field     string
-	TableName string
-	Val       any
-	RowId     string
+type IndexEntry struct {
+	Key   []byte
+	Value []byte
 }
 
-type KitchenSink struct {
-	FieldIndexKeyElements []FieldKeyElements
-	Metadata              map[string]*benchtop.RowLoc
-	Err                   error
+type MetadataEntry struct {
+	Id  []byte
+	Loc *benchtop.RowLoc
+}
+
+type IngestBatch struct {
+	Indices  []IndexEntry
+	Metadata []MetadataEntry
+	Err      error
 }
 
 func (b *JSONTable) StartTableGoroutine(
 	wg *sync.WaitGroup,
-	metadataChan chan *KitchenSink,
-	snapshot *pebble.Snapshot,
+	metadataChan chan *IngestBatch,
 	batchSize int,
 ) chan *benchtop.Row {
 	ch := make(chan *benchtop.Row, batchSize)
 	wg.Add(1)
 	go func() {
 		defer func() {
-			// --- FINAL FLUSH ON EXIT ---
-			b.SectionLock.Lock()
-			for _, sec := range b.ActiveSections {
-				if sec.LiveBytes > 0 {
-					if err := sec.MMap.Flush(); err != nil {
-						log.Errorf("Final flush failed for section %d: %v", sec.ID, err)
-					}
-					err := sec.File.Sync()
-					if err != nil {
-						log.Errorf("File Sync failed in bulk load: %v", err)
-					}
-				}
+			if err := b.Storage.Sync(); err != nil {
+				log.Errorf("Final sync failed: %v", err)
 			}
-			b.SectionLock.Unlock()
 			wg.Done()
 		}()
 
-		const FLUSH_EVERY = 1000
-		var allFieldIndexKeyElements = make([]FieldKeyElements, 0, batchSize*len(b.Fields))
-		allMetadata := make(map[string]*benchtop.RowLoc, batchSize)
+		indices := make([]IndexEntry, 0, batchSize*2)
+		metadata := make([]MetadataEntry, 0, batchSize)
 		var localErr *multierror.Error
 
-		var flushCounter uint32 = 0
-		for {
-			batch := make([]*benchtop.Row, 0, batchSize)
-			for range batchSize {
-				row, ok := <-ch
-				if !ok {
-					break
+		flush := func() {
+			if len(metadata) > 0 || localErr != nil {
+				metadataChan <- &IngestBatch{
+					Indices:  indices,
+					Metadata: metadata,
+					Err:      localErr.ErrorOrNil(),
 				}
-				batch = append(batch, row)
+				indices = make([]IndexEntry, 0, batchSize*2)
+				metadata = make([]MetadataEntry, 0, batchSize)
+				localErr = nil
 			}
-			if len(batch) == 0 {
-				break
+		}
+
+		rowsBatch := make([]benchtop.Row, 0, batchSize)
+
+		processBatch := func(rows []benchtop.Row) {
+			if len(rows) == 0 {
+				return
+			}
+			locs, err := b.AddRows(rows)
+			if err != nil {
+				// Record error for all rows? Or trying to continue?
+				// AddRows is atomic per batch usually.
+				// If error, likely fatal for the batch.
+				// We can append global error.
+				localErr = multierror.Append(localErr, fmt.Errorf("AddRows error: %v", err))
+				return
 			}
 
-			newRows := make([]*benchtop.Row, 0, len(batch))
-			for _, row := range batch {
-				info, err := b.GetTableEntryInfo(snapshot, row.Id)
-				if err != nil {
-					localErr = multierror.Append(localErr, fmt.Errorf("error getting entry info for %s: %v", row.Id, err))
-					continue
+			if len(locs) != len(rows) {
+				localErr = multierror.Append(localErr, fmt.Errorf("AddRows returned %d locs for %d rows", len(locs), len(rows)))
+				return
+			}
+
+			for i, row := range rows {
+				loc := locs[i]
+				bLoc := &benchtop.RowLoc{
+					TableId: b.TableId,
+					Section: loc.Section,
+					Offset:  loc.Offset,
+					Size:    loc.Size,
+					Index:   loc.Index,
 				}
-				if info == nil {
-					newRows = append(newRows, row)
-					for field := range b.Fields {
-						if val := tpath.PathLookup(row.Data, field); val != nil {
-							allFieldIndexKeyElements = append(allFieldIndexKeyElements, FieldKeyElements{
-								Field:     field,
-								TableName: b.Name,
-								Val:       val,
-								RowId:     string(row.Id),
-							})
+				metadata = append(metadata, MetadataEntry{Id: row.Id, Loc: bLoc})
+
+				// Generate index entries parallelly
+				for field := range b.Fields {
+					if val := tpath.PathLookup(row.Data, field); val != nil {
+						fKey := benchtop.FieldKey(field, b.Name, val, row.Id)
+						indices = append(indices, IndexEntry{Key: fKey, Value: []byte{}})
+
+						rKey := benchtop.RFieldKey(b.Name, field, string(row.Id))
+						bVal, err := sonic.ConfigFastest.Marshal(val)
+						if err == nil {
+							indices = append(indices, IndexEntry{Key: rKey, Value: bVal})
 						}
 					}
 				}
 			}
-
-			if len(newRows) == 0 {
-				continue
-			}
-
-			rowsByPartition := make(map[uint8][]*benchtop.Row)
-			for _, row := range newRows {
-				partitionId := b.PartitionFunc(row.Id)
-				rowsByPartition[partitionId] = append(rowsByPartition[partitionId], row)
-			}
-
-			for partitionId, rowsInPartition := range rowsByPartition {
-				if len(rowsInPartition) == 0 {
-					continue
-				}
-
-				bDatas := make([][]byte, 0, len(rowsInPartition))
-				rowIds := make([]string, 0, len(rowsInPartition))
-				var totalUncompressedSize uint32
-
-				for _, row := range rowsInPartition {
-					bData, err := sonic.ConfigFastest.Marshal(b.PackData(row.Data, string(row.Id)))
-					if err != nil {
-						localErr = multierror.Append(localErr, fmt.Errorf("marshal error for row %s: %v", row.Id, err))
-						continue
-					}
-					bDatas = append(bDatas, bData)
-					rowIds = append(rowIds, string(row.Id))
-					totalUncompressedSize += uint32(len(bData)) + 8
-				}
-				if len(bDatas) == 0 {
-					continue
-				}
-
-				sec := b.ActiveSections[partitionId] // This is the section active for writing
-				if sec == nil {
-					// This should not happen if Init is correct, but add recovery/guard
-					var err error
-					sec, err = b.CreateNewSection(partitionId)
-					if err != nil {
-						localErr = multierror.Append(localErr, fmt.Errorf("failed to get or create active section for partition %d: %v", partitionId, err))
-						continue
-					}
-				}
-
-				// --- ROTATE SECTION IF FULL ---
-				if sec.LiveBytes+totalUncompressedSize > section.MAX_SECTION_SIZE {
-					// Flush old section before rotating
-					if sec.LiveBytes > 0 {
-						err := sec.CloseSection()
-						if err != nil {
-							localErr = multierror.Append(localErr, err)
-						}
-					}
-
-					newSec, err := b.CreateNewSection(partitionId)
-					if err != nil {
-						localErr = multierror.Append(localErr, fmt.Errorf("failed to create new section for partition %d: %v", partitionId, err))
-						continue
-					}
-					sec = newSec
-				}
-
-				for i, bData := range bDatas {
-					rowLoc, err := sec.WriteJsonEntryToSection(bData)
-					if err != nil {
-						localErr = multierror.Append(localErr, fmt.Errorf("write error for row %s in section %d: %v", rowIds[i], sec.ID, err))
-						continue
-					}
-					rowLoc.TableId = b.TableId
-					allMetadata[rowIds[i]] = rowLoc
-
-					// --- PERIODIC FLUSH ---
-					flushCounter++
-					/*if flushCounter >= FLUSH_EVERY {
-					sec.Lock.Lock()
-					if err := sec.MMap.Flush(); err != nil {
-						log.Errorf("Periodic flush failed for section %d: %v", sec.ID, err)
-					}
-					sec.Lock.Unlock()
-					flushCounter = 0
-					}*/
-				}
-				sec.TotalRows += uint32(len(bDatas))
+			if len(metadata) >= batchSize {
+				flush()
 			}
 		}
 
-		metadataChan <- &KitchenSink{
-			FieldIndexKeyElements: allFieldIndexKeyElements,
-			Metadata:              allMetadata,
-			Err:                   localErr.ErrorOrNil(),
+		for row := range ch {
+			rowsBatch = append(rowsBatch, *row)
+			if len(rowsBatch) >= batchSize {
+				processBatch(rowsBatch)
+				rowsBatch = rowsBatch[:0]
+			}
 		}
+		if len(rowsBatch) > 0 {
+			processBatch(rowsBatch)
+		}
+		flush()
 	}()
 	return ch
 }

@@ -9,23 +9,27 @@ import (
 	"github.com/bytedance/sonic"
 
 	"github.com/bmeg/benchtop/filters"
+	jTable "github.com/bmeg/benchtop/jsontable/table"
 	"github.com/bmeg/benchtop/jsontable/tpath"
+	"github.com/bmeg/benchtop/util"
 
 	"github.com/bmeg/benchtop/pebblebulk"
 	"github.com/bmeg/grip/gripql"
 )
 
 func (dr *JSONDriver) AddField(label, field string) error {
-	foundTable, ok := dr.Tables[label]
+	dr.Lock.Lock()
+
+	table, ok := dr.Tables[label]
 	if !ok {
-		_, err := dr.New(label, nil)
+		dr.Lock.Unlock()
+		newTable, err := dr.New(label, nil)
 		if err != nil {
 			return err
 		}
+		table = newTable.(*jTable.JSONTable)
 
 		dr.Lock.Lock()
-		defer dr.Lock.Unlock()
-
 		log.Debugf("Creating index '%s' for table '%s' that has not been written yet", field, label)
 		// If the table doesn't yet exist, write the index Key stub.
 		err = dr.Pkv.Set(
@@ -34,6 +38,7 @@ func (dr *JSONDriver) AddField(label, field string) error {
 			nil,
 		)
 		if err != nil {
+			dr.Lock.Unlock()
 			log.Errorf("Err attempting to add field %v", err)
 			return err
 		}
@@ -47,22 +52,21 @@ func (dr *JSONDriver) AddField(label, field string) error {
 			nil,
 		)
 		if err != nil {
+			dr.Lock.Unlock()
 			log.Errorf("Err attempting to add field %v", err)
 			return err
 		}
-
 	} else {
-		dr.Lock.Lock()
-		defer dr.Lock.Unlock()
-
 		log.Debugf("Found table %s writing indices for field %s", label, field)
+		// Release lock while scanning to avoid blocking other operations
+		dr.Lock.Unlock()
 		err := dr.Pkv.BulkWrite(func(tx *pebblebulk.PebbleBulk) error {
 			var filter benchtop.RowFilter = nil
-			for r := range foundTable.ScanDoc(filter) {
-				fieldValue := tpath.PathLookup(r, field)
-				rowId, ok := r["_id"].(string)
+			for r := range table.ScanFull(filter) {
+				fieldValue := tpath.PathLookup(r.DataMap, field)
+				rowId, ok := r.DataMap["_id"].(string)
 				if !ok {
-					return fmt.Errorf("_id field not found or is not string in map %s", r)
+					return fmt.Errorf("_id field not found or is not string in map %s", r.DataMap)
 				}
 				err := tx.Set(
 					benchtop.FieldKey(
@@ -71,7 +75,7 @@ func (dr *JSONDriver) AddField(label, field string) error {
 						fieldValue,
 						[]byte(rowId),
 					),
-					[]byte{},
+					benchtop.EncodeRowLoc(r.Loc),
 					nil,
 				)
 				if err != nil {
@@ -93,16 +97,19 @@ func (dr *JSONDriver) AddField(label, field string) error {
 		if err != nil {
 			return err
 		}
+		dr.Lock.Lock()
 	}
 
-	if dr.Tables[label].Fields == nil {
-		dr.Tables[label].Fields = map[string]struct{}{}
+	if table.Fields == nil {
+		table.Fields = map[string]struct{}{}
 	}
-	if _, existsField := dr.Tables[label].Fields[field]; existsField {
+	if _, existsField := table.Fields[field]; existsField {
+		dr.Lock.Unlock()
 		return fmt.Errorf("index label '%s' field '%s' already exists", label, field)
 	}
-	dr.Tables[label].Fields[field] = struct{}{}
-	log.Debugln("List Fields: ", dr.Tables[label].Fields)
+	table.Fields[field] = struct{}{}
+	dr.Lock.Unlock()
+	log.Debugln("List Fields: ", table.Fields)
 
 	return nil
 }
@@ -146,20 +153,29 @@ func (dr *JSONDriver) LoadFields() error {
 	err := dr.Pkv.View(func(it *pebblebulk.PebbleIterator) error {
 		for it.Seek(fPrefix); it.Valid() && bytes.HasPrefix(it.Key(), fPrefix); it.Next() {
 			field, label, _, _ := benchtop.FieldKeyParse(it.Key())
-			if _, exists := dr.Tables[label]; !exists {
-				_, err := dr.New(label, nil)
+
+			dr.Lock.RLock()
+			table, exists := dr.Tables[label]
+			dr.Lock.RUnlock()
+
+			if !exists {
+				var err error
+				tableStore, err := dr.New(label, nil)
 				if err != nil {
 					return err
 				}
+				table = tableStore.(*jTable.JSONTable)
+			}
 
+			dr.Lock.Lock()
+			if table.Fields == nil {
+				table.Fields = make(map[string]struct{})
 			}
-			if dr.Tables[label].Fields == nil {
-				dr.Tables[label].Fields = make(map[string]struct{})
-			}
-			if _, exists := dr.Tables[label].Fields[field]; !exists {
-				dr.Tables[label].Fields[field] = struct{}{}
+			if _, exists := table.Fields[field]; !exists {
+				table.Fields[field] = struct{}{}
 				count++
 			}
+			dr.Lock.Unlock()
 		}
 		log.Debugf("Loaded %d indices", count)
 		return nil
@@ -272,7 +288,47 @@ func (dr *JSONDriver) DeleteRowField(label, field, rowID string) error {
 	return nil
 }
 
-func (dr *JSONDriver) RowIdsByHas(fltField string, fltValue any, fltOp gripql.Condition) chan string {
+func (dr *JSONDriver) RowIdsByHas(fltField string, fltValue any, fltOp gripql.Condition) chan benchtop.Index {
+	log.WithFields(log.Fields{"field": fltField, "value": fltValue, "op": fltOp}).Debug("Running RowIdsByHas")
+
+	if fltOp == gripql.Condition_EQ || fltOp == gripql.Condition_WITHIN {
+		out := make(chan benchtop.Index, 100)
+		go func() {
+			defer close(out)
+			dr.Lock.RLock()
+			var labels []string
+			for label, table := range dr.Tables {
+				if _, ok := table.Fields[fltField]; ok {
+					labels = append(labels, label)
+				}
+			}
+			dr.Lock.RUnlock()
+
+			vals := []any{fltValue}
+			if fltOp == gripql.Condition_WITHIN {
+				vals = util.SliceToAny(fltValue)
+			}
+
+			dr.Pkv.View(func(it *pebblebulk.PebbleIterator) error {
+				for _, label := range labels {
+					for _, v := range vals {
+						prefix := benchtop.FieldKey(fltField, label, v, nil)
+						for it.Seek(prefix); it.Valid() && bytes.HasPrefix(it.Key(), prefix); it.Next() {
+							parts := bytes.Split(it.Key(), benchtop.FieldSep)
+							if len(parts) >= 5 {
+								val, _ := it.Value()
+								loc := benchtop.DecodeRowLoc(val)
+								out <- benchtop.Index{Key: parts[4], Loc: loc}
+							}
+						}
+					}
+				}
+				return nil
+			})
+		}()
+		return out
+	}
+
 	dr.Lock.RLock()
 	defer dr.Lock.RUnlock()
 
@@ -281,7 +337,7 @@ func (dr *JSONDriver) RowIdsByHas(fltField string, fltValue any, fltOp gripql.Co
 		[]byte(fltField),
 	}, benchtop.FieldSep)
 
-	out := make(chan string, 100)
+	out := make(chan benchtop.Index, 100)
 	go func() {
 		defer close(out)
 		err := dr.Pkv.View(func(it *pebblebulk.PebbleIterator) error {
@@ -293,7 +349,9 @@ func (dr *JSONDriver) RowIdsByHas(fltField string, fltValue any, fltOp gripql.Co
 						Field: fltField, Value: fltValue, Operator: fltOp,
 					},
 				) {
-					out <- string(rowID)
+					v, _ := it.Value()
+					loc := benchtop.DecodeRowLoc(v)
+					out <- benchtop.Index{Key: rowID, Loc: loc}
 				}
 			}
 			return nil
@@ -305,13 +363,57 @@ func (dr *JSONDriver) RowIdsByHas(fltField string, fltValue any, fltOp gripql.Co
 	return out
 }
 
-func (dr *JSONDriver) RowIdsByLabelFieldValue(fltLabel string, fltField string, fltValue any, fltOp gripql.Condition) chan string {
-	log.WithFields(log.Fields{"label": fltLabel, "field": fltField, "value": fltValue}).Debug("Running RowIdsByLabelFieldValue")
+func (dr *JSONDriver) RowIdsByLabelFieldValue(fltLabel string, fltField string, fltValue any, fltOp gripql.Condition) chan benchtop.Index {
+	log.WithFields(log.Fields{"label": fltLabel, "field": fltField, "value": fltValue, "op": fltOp}).Debug("Running RowIdsByLabelFieldValue")
+
+	if fltOp == gripql.Condition_EQ {
+		out := make(chan benchtop.Index, 100)
+		go func() {
+			defer close(out)
+			prefix := benchtop.FieldKey(fltField, fltLabel, fltValue, nil)
+			dr.Pkv.View(func(it *pebblebulk.PebbleIterator) error {
+				for it.Seek(prefix); it.Valid() && bytes.HasPrefix(it.Key(), prefix); it.Next() {
+					parts := bytes.Split(it.Key(), benchtop.FieldSep)
+					if len(parts) >= 5 {
+						val, _ := it.Value()
+						loc := benchtop.DecodeRowLoc(val)
+						out <- benchtop.Index{Key: parts[4], Loc: loc}
+					}
+				}
+				return nil
+			})
+		}()
+		return out
+	}
+
+	if fltOp == gripql.Condition_WITHIN {
+		out := make(chan benchtop.Index, 100)
+		go func() {
+			defer close(out)
+			vals := util.SliceToAny(fltValue)
+			dr.Pkv.View(func(it *pebblebulk.PebbleIterator) error {
+				for _, v := range vals {
+					prefix := benchtop.FieldKey(fltField, fltLabel, v, nil)
+					for it.Seek(prefix); it.Valid() && bytes.HasPrefix(it.Key(), prefix); it.Next() {
+						parts := bytes.Split(it.Key(), benchtop.FieldSep)
+						if len(parts) >= 5 {
+							val, _ := it.Value()
+							loc := benchtop.DecodeRowLoc(val)
+							out <- benchtop.Index{Key: parts[4], Loc: loc}
+						}
+					}
+				}
+				return nil
+			})
+		}()
+		return out
+	}
+
 	dr.Lock.RLock()
 	defer dr.Lock.RUnlock()
 
 	prefix := benchtop.FieldLabelKey(fltField, fltLabel)
-	out := make(chan string, 100)
+	out := make(chan benchtop.Index, 100)
 	go func() {
 		defer close(out)
 		err := dr.Pkv.View(func(it *pebblebulk.PebbleIterator) error {
@@ -323,7 +425,9 @@ func (dr *JSONDriver) RowIdsByLabelFieldValue(fltLabel string, fltField string, 
 						Field: fltField, Value: fltValue, Operator: fltOp,
 					},
 				) {
-					out <- string(rowID)
+					v, _ := it.Value()
+					loc := benchtop.DecodeRowLoc(v)
+					out <- benchtop.Index{Key: rowID, Loc: loc}
 				}
 			}
 			return nil
