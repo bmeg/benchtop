@@ -1,5 +1,9 @@
 package benchtop
 
+import (
+	"github.com/bmeg/benchtop/query"
+)
+
 type TableInfo struct {
 	FileName string      `json:"fileName"`
 	Columns  []ColumnDef `json:"columns"`
@@ -64,24 +68,47 @@ type TableDriver interface {
 	ListTableKeys(tableId uint16) (chan Index, error)
 	GetAllColNames() chan string
 	GetLabels(edges bool, removePrefix bool) chan string
+	RowIdsByHas(field string, value any, op query.Condition) chan Index
+	RowIdsByLabelFieldValue(label string, field string, value any, op query.Condition) chan Index
 	List() []string
 	Delete(name string) error
 	Close()
+	BulkLoad(name string, rows chan Row) error
+	GetKV() any // Returns the underlying KV store (PebbleKV or BoltDB wrapper)
 }
 
 type TableStore interface {
 	GetColumnDefs() []ColumnDef
+	HasField(field string) bool
 	AddRow(elem Row) (*RowLoc, error)
 	AddRows(elems []Row) ([]*RowLoc, error)
 	GetRow(loc *RowLoc) (map[string]any, error)
+	GetRowLoc(id string) (*RowLoc, error)
 	GetRows(locs []*RowLoc, section uint16) ([]map[string]any, []error)
 	DeleteRow(loc *RowLoc, id []byte) error
 	MarkDeleteTable(loc *RowLoc) error
 
 	ScanDoc(filter RowFilter) chan map[string]any
+	ScanDocProjected(fields []string, filter RowFilter) chan map[string]any
 	ScanId(filter RowFilter) chan string
 	ScanFull(filter RowFilter) chan RowLocData
 
 	//Compact() error
 	Close() error
+}
+
+// FieldInfo describes an indexed/searchable field for a label.
+type FieldInfo struct {
+	Label string
+	Field string
+}
+
+// FieldDriver exposes field-index lifecycle operations that some callers
+// (such as grip) require beyond the core TableDriver surface.
+type FieldDriver interface {
+	AddField(label, field string) error
+	RemoveField(label, field string) error
+	ListFields() []FieldInfo
+	DeleteRowField(label, field, rowID string) error
+	GetIDsForLabel(label string) chan string
 }

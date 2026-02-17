@@ -1,11 +1,14 @@
 package block
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
+	"io"
 	"sync"
 
 	"github.com/DataDog/zstd"
+	"github.com/pierrec/lz4/v4"
 )
 
 // Block represents a collection of rows that are compressed together.
@@ -82,7 +85,7 @@ func ExtractRow(compressed []byte, index uint16, pool *sync.Pool) ([]byte, error
 	outBuf := pool.Get().([]byte)
 	defer pool.Put(outBuf[:0])
 
-	decompressed, err := zstd.Decompress(outBuf[:0], compressed)
+	decompressed, err := decompressCompat(outBuf[:0], compressed)
 	if err != nil {
 		return nil, fmt.Errorf("decompress failed: %w", err)
 	}
@@ -129,7 +132,7 @@ func IterateBlock(compressed []byte, pool *sync.Pool, callback func([]byte) bool
 	outBuf := pool.Get().([]byte)
 	defer pool.Put(outBuf[:0])
 
-	decompressed, err := zstd.Decompress(outBuf[:0], compressed)
+	decompressed, err := decompressCompat(outBuf[:0], compressed)
 	if err != nil {
 		return fmt.Errorf("decompress failed: %w", err)
 	}
@@ -173,11 +176,79 @@ func IterateBlock(compressed []byte, pool *sync.Pool, callback func([]byte) bool
 // It allocates a new slice for the result which is suitable for long-term caching.
 func DecompressBlock(compressed []byte) ([]byte, error) {
 	// We do not use the pool here because we want the result to persist in the cache.
-	decompressed, err := zstd.Decompress(nil, compressed)
+	decompressed, err := decompressCompat(nil, compressed)
 	if err != nil {
 		return nil, fmt.Errorf("decompress failed: %w", err)
 	}
 	return decompressed, nil
+}
+
+func decompressCompat(dst []byte, payload []byte) ([]byte, error) {
+	// Current format: zstd compressed block
+	if out, err := zstd.Decompress(dst, payload); err == nil {
+		return out, nil
+	}
+
+	// Legacy format support: lz4 frame compressed block
+	lz4r := lz4.NewReader(bytes.NewReader(payload))
+	if out, err := io.ReadAll(lz4r); err == nil {
+		return out, nil
+	}
+
+	// Already-uncompressed block
+	if isValidBlockLayout(payload) {
+		out := make([]byte, len(payload))
+		copy(out, payload)
+		return out, nil
+	}
+
+	// Legacy single-row payload (raw JSON row bytes)
+	if len(payload) > 0 {
+		i := 0
+		for i < len(payload) && (payload[i] == ' ' || payload[i] == '\n' || payload[i] == '\t' || payload[i] == '\r') {
+			i++
+		}
+		if i < len(payload) && (payload[i] == '{' || payload[i] == '[') {
+			return packSingleRowBlock(payload), nil
+		}
+	}
+
+	return nil, fmt.Errorf("unknown block payload format")
+}
+
+func packSingleRowBlock(row []byte) []byte {
+	out := make([]byte, 2+4+len(row))
+	binary.LittleEndian.PutUint16(out[0:], 1)
+	binary.LittleEndian.PutUint32(out[2:], 0)
+	copy(out[6:], row)
+	return out
+}
+
+func isValidBlockLayout(buf []byte) bool {
+	if len(buf) < 6 {
+		return false
+	}
+	count := int(binary.LittleEndian.Uint16(buf[0:2]))
+	if count <= 0 {
+		return false
+	}
+	headerSize := 2 + 4*count
+	if headerSize > len(buf) {
+		return false
+	}
+	prev := uint32(0)
+	dataLen := uint32(len(buf) - headerSize)
+	for i := 0; i < count; i++ {
+		off := binary.LittleEndian.Uint32(buf[2+i*4 : 2+i*4+4])
+		if i > 0 && off < prev {
+			return false
+		}
+		if off > dataLen {
+			return false
+		}
+		prev = off
+	}
+	return true
 }
 
 // ExtractRowFromDecompressed returns the specific row at index from an already decompressed block.

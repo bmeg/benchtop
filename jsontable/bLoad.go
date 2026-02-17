@@ -5,13 +5,19 @@ import (
 	"sync"
 
 	"github.com/bmeg/benchtop"
-	jTable "github.com/bmeg/benchtop/jsontable/table"
+	"github.com/bmeg/benchtop/jsontable/table"
 	"github.com/bmeg/benchtop/pebblebulk"
 	"github.com/bmeg/grip/log"
 	"github.com/hashicorp/go-multierror"
 )
 
-func (dr *JSONDriver) BulkLoad(inputs chan *benchtop.Row, tx *pebblebulk.PebbleBulk) error {
+func (dr *JSONDriver) BulkLoad(name string, rows chan benchtop.Row) error {
+	return dr.Pkv.BulkWrite(func(tx *pebblebulk.PebbleBulk) error {
+		return dr.BulkLoadInternal(name, rows, tx)
+	})
+}
+
+func (dr *JSONDriver) BulkLoadInternal(name string, inputs chan benchtop.Row, tx *pebblebulk.PebbleBulk) error {
 	if dr.Pkv == nil || dr.Pkv.Db == nil {
 		return fmt.Errorf("pebble database instance is nil")
 	}
@@ -21,7 +27,7 @@ func (dr *JSONDriver) BulkLoad(inputs chan *benchtop.Row, tx *pebblebulk.PebbleB
 
 	var wg sync.WaitGroup
 	tableChans := make(map[string]chan *benchtop.Row)
-	metadataChan := make(chan *jTable.IngestBatch, 1024)
+	metadataChan := make(chan *table.IngestBatch, 1024)
 
 	// 1. Dispatcher: Route rows to table-specific goroutines
 	wg.Add(1)
@@ -31,7 +37,7 @@ func (dr *JSONDriver) BulkLoad(inputs chan *benchtop.Row, tx *pebblebulk.PebbleB
 			ch, exists := tableChans[row.TableName]
 			if !exists {
 				dr.Lock.RLock()
-				table, ok := dr.Tables[row.TableName]
+				tbl, ok := dr.Tables[row.TableName]
 				dr.Lock.RUnlock()
 
 				if !ok {
@@ -40,12 +46,13 @@ func (dr *JSONDriver) BulkLoad(inputs chan *benchtop.Row, tx *pebblebulk.PebbleB
 						log.Errorf("BulkLoad: failed to auto-create table %s: %v", row.TableName, err)
 						continue
 					}
-					table = t.(*jTable.JSONTable)
+					tbl = t.(*table.JSONTable)
 				}
-				ch = table.StartTableGoroutine(&wg, metadataChan, BATCH_SIZE)
+				ch = tbl.StartTableGoroutine(&wg, metadataChan, BATCH_SIZE)
 				tableChans[row.TableName] = ch
 			}
-			ch <- row
+			rowCopy := row // Local copy for pointer safety
+			ch <- &rowCopy
 		}
 		for _, ch := range tableChans {
 			close(ch)

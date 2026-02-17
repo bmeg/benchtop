@@ -3,9 +3,9 @@ package benchtop
 import (
 	"bytes"
 	"encoding/binary"
-	"encoding/json"
 
 	"github.com/bmeg/grip/log"
+	"github.com/bytedance/sonic"
 )
 
 const (
@@ -48,7 +48,7 @@ func RFieldKey(label, field, rowID string) []byte {
 
 func FieldKey(field string, label string, value any, rowID []byte) []byte {
 	/* creates a full field key for optimizing the beginning of a query */
-	valueBytes, err := json.Marshal(value)
+	valueBytes, err := sonic.ConfigFastest.Marshal(value)
 	if err != nil {
 		log.Infoln("FieldKey Marshal Err: ", err)
 	}
@@ -66,7 +66,7 @@ func FieldKey(field string, label string, value any, rowID []byte) []byte {
 
 func FieldKeyParse(fieldKey []byte) (field, label string, value any, rowID []byte) {
 	parts := bytes.Split(fieldKey, FieldSep)
-	err := json.Unmarshal(parts[3], &value)
+	err := sonic.ConfigFastest.Unmarshal(parts[3], &value)
 	if err != nil {
 		log.Infoln("FieldKey Unmarshal Err: ", err)
 	}

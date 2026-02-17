@@ -8,7 +8,6 @@ import (
 	"github.com/bmeg/benchtop"
 	"github.com/bmeg/benchtop/jsontable"
 	jTable "github.com/bmeg/benchtop/jsontable/table"
-	"github.com/bmeg/benchtop/pebblebulk"
 	"github.com/bmeg/benchtop/test/fixtures"
 	"github.com/bmeg/benchtop/util"
 	"github.com/bmeg/grip/log"
@@ -57,24 +56,21 @@ func BenchmarkScaleWriteJson(b *testing.B) {
 
 	b.ResetTimer()
 
-	jsonDriver.Pkv.BulkWrite(func(tx *pebblebulk.PebbleBulk) error {
-		for b.Loop() {
-			inputChan := make(chan *benchtop.Row, 100)
-			go func() {
-				for j := range scalenumKeys {
-					key := []byte(fmt.Sprintf("key_%d", j))
-					value := fixtures.GenerateRandomBytes(scalevalueSize)
-					inputChan <- &benchtop.Row{Id: key, Data: map[string]any{"data": value}}
-				}
-				close(inputChan)
-			}()
-			err = jsonDriver.BulkLoad(inputChan, tx)
-			if err != nil {
-				b.Fatal(err)
+	for b.Loop() {
+		inputChan := make(chan benchtop.Row, 100)
+		go func() {
+			for j := range scalenumKeys {
+				key := []byte(fmt.Sprintf("key_%d", j))
+				value := fixtures.GenerateRandomBytes(scalevalueSize)
+				inputChan <- benchtop.Row{Id: key, TableName: Jsonname, Data: map[string]any{"data": value}}
 			}
+			close(inputChan)
+		}()
+		err = jsonDriver.BulkLoad(Jsonname, inputChan)
+		if err != nil {
+			b.Fatal(err)
 		}
-		return nil
-	})
+	}
 }
 
 func BenchmarkRandomReadJson(b *testing.B) {

@@ -10,6 +10,7 @@ import (
 	"github.com/bmeg/benchtop/jsontable"
 	"github.com/bmeg/benchtop/jsontable/table"
 	jTable "github.com/bmeg/benchtop/jsontable/table"
+	"github.com/bmeg/benchtop/util"
 	"github.com/bytedance/sonic"
 	"github.com/bytedance/sonic/ast"
 	"google.golang.org/protobuf/types/known/structpb"
@@ -17,8 +18,6 @@ import (
 	"github.com/bmeg/benchtop/test/fixtures"
 	"github.com/bmeg/grip/gripql"
 	"github.com/bmeg/grip/log"
-
-	"github.com/bmeg/benchtop/util"
 )
 
 type FieldFilters []filters.FieldFilter

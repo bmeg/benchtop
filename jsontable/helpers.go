@@ -15,7 +15,8 @@ func (dr *JSONDriver) getMaxTablePrefix() uint16 {
 	// Note: Caller must hold dr.Lock
 
 	prefix := []byte{benchtop.TablePrefix}
-	maxID := uint16(0)
+	// Reserve 0 as invalid/unset; real table IDs start at 1.
+	maxID := uint16(1)
 	dr.Pkv.View(func(it *pebblebulk.PebbleIterator) error {
 		for it.Seek(prefix); it.Valid() && bytes.HasPrefix(it.Key(), prefix); it.Next() {
 			val, err := it.Value()

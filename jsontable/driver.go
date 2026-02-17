@@ -3,6 +3,7 @@ package jsontable
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -13,14 +14,15 @@ import (
 	"strings"
 
 	"github.com/bmeg/benchtop"
+	"github.com/bmeg/benchtop/cache"
 	"github.com/bmeg/benchtop/jsontable/block"
-	"github.com/bmeg/benchtop/jsontable/cache"
 	"github.com/bmeg/benchtop/jsontable/storage"
-	jTable "github.com/bmeg/benchtop/jsontable/table"
+	"github.com/bmeg/benchtop/jsontable/table"
 	"github.com/bmeg/benchtop/pebblebulk"
 	"github.com/bmeg/benchtop/util"
 	"github.com/bmeg/grip/log"
 	"github.com/bytedance/sonic"
+	"github.com/cockroachdb/pebble"
 	"github.com/maypok86/otter/v2"
 )
 
@@ -33,15 +35,15 @@ type JSONDriver struct {
 	Lock       sync.RWMutex
 	PebbleLock sync.RWMutex
 	Pkv        *pebblebulk.PebbleKV
-	LocCache   *cache.JSONCache
+	LocCache   cache.Cache
 
-	Tables      map[string]*jTable.JSONTable
+	Tables      map[string]*table.JSONTable
 	LabelLookup map[uint16]string
 	ZoneManager storage.ZoneManager
 }
 
 func NewJSONDriver(path string) (benchtop.TableDriver, error) {
-	Pkv, err := pebblebulk.NewPebbleKV(path)
+	pKv, err := pebblebulk.NewPebbleKV(path)
 	if err != nil {
 		return nil, err
 	}
@@ -52,20 +54,16 @@ func NewJSONDriver(path string) (benchtop.TableDriver, error) {
 	}
 	if !exist {
 		if err := os.Mkdir(tableDir, 0700); err != nil {
-			Pkv.Db.Close()
+			pKv.Db.Close()
 			return nil, fmt.Errorf("failed to create TABLES directory: %v", err)
 		}
 	}
 
 	driver := &JSONDriver{
-		base:   path,
-		Tables: map[string]*jTable.JSONTable{},
-		Pkv: &pebblebulk.PebbleKV{
-			Db:           Pkv.Db,
-			InsertCount:  0,
-			CompactLimit: uint32(1000),
-		},
-		LocCache:    cache.NewJSONCache(Pkv),
+		base:        path,
+		Tables:      map[string]*table.JSONTable{},
+		Pkv:         pKv,
+		LocCache:    cache.NewKVCache(pKv),
 		Lock:        sync.RWMutex{},
 		PebbleLock:  sync.RWMutex{},
 		LabelLookup: map[uint16]string{},
@@ -94,14 +92,10 @@ func LoadJSONDriver(path string) (benchtop.TableDriver, error) {
 	}
 
 	driver := &JSONDriver{
-		base:   path,
-		Tables: map[string]*jTable.JSONTable{},
-		Pkv: &pebblebulk.PebbleKV{
-			Db:           pKv.Db,
-			InsertCount:  0,
-			CompactLimit: uint32(1000),
-		},
-		LocCache:    cache.NewJSONCache(pKv),
+		base:        path,
+		Tables:      map[string]*table.JSONTable{},
+		Pkv:         pKv,
+		LocCache:    cache.NewKVCache(pKv),
 		Lock:        sync.RWMutex{},
 		PebbleLock:  sync.RWMutex{},
 		LabelLookup: map[uint16]string{},
@@ -109,12 +103,12 @@ func LoadJSONDriver(path string) (benchtop.TableDriver, error) {
 	}
 
 	for _, tableName := range driver.List() {
-		table, err := driver.Get(tableName)
+		tblStore, err := driver.Get(tableName)
 		if err != nil {
 			driver.Close()
 			return nil, fmt.Errorf("failed to load table %s: %v", tableName, err)
 		}
-		jsonTable, ok := table.(*jTable.JSONTable)
+		jsonTable, ok := tblStore.(*table.JSONTable)
 		if !ok {
 			driver.Close()
 			return nil, fmt.Errorf("invalid table type for %s", tableName)
@@ -241,6 +235,15 @@ func (dr *JSONDriver) List() []string {
 	return out
 }
 
+// Methods moved to fields.go or consolidated:
+// GetAllColNames, GetLabels, RowIdsByHas, RowIdsByLabelFieldValue, AddField, RemoveField, LoadFields, ListFields, DeleteRowField, GetIDsForLabel
+
+// BulkLoad implementation is in bLoad.go
+
+func (dr *JSONDriver) GetKV() any {
+	return dr.Pkv
+}
+
 func (dr *JSONDriver) Close() {
 	dr.Lock.Lock()
 	defer dr.Lock.Unlock()
@@ -250,7 +253,7 @@ func (dr *JSONDriver) Close() {
 		table.Close() // Closes all section handles and file pools
 		log.Debugf("Closed table %s", tableName)
 	}
-	dr.Tables = make(map[string]*jTable.JSONTable)
+	dr.Tables = make(map[string]*table.JSONTable)
 	if dr.Pkv.Db != nil {
 		if closeErr := dr.Pkv.Db.Close(); closeErr != nil {
 			log.Errorf("Error closing Pebble database: %v", closeErr)
@@ -280,7 +283,12 @@ func (dr *JSONDriver) Get(name string) (benchtop.TableStore, error) {
 	nkey := benchtop.NewTableKey([]byte(name))
 	value, closer, err := dr.Pkv.Db.Get(nkey)
 	if err != nil {
-		log.Errorln("JSONDriver Get: ", err)
+		// A missing table is normal during bulk load: caller will create it.
+		if errors.Is(err, pebble.ErrNotFound) {
+			log.Debugf("JSONDriver Get: table %s not found", name)
+			return nil, err
+		}
+		log.Errorf("JSONDriver Get(%s): %v", name, err)
 		return nil, err
 	}
 	defer closer.Close()
@@ -307,20 +315,20 @@ func (dr *JSONDriver) Delete(name string) error {
 	dr.Lock.Lock()
 	defer dr.Lock.Unlock()
 
-	table, exists := dr.Tables[name]
+	tableVar, exists := dr.Tables[name]
 	if !exists {
 		return fmt.Errorf("table %s does not exist", name)
 	}
 
-	table.Close() // Close all section files
+	tableVar.Close() // Close all section files
 
 	// Delete the entire storage zone (O(1) bulk delete)
-	if err := dr.ZoneManager.DeleteZone(table.FileName); err != nil {
+	if err := dr.ZoneManager.DeleteZone(tableVar.FileName); err != nil {
 		log.Errorf("Failed to delete storage zone for %s: %v", name, err)
 	}
 
 	// Iterate over keys to invalidate cache and delete from KV
-	prefix := benchtop.NewPosKeyPrefix(table.TableId)
+	prefix := benchtop.NewPosKeyPrefix(tableVar.TableId)
 	var keysToDelete [][]byte
 	dr.Pkv.View(func(it *pebblebulk.PebbleIterator) error {
 		for it.Seek(prefix); it.Valid() && bytes.HasPrefix(it.Key(), prefix); it.Next() {
@@ -350,23 +358,36 @@ func (dr *JSONDriver) Delete(name string) error {
 	}
 
 	delete(dr.Tables, name)
-	delete(dr.LabelLookup, table.TableId)
+	delete(dr.LabelLookup, tableVar.TableId)
 	dr.dropTable(name)
 	return nil
 }
-func (dr *JSONDriver) newJSONTable(name string, columns []benchtop.ColumnDef, fileName string, tableID uint16) (*jTable.JSONTable, error) {
+
+func (dr *JSONDriver) newJSONTable(name string, columns []benchtop.ColumnDef, fileName string, tableID uint16) (*table.JSONTable, error) {
 	store, err := dr.ZoneManager.CreateZone(fileName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to init storage: %w", err)
 	}
 
-	out := &jTable.JSONTable{
+	out := &table.JSONTable{
 		Columns:   columns,
 		ColumnMap: make(map[string]int),
 		TableId:   tableID,
 		FileName:  fileName,
 		Name:      name,
 		Storage:   store,
+		LocLookup: func(id string) (*benchtop.RowLoc, error) {
+			val, closer, err := dr.Pkv.Get(benchtop.NewPosKey(tableID, []byte(id)))
+			if err != nil {
+				return nil, err
+			}
+			defer closer.Close()
+			loc := benchtop.DecodeRowLoc(val)
+			if loc == nil {
+				return nil, fmt.Errorf("invalid row location for id %s", id)
+			}
+			return loc, nil
+		},
 		BufferPool: sync.Pool{
 			New: func() any {
 				return make([]byte, 0, 4096)

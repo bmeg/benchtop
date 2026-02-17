@@ -68,5 +68,8 @@ func ToLocalPath(path string) string {
 	if strings.HasPrefix(parts[0], "$") {
 		parts[0] = "$"
 	}
-	return strings.Join(parts, ".")
+	local := strings.Join(parts, ".")
+	// jsonpath expects array indexes as "field[0]" instead of "field.[0]"
+	local = strings.ReplaceAll(local, ".[", "[")
+	return local
 }

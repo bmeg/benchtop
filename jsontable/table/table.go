@@ -36,10 +36,19 @@ type JSONTable struct {
 
 	BlockCache  *otter.Cache[string, []byte]
 	BlockLoader otter.LoaderFunc[string, []byte]
+	LocLookup   func(id string) (*benchtop.RowLoc, error)
 }
 
 func (b *JSONTable) Close() error {
 	return b.Storage.Close()
+}
+
+func (b *JSONTable) HasField(field string) bool {
+	if b.Fields == nil {
+		return false
+	}
+	_, ok := b.Fields[field]
+	return ok
 }
 
 func (b *JSONTable) AddRow(elem benchtop.Row) (*benchtop.RowLoc, error) {
@@ -148,6 +157,13 @@ func (b *JSONTable) AddRows(elems []benchtop.Row) ([]*benchtop.RowLoc, error) {
 	}
 
 	return results, nil
+}
+
+func (b *JSONTable) GetRowLoc(id string) (*benchtop.RowLoc, error) {
+	if b.LocLookup == nil {
+		return nil, fmt.Errorf("LocLookup not initialized for table %s", b.Name)
+	}
+	return b.LocLookup(id)
 }
 
 func (b *JSONTable) GetRow(loc *benchtop.RowLoc) (map[string]any, error) {
@@ -262,6 +278,35 @@ func (b *JSONTable) ScanDoc(filter benchtop.RowFilter) chan map[string]any {
 			if err != nil {
 				log.Errorf("scan block failed: %v", err)
 			}
+		}
+	}()
+	return out
+}
+
+func (b *JSONTable) ScanDocProjected(fields []string, filter benchtop.RowFilter) chan map[string]any {
+	out := make(chan map[string]any, 100)
+	go func() {
+		defer close(out)
+		if len(fields) == 0 {
+			for row := range b.ScanDoc(filter) {
+				out <- row
+			}
+			return
+		}
+		for row := range b.ScanDoc(filter) {
+			proj := map[string]any{}
+			if id, ok := row["_id"]; ok {
+				proj["_id"] = id
+			}
+			for _, f := range fields {
+				if f == "_id" {
+					continue
+				}
+				if v, ok := row[f]; ok {
+					proj[f] = v
+				}
+			}
+			out <- proj
 		}
 	}()
 	return out
