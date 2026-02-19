@@ -62,13 +62,15 @@ func TestStressPersistence(t *testing.T) {
 		defer close(done)
 		tblStore, err := driver.New(tableName, columns)
 		if err != nil {
-			t.Fatal(err)
+			done <- err
+			return
 		}
 		tableID := tblStore.(*table.JSONTable).TableId
 
 		err = driver.BulkLoad(tableID, loadRowsHelper(tableID, rowCount))
 		if err != nil {
-			t.Fatal(err)
+			done <- err
+			return
 		}
 		done <- nil
 	}()

@@ -353,15 +353,10 @@ func (dr *JSONDriver) scanRowsByField(tableID uint16, field string, value any, o
 
 		// FAST PATH: If operator is EQ, use Pebble.
 		if op == query.EQ {
-			// If tableID is 0, we can do a SINGLE seek across ALL tables thanks to the new index order
-			if tableID == 0 {
-				dr.scanGlobalIndex(field, value, out)
-				return
-			}
 			// For specific tables, check if they are indexed
 			allIndexed := true
 			for _, tbl := range targetTables {
-				if tbl.Fields == nil || len(tbl.Fields) == 0 {
+				if len(tbl.Fields) == 0 {
 					allIndexed = false
 					break
 				}
@@ -372,7 +367,11 @@ func (dr *JSONDriver) scanRowsByField(tableID uint16, field string, value any, o
 			}
 
 			if allIndexed {
-				dr.scanTableIndex(targetTables, field, value, out)
+				if tableID == 0 {
+					dr.scanGlobalIndex(field, value, out)
+				} else {
+					dr.scanTableIndex(targetTables, field, value, out)
+				}
 				return
 			}
 		}

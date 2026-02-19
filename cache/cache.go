@@ -146,8 +146,13 @@ func NewKVCache(kv pebblebulk.KVStore) Cache {
 				defer closer.Close()
 				loc := benchtop.DecodeRowLoc(val)
 				// Verification: Ensure the returned loc matches requested tableID
-				if loc != nil && loc.TableId == tableID {
-					return loc, nil
+				if loc != nil {
+					if loc.TableId == 0 {
+						loc.TableId = tableID
+					}
+					if loc.TableId == tableID {
+						return loc, nil
+					}
 				}
 			}
 		}
@@ -180,8 +185,13 @@ func NewKVCache(kv pebblebulk.KVStore) Cache {
 			if err == nil {
 				defer closer.Close()
 				loc := benchtop.DecodeRowLoc(val)
-				if loc != nil && loc.TableId == tid {
-					return loc, nil
+				if loc != nil {
+					if loc.TableId == 0 {
+						loc.TableId = tid
+					}
+					if loc.TableId == tid {
+						return loc, nil
+					}
 				}
 			}
 		}

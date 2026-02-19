@@ -26,9 +26,9 @@ func TestArrowDriverRoundTrip(t *testing.T) {
 	store := storeRaw.(*ArrowTable)
 
 	rows := []benchtop.Row{
-		{Id: []byte("p1"), TableName: "v_person", Data: map[string]any{"name": "alice", "age": 30.0}},
-		{Id: []byte("p2"), TableName: "v_person", Data: map[string]any{"name": "bob", "age": 41.0}},
-		{Id: []byte("p3"), TableName: "v_person", Data: map[string]any{"name": "cory", "age": 25.0}},
+		{Id: []byte("p1"), Data: map[string]any{"name": "alice", "age": 30.0}},
+		{Id: []byte("p2"), Data: map[string]any{"name": "bob", "age": 41.0}},
+		{Id: []byte("p3"), Data: map[string]any{"name": "cory", "age": 25.0}},
 	}
 	locs, err := store.AddRows(rows)
 	if err != nil {
@@ -83,8 +83,7 @@ func TestArrowDriverRoundTrip(t *testing.T) {
 
 	nestedRows := []benchtop.Row{
 		{
-			Id:        []byte("obs1"),
-			TableName: "v_person",
+			Id: []byte("obs1"),
 			Data: map[string]any{
 				"code": map[string]any{
 					"coding": []any{
@@ -94,8 +93,7 @@ func TestArrowDriverRoundTrip(t *testing.T) {
 			},
 		},
 		{
-			Id:        []byte("obs2"),
-			TableName: "v_person",
+			Id: []byte("obs2"),
 			Data: map[string]any{
 				"code": map[string]any{
 					"coding": []any{
@@ -136,7 +134,7 @@ func TestArrowDriverReloadPreservesTableIDAndData(t *testing.T) {
 	}
 	store := storeRaw.(*ArrowTable)
 	_, err = store.AddRows([]benchtop.Row{
-		{Id: []byte("e1"), TableName: "e_knows", Data: map[string]any{"from": "p1", "to": "p2"}},
+		{Id: []byte("e1"), Data: map[string]any{"from": "p1", "to": "p2"}},
 	})
 	if err != nil {
 		t.Fatalf("AddRows failed: %v", err)
@@ -154,7 +152,11 @@ func TestArrowDriverReloadPreservesTableIDAndData(t *testing.T) {
 	drv2 := drvRaw2.(*ArrowDriver)
 	defer drv2.Close()
 
-	storeRaw2, err := drv2.Get("e_knows")
+	tid, err := drv2.LookupTableID("e_knows")
+	if err != nil {
+		t.Fatalf("LookupTableID failed: %v", err)
+	}
+	storeRaw2, err := drv2.Get(tid)
 	if err != nil {
 		t.Fatalf("Get after reload failed: %v", err)
 	}

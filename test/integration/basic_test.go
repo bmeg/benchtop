@@ -86,21 +86,20 @@ func TestInsert(t *testing.T) {
 	jT, _ := ts.(*jTable.JSONTable)
 	// jDR, _ := dr.(*jsontable.JSONDriver) // Unused?
 
+	jDR, _ := dr.(*jsontable.JSONDriver)
+
 	for k, r := range data {
-		_, err := jT.AddRow(benchtop.Row{Id: []byte(k), TableID: jT.TableId, Data: r})
+		loc, err := jT.AddRow(benchtop.Row{Id: []byte(k), TableID: jT.TableId, Data: r})
 		if err != nil {
 			t.Error(err)
 		}
-		// Direct AddTableEntryInfo call removed from test as implementation detail?
-		// Actually jT.AddRow should probably handle it OR the test is testing lower level?
-		// AddRow returns loc but doesn't persist index?
-		// Looking at code, TableStore.AddRow usually just appends to log/storage.
-		// Indexing is separate.
-		// But here we are manually adding to KV?
-		// "err = jDR.AddTableEntryInfo(nil, []byte(k), loc)"
-		// Let's assume we need to call it but need the driver cast.
+
+		pKey := benchtop.NewPosKey(jT.TableId, []byte(k))
+		err = jDR.Pkv.Db.Set(pKey, benchtop.EncodeRowLoc(loc), pebble.Sync)
+		if err != nil {
+			t.Error(err)
+		}
 	}
-	jDR, _ := dr.(*jsontable.JSONDriver)
 	// for k := range data { ... }
 
 	for k := range data {
@@ -111,9 +110,12 @@ func TestInsert(t *testing.T) {
 				log.Errorf("Err on dr.Pb.Get for key %s in CacheLoader: %v", k, err)
 			}
 			log.Errorln("ERR: ", err)
+			t.Fatal(err)
 		}
 		loc := benchtop.DecodeRowLoc(val)
-		closer.Close()
+		if closer != nil {
+			closer.Close()
+		}
 
 		post, err := ts.GetRow(loc)
 		if err != nil {
