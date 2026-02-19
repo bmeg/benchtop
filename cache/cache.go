@@ -4,11 +4,15 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"strconv"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/bmeg/benchtop"
 	"github.com/bmeg/benchtop/pebblebulk"
 	"github.com/bmeg/grip/log"
+	"github.com/bytedance/sonic"
 	"github.com/maypok86/otter/v2"
 )
 
@@ -117,26 +121,87 @@ func NewStandardCache(lookup TableLookup, scanner TableScanner) Cache {
 // NewKVCache creates a Cache that uses a Pebble KVStore for lookups.
 // This is for backward compatibility with the original JSONDriver.
 func NewKVCache(kv pebblebulk.KVStore) Cache {
-	lookup := TableLookup(func(id string) (*benchtop.RowLoc, error) {
-		val, closer, err := kv.Get([]byte(id))
-		if err != nil {
-			return nil, err
+	var tids []uint16
+	var tidsMu sync.Mutex
+
+	lookup := TableLookup(func(key string) (*benchtop.RowLoc, error) {
+		var tableID uint16
+		var entryID []byte
+
+		parts := strings.Split(key, ":")
+		if len(parts) == 2 {
+			tid, _ := strconv.Atoi(parts[0])
+			tableID = uint16(tid)
+			entryID = []byte(parts[1])
+		} else {
+			// If no table prefix, we must treat it as a potential global search
+			entryID = []byte(key)
 		}
-		defer closer.Close()
-		return benchtop.DecodeRowLoc(val), nil
+
+		if tableID > 0 {
+			// Direct lookup if table ID is known
+			posKey := benchtop.NewPosKey(tableID, entryID)
+			val, closer, err := kv.Get(posKey)
+			if err == nil {
+				defer closer.Close()
+				loc := benchtop.DecodeRowLoc(val)
+				// Verification: Ensure the returned loc matches requested tableID
+				if loc != nil && loc.TableId == tableID {
+					return loc, nil
+				}
+			}
+		}
+
+		// Fallback: search across all active tables
+		tidsMu.Lock()
+		if len(tids) == 0 {
+			prefix := []byte{benchtop.TablePrefix}
+			_ = kv.View(func(it *pebblebulk.PebbleIterator) error {
+				for it.Seek(prefix); it.Valid() && bytes.HasPrefix(it.Key(), prefix); it.Next() {
+					val, _ := it.Value()
+					var tinfo benchtop.TableInfo
+					if err := sonic.ConfigFastest.Unmarshal(val, &tinfo); err == nil {
+						tids = append(tids, tinfo.TableId)
+					}
+				}
+				return nil
+			})
+		}
+		currentTIDs := make([]uint16, len(tids))
+		copy(currentTIDs, tids)
+		tidsMu.Unlock()
+
+		for _, tid := range currentTIDs {
+			if tid == tableID {
+				continue // Already checked
+			}
+			pk := benchtop.NewPosKey(tid, entryID)
+			val, closer, err := kv.Get(pk)
+			if err == nil {
+				defer closer.Close()
+				loc := benchtop.DecodeRowLoc(val)
+				if loc != nil && loc.TableId == tid {
+					return loc, nil
+				}
+			}
+		}
+
+		return nil, fmt.Errorf("id %s not found in any table", key)
 	})
-	scanner := TableScanner(func(fn func(id string, loc *benchtop.RowLoc)) error {
+	scanner := TableScanner(func(fn func(key string, loc *benchtop.RowLoc)) error {
 		prefix := []byte{benchtop.PosPrefix}
 		return kv.View(func(it *pebblebulk.PebbleIterator) error {
 			for it.Seek(prefix); it.Valid() && bytes.HasPrefix(it.Key(), prefix); it.Next() {
-				_, id := benchtop.ParsePosKey(it.Key())
+				tid, id := benchtop.ParsePosKey(it.Key())
 				val, err := it.Value()
 				if err != nil {
 					continue
 				}
 				loc := benchtop.DecodeRowLoc(val)
-				if loc != nil {
-					fn(string(id), loc)
+				if loc != nil && loc.TableId == tid {
+					// Use table-aware key for cache population
+					cacheKey := strconv.FormatUint(uint64(tid), 10) + ":" + string(id)
+					fn(cacheKey, loc)
 				}
 			}
 			return nil

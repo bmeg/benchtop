@@ -305,16 +305,15 @@ func (d *ArrowDriver) getOrLoadLocked(name string) (*ArrowTable, error) {
 	return t, nil
 }
 
-func (d *ArrowDriver) Get(name string) (benchtop.TableStore, error) {
+func (d *ArrowDriver) Get(tableID uint16) (benchtop.TableStore, error) {
 	d.lock.Lock()
 	defer d.lock.Unlock()
 
-	// Resolve case-variant names.
-	name = d.resolveTableName(name)
-
-	if _, ok := d.tableIDs[name]; !ok {
-		return nil, fmt.Errorf("table %q not found", name)
+	name, ok := d.idToTable[tableID]
+	if !ok {
+		return nil, fmt.Errorf("table ID %d not found", tableID)
 	}
+
 	return d.getOrLoadLocked(name)
 }
 
@@ -329,20 +328,23 @@ func (d *ArrowDriver) List() []string {
 	return out
 }
 
-func (d *ArrowDriver) BulkLoad(name string, rows chan benchtop.Row) error {
-	tableStore, err := d.Get(name)
+func (d *ArrowDriver) BulkLoad(tableID uint16, rows chan *benchtop.Row) error {
+	tableStore, err := d.Get(tableID)
 	if err != nil {
 		log.Errorf("BulkLoad Get error: %v", err)
 		return err
 	}
 	at, ok := tableStore.(*ArrowTable)
 	if !ok {
-		return fmt.Errorf("table %q is not ArrowTable", name)
+		return fmt.Errorf("table ID %d is not ArrowTable", tableID)
 	}
 
 	batch := make([]benchtop.Row, 0, bulkLoadBatchRows)
 	for row := range rows {
-		batch = append(batch, row)
+		if row == nil {
+			continue
+		}
+		batch = append(batch, *row)
 		if len(batch) >= bulkLoadBatchRows {
 			if err := at.BulkLoad(batch); err != nil {
 				return err
@@ -363,7 +365,7 @@ func (d *ArrowDriver) RowIdsByHas(field string, value any, op query.Condition) c
 	go func() {
 		defer close(out)
 		for _, name := range d.List() {
-			tableStore, err := d.Get(name)
+			tableStore, err := d.Get(d.tableIDs[name]) // Changed to use tableID
 			if err != nil {
 				continue
 			}
@@ -392,7 +394,7 @@ func (d *ArrowDriver) ListTableKeys(tableID uint16) (chan benchtop.Index, error)
 		close(out)
 		return out, nil
 	}
-	store, err := d.Get(name)
+	store, err := d.Get(tableID) // Changed to use tableID
 	if err != nil {
 		return nil, err
 	}
@@ -409,7 +411,7 @@ func (d *ArrowDriver) GetAllColNames() chan string {
 		defer close(out)
 		seen := make(map[string]struct{})
 		for _, name := range d.List() {
-			tableStore, err := d.Get(name)
+			tableStore, err := d.Get(d.tableIDs[name]) // Changed to use tableID
 			if err != nil {
 				continue
 			}
@@ -443,11 +445,11 @@ func (d *ArrowDriver) GetLabels(edges bool, removePrefix bool) chan string {
 	return out
 }
 
-func (d *ArrowDriver) RowIdsByLabelFieldValue(label, field string, value any, op query.Condition) chan benchtop.Index {
+func (d *ArrowDriver) RowIdsByTableFieldValue(tableID uint16, field string, value any, op query.Condition) chan benchtop.Index {
 	out := make(chan benchtop.Index, 100)
 	go func() {
 		defer close(out)
-		store, err := d.Get(label)
+		store, err := d.Get(tableID)
 		if err != nil {
 			return
 		}
@@ -466,20 +468,22 @@ func (d *ArrowDriver) RowIdsByLabelFieldValue(label, field string, value any, op
 	return out
 }
 
-func (d *ArrowDriver) Delete(name string) error {
+func (d *ArrowDriver) Delete(tableID uint16) error {
 	d.lock.Lock()
 	defer d.lock.Unlock()
+
+	name, ok := d.idToTable[tableID]
+	if !ok {
+		return fmt.Errorf("table ID %d not found", tableID)
+	}
 
 	if t, ok := d.tables[name]; ok {
 		t.Close()
 		delete(d.tables, name)
 	}
-	tableID := d.tableIDs[name]
 	delete(d.tableIDs, name)
 	delete(d.fields, name)
-	if tableID > 0 {
-		delete(d.idToTable, tableID)
-	}
+	delete(d.idToTable, tableID)
 
 	_ = d.metaDB.Update(func(tx *bbolt.Tx) error {
 		if b := tx.Bucket(bucketTablesByName); b != nil {
@@ -504,28 +508,45 @@ func (d *ArrowDriver) Delete(name string) error {
 	return nil
 }
 
-func (d *ArrowDriver) AddField(label, field string) error {
+func (d *ArrowDriver) LookupTableID(name string) (uint16, error) {
+	d.lock.RLock()
+	defer d.lock.RUnlock()
+	name = d.resolveTableName(name)
+	if id, ok := d.tableIDs[name]; ok {
+		return id, nil
+	}
+	return 0, fmt.Errorf("table %q not found", name)
+}
+
+func (d *ArrowDriver) ListTableIDs() []uint16 {
+	d.lock.RLock()
+	defer d.lock.RUnlock()
+	ids := make([]uint16, 0, len(d.idToTable))
+	for id := range d.idToTable {
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+func (d *ArrowDriver) GetTableInfo(tableID uint16) (*benchtop.TableInfo, error) {
+	d.lock.RLock()
+	name, ok := d.idToTable[tableID]
+	d.lock.RUnlock()
+	if !ok {
+		return nil, fmt.Errorf("table ID %d not found", tableID)
+	}
+	return &benchtop.TableInfo{
+		Name:    name,
+		TableId: tableID,
+	}, nil
+}
+
+func (d *ArrowDriver) AddField(tableID uint16, field string) error {
 	d.lock.Lock()
-	name := d.resolveTableName(label)
-	if _, ok := d.tableIDs[name]; !ok {
-		tableID, err := d.reserveTableID()
-		if err != nil {
-			d.lock.Unlock()
-			return err
-		}
-		t, err := newArrowTable(d.zoneDir, name, tableID, nil)
-		if err != nil {
-			d.lock.Unlock()
-			return err
-		}
-		if err := d.setTableMeta(name, tableID); err != nil {
-			t.Close()
-			d.lock.Unlock()
-			return err
-		}
-		d.tables[name] = t
-		d.tableIDs[name] = tableID
-		d.idToTable[tableID] = name
+	name, ok := d.idToTable[tableID]
+	if !ok {
+		d.lock.Unlock()
+		return fmt.Errorf("table ID %d not found", tableID)
 	}
 	t, err := d.getOrLoadLocked(name)
 	if err != nil {
@@ -540,9 +561,13 @@ func (d *ArrowDriver) AddField(label, field string) error {
 	return t.EnsureFieldIndex(field)
 }
 
-func (d *ArrowDriver) RemoveField(label, field string) error {
+func (d *ArrowDriver) RemoveField(tableID uint16, field string) error {
 	d.lock.Lock()
-	name := d.resolveTableName(label)
+	name, ok := d.idToTable[tableID]
+	if !ok {
+		d.lock.Unlock()
+		return fmt.Errorf("table ID %d not found", tableID)
+	}
 	t, err := d.getOrLoadLocked(name)
 	if err != nil {
 		d.lock.Unlock()
@@ -574,17 +599,25 @@ func (d *ArrowDriver) ListFields() []benchtop.FieldInfo {
 	return out
 }
 
-func (d *ArrowDriver) DeleteRowField(label, field, rowID string) error {
+func (d *ArrowDriver) DeleteRowField(tableID uint16, field, rowID string) error {
 	// Arrow driver computes field filters from row payloads at query time.
 	// There is no separate field-index keyspace to mutate for one row.
 	return nil
+}
+
+func (d *ArrowDriver) InvalidateLoc(tableID uint16, rowID string) {
+	// Arrow driver does not currently use a table-aware location cache
 }
 
 func (d *ArrowDriver) GetIDsForLabel(label string) chan string {
 	out := make(chan string, 100)
 	go func() {
 		defer close(out)
-		store, err := d.Get(label)
+		id, err := d.LookupTableID(label)
+		if err != nil {
+			return
+		}
+		store, err := d.Get(id)
 		if err != nil {
 			return
 		}

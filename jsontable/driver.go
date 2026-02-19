@@ -3,7 +3,6 @@ package jsontable
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -37,8 +36,9 @@ type JSONDriver struct {
 	Pkv        *pebblebulk.PebbleKV
 	LocCache   cache.Cache
 
-	Tables      map[string]*table.JSONTable
-	LabelLookup map[uint16]string
+	Tables      map[uint16]*table.JSONTable
+	idToName    map[uint16]string
+	nameToId    map[string]uint16
 	ZoneManager storage.ZoneManager
 }
 
@@ -61,75 +61,41 @@ func NewJSONDriver(path string) (benchtop.TableDriver, error) {
 
 	driver := &JSONDriver{
 		base:        path,
-		Tables:      map[string]*table.JSONTable{},
+		Tables:      map[uint16]*table.JSONTable{},
 		Pkv:         pKv,
 		LocCache:    cache.NewKVCache(pKv),
 		Lock:        sync.RWMutex{},
 		PebbleLock:  sync.RWMutex{},
-		LabelLookup: map[uint16]string{},
+		idToName:    map[uint16]string{},
+		nameToId:    map[string]uint16{},
 		ZoneManager: storage.NewZoneManager(tableDir),
 	}
 
-	return driver, nil
-}
-
-// Update LoadJSONDriver to use DirExists
-func LoadJSONDriver(path string) (benchtop.TableDriver, error) {
-	pKv, err := pebblebulk.NewPebbleKV(path)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open database: %v", err)
-	}
-
-	tableDir := filepath.Join(path, "TABLES")
-	exist, err := util.DirExists(tableDir)
-	if err != nil {
-		pKv.Close()
-		return nil, err
-	}
-	if !exist {
-		pKv.Close()
-		return nil, fmt.Errorf("TABLES directory not found at %s", tableDir)
-	}
-
-	driver := &JSONDriver{
-		base:        path,
-		Tables:      map[string]*table.JSONTable{},
-		Pkv:         pKv,
-		LocCache:    cache.NewKVCache(pKv),
-		Lock:        sync.RWMutex{},
-		PebbleLock:  sync.RWMutex{},
-		LabelLookup: map[uint16]string{},
-		ZoneManager: storage.NewZoneManager(tableDir),
-	}
-
+	// Load existing tables from disk
 	for _, tableName := range driver.List() {
-		tblStore, err := driver.Get(tableName)
+		tinfo, err := driver.getTableInfo(tableName)
 		if err != nil {
 			driver.Close()
 			return nil, fmt.Errorf("failed to load table %s: %v", tableName, err)
 		}
-		jsonTable, ok := tblStore.(*table.JSONTable)
-		if !ok {
+		driver.nameToId[tableName] = tinfo.TableId
+		driver.idToName[tinfo.TableId] = tableName
+
+		_, err = driver.Get(tinfo.TableId)
+		if err != nil {
 			driver.Close()
-			return nil, fmt.Errorf("invalid table type for %s", tableName)
+			return nil, fmt.Errorf("failed to open table %s (ID %d): %v", tableName, tinfo.TableId, err)
 		}
-
-		driver.Lock.Lock()
-		if len(tableName) > 2 {
-			driver.LabelLookup[jsonTable.TableId] = tableName[2:]
-		} else {
-			driver.LabelLookup[jsonTable.TableId] = tableName
-		}
-		driver.Tables[tableName] = jsonTable
-		driver.Lock.Unlock()
 	}
 
-	err = driver.LoadFields()
-	if err != nil {
-		pKv.Close()
-		return nil, err
+	// Load Fields
+	if err := driver.LoadFields(); err != nil {
+		driver.Close()
+		return nil, fmt.Errorf("failed to load fields: %v", err)
 	}
 
+	// Preload Cache
+	// Note: cache.NewKVCache already handles table-aware scanning if we updated it.
 	driver.Lock.RLock()
 	err = driver.LocCache.PreloadCache()
 	driver.Lock.RUnlock()
@@ -140,16 +106,44 @@ func LoadJSONDriver(path string) (benchtop.TableDriver, error) {
 	return driver, nil
 }
 
-func (dr *JSONDriver) New(name string, columns []benchtop.ColumnDef) (benchtop.TableStore, error) {
-	dr.Lock.RLock()
-	if p, ok := dr.Tables[name]; ok {
-		dr.Lock.RUnlock()
-		return p, nil
-	}
-	dr.Lock.RUnlock()
+// makeLocCacheKey creates a unique key for the location cache including tableId
+func makeLocCacheKey(tableId uint16, id string) string {
+	return strconv.FormatUint(uint64(tableId), 10) + ":" + id
+}
 
+// LoadJSONDriver is deprecated and just calls NewJSONDriver which now handles loading.
+func LoadJSONDriver(path string) (benchtop.TableDriver, error) {
+	return NewJSONDriver(path)
+}
+
+func (dr *JSONDriver) New(name string, columns []benchtop.ColumnDef) (benchtop.TableStore, error) {
 	dr.Lock.Lock()
 	defer dr.Lock.Unlock()
+
+	if id, ok := dr.nameToId[name]; ok {
+		if p, ok := dr.Tables[id]; ok {
+			return p, nil
+		}
+		// Attempt to load if we know the ID but it's not in Tables map
+		// Release lock before calling Get to avoid deadlock (Get acquires ReadLock/Lock)
+		dr.Lock.Unlock()
+		tbl, err := dr.Get(id)
+		dr.Lock.Lock() // Re-acquire lock
+		if err == nil {
+			return tbl, nil
+		}
+	}
+
+	// Case-insensitive lookup for existing tables on startup
+	lowerName := strings.ToLower(name)
+	for existingName, id := range dr.nameToId {
+		if strings.ToLower(existingName) == lowerName {
+			if p, ok := dr.Tables[id]; ok {
+				return p, nil
+			}
+		}
+	}
+
 	newId := dr.getMaxTablePrefix()
 	formattedName := util.PadToSixDigits(int(newId))
 	tPath := filepath.Join(dr.base, "TABLES", formattedName)
@@ -182,14 +176,13 @@ func (dr *JSONDriver) New(name string, columns []benchtop.ColumnDef) (benchtop.T
 		// Init might be no-op now
 	}
 
-	dr.Tables[name] = out
-	if len(name) > 2 {
-		dr.LabelLookup[newId] = name[2:]
-	} else {
-		dr.LabelLookup[newId] = name
-	}
+	dr.Tables[newId] = out
+	dr.nameToId[name] = newId
+	dr.Tables[newId] = out
+	dr.nameToId[name] = newId
+	dr.idToName[newId] = name
 
-	log.Debugf("Created table %s", name)
+	log.Debugf("Created table %s with ID %d", name, newId)
 	return out, nil
 }
 
@@ -235,8 +228,40 @@ func (dr *JSONDriver) List() []string {
 	return out
 }
 
-// Methods moved to fields.go or consolidated:
-// GetAllColNames, GetLabels, RowIdsByHas, RowIdsByLabelFieldValue, AddField, RemoveField, LoadFields, ListFields, DeleteRowField, GetIDsForLabel
+func (dr *JSONDriver) GetLabels(edges bool, removePrefix bool) chan string {
+	out := make(chan string, 10)
+	go func() {
+		defer close(out)
+		dr.Lock.RLock()
+		defer dr.Lock.RUnlock()
+		for _, name := range dr.idToName {
+			isEdge := strings.HasPrefix(name, "e_")
+			if (edges && isEdge) || (!edges && !isEdge) {
+				if removePrefix && len(name) > 2 {
+					out <- name[2:]
+				} else {
+					out <- name
+				}
+			}
+		}
+	}()
+	return out
+}
+
+func (dr *JSONDriver) GetAllColNames() chan string {
+	out := make(chan string, 10)
+	go func() {
+		defer close(out)
+		dr.Lock.RLock()
+		defer dr.Lock.RUnlock()
+		for _, tbl := range dr.Tables {
+			for _, col := range tbl.GetColumnDefs() {
+				out <- col.Key
+			}
+		}
+	}()
+	return out
+}
 
 // BulkLoad implementation is in bLoad.go
 
@@ -249,12 +274,13 @@ func (dr *JSONDriver) Close() {
 	defer dr.Lock.Unlock()
 
 	log.Infoln("Closing JSONDriver...")
-	for tableName, table := range dr.Tables {
+	for id, table := range dr.Tables {
 		table.Close() // Closes all section handles and file pools
-		log.Debugf("Closed table %s", tableName)
+		log.Debugf("Closed table ID %d (%s)", id, table.Name)
 	}
-	dr.Tables = make(map[string]*table.JSONTable)
-	if dr.Pkv.Db != nil {
+	dr.Tables = make(map[uint16]*table.JSONTable)
+	dr.nameToId = make(map[string]uint16)
+	if dr.Pkv != nil && dr.Pkv.Db != nil {
 		if closeErr := dr.Pkv.Db.Close(); closeErr != nil {
 			log.Errorf("Error closing Pebble database: %v", closeErr)
 		}
@@ -265,9 +291,13 @@ func (dr *JSONDriver) Close() {
 	log.Infof("Successfully closed JSONDriver for path %s", dr.base)
 }
 
-func (dr *JSONDriver) Get(name string) (benchtop.TableStore, error) {
+func (dr *JSONDriver) InvalidateLoc(tableId uint16, rowId string) {
+	dr.LocCache.Invalidate(makeLocCacheKey(tableId, rowId))
+}
+
+func (dr *JSONDriver) Get(id uint16) (benchtop.TableStore, error) {
 	dr.Lock.RLock()
-	if x, ok := dr.Tables[name]; ok {
+	if x, ok := dr.Tables[id]; ok {
 		dr.Lock.RUnlock()
 		return x, nil
 	}
@@ -276,28 +306,23 @@ func (dr *JSONDriver) Get(name string) (benchtop.TableStore, error) {
 	dr.Lock.Lock()
 	defer dr.Lock.Unlock()
 
-	if x, ok := dr.Tables[name]; ok {
+	if x, ok := dr.Tables[id]; ok {
 		return x, nil
 	}
 
-	nkey := benchtop.NewTableKey([]byte(name))
-	value, closer, err := dr.Pkv.Db.Get(nkey)
-	if err != nil {
-		// A missing table is normal during bulk load: caller will create it.
-		if errors.Is(err, pebble.ErrNotFound) {
-			log.Debugf("JSONDriver Get: table %s not found", name)
-			return nil, err
-		}
-		log.Errorf("JSONDriver Get(%s): %v", name, err)
-		return nil, err
-	}
-	defer closer.Close()
-	tinfo := benchtop.TableInfo{}
-	if err := sonic.ConfigFastest.Unmarshal(value, &tinfo); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal table info: %v", err)
+	// Find the name for this ID in idToName
+	name, ok := dr.idToName[id]
+	if !ok {
+		return nil, fmt.Errorf("table ID %d not found", id)
 	}
 
-	log.Debugf("Opening Table: %#v\n", tinfo)
+	tinfo, err := dr.getTableInfo(name)
+	if err != nil {
+		log.Errorf("JSONDriver Get(ID %d): could not find info for name '%s': %v", id, name, err)
+		return nil, err
+	}
+
+	log.Debugf("Opening Table ID %d: %#v\n", id, tinfo)
 
 	out, err := dr.newJSONTable(name, tinfo.Columns, string(tinfo.FileName), tinfo.TableId)
 	if err != nil {
@@ -307,20 +332,29 @@ func (dr *JSONDriver) Get(name string) (benchtop.TableStore, error) {
 	if err := out.Init(10); err != nil {
 		return nil, fmt.Errorf("failed to init table %s: %v", name, err)
 	}
-	dr.Tables[name] = out
+
+	dr.Tables[id] = out
+	dr.nameToId[name] = id
+
 	return out, nil
 }
 
-func (dr *JSONDriver) Delete(name string) error {
+func (dr *JSONDriver) Delete(id uint16) error {
 	dr.Lock.Lock()
 	defer dr.Lock.Unlock()
 
-	tableVar, exists := dr.Tables[name]
+	tableVar, exists := dr.Tables[id]
 	if !exists {
-		return fmt.Errorf("table %s does not exist", name)
+		// Attempt to load it first to ensure we can close and delete it
+		tbl, err := dr.Get(id)
+		if err != nil {
+			return fmt.Errorf("table ID %d does not exist and could not be loaded", id)
+		}
+		tableVar = tbl.(*table.JSONTable)
 	}
 
 	tableVar.Close() // Close all section files
+	name := tableVar.Name
 
 	// Delete the entire storage zone (O(1) bulk delete)
 	if err := dr.ZoneManager.DeleteZone(tableVar.FileName); err != nil {
@@ -334,7 +368,7 @@ func (dr *JSONDriver) Delete(name string) error {
 		for it.Seek(prefix); it.Valid() && bytes.HasPrefix(it.Key(), prefix); it.Next() {
 			_, rowBytes := benchtop.ParsePosKey(it.Key())
 			rowId := string(rowBytes)
-			dr.LocCache.Invalidate(rowId)
+			dr.LocCache.Invalidate(makeLocCacheKey(tableVar.TableId, rowId))
 			// Make a copy of the key bytes because pebble reuses them
 			keyCopy := make([]byte, len(it.Key()))
 			copy(keyCopy, it.Key())
@@ -357,10 +391,84 @@ func (dr *JSONDriver) Delete(name string) error {
 		}
 	}
 
-	delete(dr.Tables, name)
-	delete(dr.LabelLookup, tableVar.TableId)
+	// Clean up field indexes
+	for field := range tableVar.Fields {
+		if err := dr.RemoveField(id, field); err != nil {
+			log.Errorf("Failed to remove field %s for table ID %d: %v", field, id, err)
+		}
+	}
+	tableVar.Fields = nil
+
+	delete(dr.Tables, id)
+	delete(dr.nameToId, name)
+	delete(dr.idToName, id)
 	dr.dropTable(name)
 	return nil
+}
+
+func (dr *JSONDriver) LookupTableID(name string) (uint16, error) {
+	dr.Lock.RLock()
+	if id, ok := dr.nameToId[name]; ok {
+		dr.Lock.RUnlock()
+		return id, nil
+	}
+	// Case-insensitive fallback for existing tables
+	lower := strings.ToLower(name)
+	for existing, id := range dr.nameToId {
+		if strings.ToLower(existing) == lower {
+			dr.Lock.RUnlock()
+			return id, nil
+		}
+	}
+	dr.Lock.RUnlock()
+
+	tinfo, err := dr.getTableInfo(name)
+	if err != nil {
+		return 0, err
+	}
+	dr.Lock.Lock()
+	dr.nameToId[name] = tinfo.TableId
+	dr.idToName[tinfo.TableId] = name
+	dr.Lock.Unlock()
+	return tinfo.TableId, nil
+}
+
+func (dr *JSONDriver) ListTableIDs() []uint16 {
+	dr.Lock.RLock()
+	defer dr.Lock.RUnlock()
+	ids := make([]uint16, 0, len(dr.Tables))
+	for id := range dr.Tables {
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+func (dr *JSONDriver) GetTableInfo(tableID uint16) (*benchtop.TableInfo, error) {
+	prefix := []byte{benchtop.TablePrefix}
+	var found *benchtop.TableInfo
+	err := dr.Pkv.View(func(it *pebblebulk.PebbleIterator) error {
+		for it.Seek(prefix); it.Valid() && bytes.HasPrefix(it.Key(), prefix); it.Next() {
+			val, err := it.Value()
+			if err != nil {
+				continue
+			}
+			var tinfo benchtop.TableInfo
+			if err := sonic.ConfigFastest.Unmarshal(val, &tinfo); err == nil {
+				if tinfo.TableId == tableID {
+					found = &tinfo
+					return nil
+				}
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	if found == nil {
+		return nil, pebble.ErrNotFound
+	}
+	return found, nil
 }
 
 func (dr *JSONDriver) newJSONTable(name string, columns []benchtop.ColumnDef, fileName string, tableID uint16) (*table.JSONTable, error) {
@@ -400,27 +508,46 @@ func (dr *JSONDriver) newJSONTable(name string, columns []benchtop.ColumnDef, fi
 
 	// Define Loader
 	out.BlockLoader = func(ctx context.Context, key string) ([]byte, error) {
-		// Key format: "Section:Offset:Size"
+		// Key format: "TableId:Section:Offset:Size"
 		parts := strings.Split(key, ":")
-		if len(parts) != 3 {
-			return nil, fmt.Errorf("invalid cache key")
+		if len(parts) != 4 {
+			return nil, fmt.Errorf("invalid cache key: %s (expected 4 parts)", key)
 		}
 
-		sec, _ := strconv.Atoi(parts[0])
-		off, _ := strconv.Atoi(parts[1])
-		sz, _ := strconv.Atoi(parts[2])
+		// Parts: TableId (0), Section (1), Offset (2), Size (3)
+		sec, _ := strconv.Atoi(parts[1])
+		off, _ := strconv.Atoi(parts[2])
+		sz, _ := strconv.Atoi(parts[3])
 
-		loc := &benchtop.RowLoc{
-			Section: uint16(sec),
-			Offset:  uint32(off),
-			Size:    uint32(sz),
+		secId := uint16(sec)
+		off32 := uint32(off)
+		sz32 := uint32(sz)
+
+		var blockData []byte
+		var lastErr error
+
+		// Retry loop for coherence gaps
+		for i := 0; i < 10; i++ {
+			compressed, err := out.Storage.Get(&benchtop.RowLoc{
+				Section: secId,
+				Offset:  off32,
+				Size:    sz32,
+			})
+			if err != nil {
+				lastErr = err
+				time.Sleep(10 * time.Millisecond)
+				continue
+			}
+
+			blockData, err = block.DecompressBlock(compressed)
+			if err == nil {
+				return blockData, nil
+			}
+			lastErr = err
+			time.Sleep(20 * time.Millisecond)
 		}
 
-		compressed, err := out.Storage.Get(loc)
-		if err != nil {
-			return nil, err
-		}
-		return block.DecompressBlock(compressed)
+		return nil, fmt.Errorf("decompress failed for section %d offset %d size %d after retries: %w", sec, off, sz, lastErr)
 	}
 
 	for i, col := range columns {

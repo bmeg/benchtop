@@ -30,6 +30,10 @@ func (b *Block) Count() int {
 	return len(b.Rows)
 }
 
+const (
+	ZSTD_MAGIC = 0xFD2FB528
+)
+
 // Serialize packs the block into bytes and compresses it.
 // Format: [Count uint16][Offsets uint32...][Data...]
 func (b *Block) Serialize(pool *sync.Pool) ([]byte, error) {
@@ -66,17 +70,45 @@ func (b *Block) Serialize(pool *sync.Pool) ([]byte, error) {
 	}
 
 	// Compress
-	cBuf := pool.Get().([]byte)
-	defer pool.Put(cBuf[:0])
+	cBufObj := pool.Get()
+	var cBuf []byte
+	if cBufObj != nil {
+		cBuf = cBufObj.([]byte)
+	}
 
+	// zstd.Compress might return a new slice if cBuf is too small
 	compressed, err := zstd.Compress(cBuf[:0], rawBuf)
 	if err != nil {
+		if cBuf != nil {
+			pool.Put(cBuf[:0])
+		}
 		return nil, fmt.Errorf("compression failed: %w", err)
 	}
 
-	// Make a copy since buffer is reused
+	// Verification: Zstd magic number should be present
+	if len(compressed) >= 4 {
+		magic := binary.LittleEndian.Uint32(compressed[0:4])
+		if magic != ZSTD_MAGIC {
+			if cBuf != nil {
+				pool.Put(cBuf[:0])
+			}
+			return nil, fmt.Errorf("zstd compression produced invalid magic: %08x (expected %08x)", magic, ZSTD_MAGIC)
+		}
+	} else if len(compressed) > 0 {
+		if cBuf != nil {
+			pool.Put(cBuf[:0])
+		}
+		return nil, fmt.Errorf("zstd compression produced too short output: %d bytes", len(compressed))
+	}
+
+	// Make a copy since buffer is reused or might be part of pool buffer
 	out := make([]byte, len(compressed))
 	copy(out, compressed)
+
+	if cBuf != nil {
+		pool.Put(cBuf[:0])
+	}
+
 	return out, nil
 }
 
@@ -178,7 +210,11 @@ func DecompressBlock(compressed []byte) ([]byte, error) {
 	// We do not use the pool here because we want the result to persist in the cache.
 	decompressed, err := decompressCompat(nil, compressed)
 	if err != nil {
-		return nil, fmt.Errorf("decompress failed: %w", err)
+		hexStr := ""
+		for i := 0; i < len(compressed) && i < 32; i++ {
+			hexStr += fmt.Sprintf("%02x ", compressed[i])
+		}
+		return nil, fmt.Errorf("decompress failed (len=%d header=[%s]): %w", len(compressed), hexStr, err)
 	}
 	return decompressed, nil
 }

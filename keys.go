@@ -9,7 +9,7 @@ import (
 )
 
 const (
-	ROW_HSIZE        uint32 = 8 // Header size: 8-byte next offset + 4-byte size
+	ROW_HSIZE        uint32 = 8 // Header size: 4-byte next offset + 4-byte size
 	ROW_OFFSET_HSIZE uint32 = 4 // Offset part of header
 )
 
@@ -36,49 +36,88 @@ var RFieldPrefix = []byte{'R'}
 // The '0x1F' invisible character unit seperator not supposed to appear in ASCII text
 var FieldSep = []byte{0x1F}
 
-// builds a RFieldKey in the format "R 0x1F label 0x1F field 0x1F rowId"
-func RFieldKey(label, field, rowID string) []byte {
+// builds a RFieldKey in the format "R | TableID | field | rowId"
+func RFieldKey(tableID uint16, field, rowID string) []byte {
+	idBytes := make([]byte, 2)
+	binary.LittleEndian.PutUint16(idBytes, tableID)
 	return bytes.Join([][]byte{
 		RFieldPrefix,
-		[]byte(label),
+		idBytes,
 		[]byte(field),
 		[]byte(rowID),
 	}, FieldSep)
 }
 
-func FieldKey(field string, label string, value any, rowID []byte) []byte {
+// System Metadata
+// key: S
+var SystemMetaPrefix = byte('S')
+
+// MaxTableIDKey stores the global counter for Table IDs
+var MaxTableIDKey = []byte{SystemMetaPrefix, 'I'}
+
+func FieldKey(field string, tableID uint16, value any, rowID []byte) []byte {
 	/* creates a full field key for optimizing the beginning of a query */
 	valueBytes, err := sonic.ConfigFastest.Marshal(value)
 	if err != nil {
 		log.Infoln("FieldKey Marshal Err: ", err)
 	}
+	idBytes := make([]byte, 2)
+	binary.LittleEndian.PutUint16(idBytes, tableID)
+	// NEW ORDER: F | field | value | tableID | rowID
 	return bytes.Join(
 		[][]byte{
 			FieldPrefix,   // Static prefix
-			[]byte(field), // table field
-			[]byte(label), // label
+			[]byte(field), // field name
 			valueBytes,    // JSON-encoded value
+			idBytes,       // table ID
 			rowID,
 		},
 		FieldSep,
 	)
 }
 
-func FieldKeyParse(fieldKey []byte) (field, label string, value any, rowID []byte) {
+func FieldKeyParse(fieldKey []byte) (field string, tableID uint16, value any, rowID []byte) {
 	parts := bytes.Split(fieldKey, FieldSep)
-	err := sonic.ConfigFastest.Unmarshal(parts[3], &value)
+	if len(parts) < 5 {
+		return "", 0, nil, nil
+	}
+	// With the new order, value is parts[2], tableID is parts[3], rowID is parts[len-1]
+	err := sonic.ConfigFastest.Unmarshal(parts[2], &value)
 	if err != nil {
 		log.Infoln("FieldKey Unmarshal Err: ", err)
 	}
-	return string(parts[1]), string(parts[2]), value, parts[4]
+	tid := binary.LittleEndian.Uint16(parts[3])
+	rid := parts[len(parts)-1]
+	return string(parts[1]), tid, value, rid
 }
 
-func FieldLabelKey(field, label string) []byte {
+// FieldValueKey returns a prefix for global seek of a specific field value across all tables
+func FieldValueKey(field string, value any) []byte {
+	valueBytes, err := sonic.ConfigFastest.Marshal(value)
+	if err != nil {
+		log.Infoln("FieldValueKey Marshal Err: ", err)
+		return nil
+	}
+	return bytes.Join(
+		[][]byte{
+			FieldPrefix,
+			[]byte(field),
+			valueBytes,
+		},
+		FieldSep,
+	)
+}
+
+func FieldLabelKey(field string, tableID uint16) []byte {
+	idBytes := make([]byte, 2)
+	binary.LittleEndian.PutUint16(idBytes, tableID)
+	// NOTE: This can no longer be used as a simple Prefix for DeletePrefix if value is in the middle.
+	// But it is still used for individual key construction in some legacy paths.
 	return bytes.Join(
 		[][]byte{
 			FieldPrefix,   // Static prefix
 			[]byte(field), // table field
-			[]byte(label), // label
+			idBytes,       // table ID (Legacy order compatibility where needed, though primary uses FieldKey)
 		},
 		FieldSep,
 	)
@@ -145,12 +184,20 @@ func DecodeRowLoc(v []byte) *RowLoc {
 	if len(v) < 12 {
 		return nil
 	}
+
 	loc := &RowLoc{
 		TableId: binary.LittleEndian.Uint16(v[0:]),
 		Section: binary.LittleEndian.Uint16(v[2:]),
 		Offset:  binary.LittleEndian.Uint32(v[4:]),
 		Size:    binary.LittleEndian.Uint32(v[8:]),
 	}
+
+	// Data that is all zeros is considered invalid (not found/legacy)
+	// Especially if TableId and Section are both 0, it's likely uninitialized.
+	if loc.TableId == 0 && loc.Section == 0 && loc.Offset == 0 && loc.Size == 0 {
+		return nil
+	}
+
 	if len(v) >= 14 {
 		loc.Index = binary.LittleEndian.Uint16(v[12:])
 	}

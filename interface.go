@@ -17,23 +17,10 @@ type ColumnDef struct {
 	// Type FieldType `json:"type"` Remove this for now since not using bson anymore
 }
 
-/*
-	 Keep this code as a reminder for what the table field type architecture when bson was used
-		 type FieldType bsontype.Type
-
-		 const (
-			Double      FieldType = FieldType(bson.TypeDouble)
-			Int64       FieldType = FieldType(bson.TypeInt64)
-			String      FieldType = FieldType(bson.TypeString)
-			Bytes       FieldType = FieldType(bson.TypeBinary)
-			VectorArray FieldType = FieldType(bson.TypeArray)
-		 )
-*/
-
 type Row struct {
-	Id        []byte
-	TableName string
-	Data      map[string]any
+	Id      []byte
+	TableID uint16
+	Data    map[string]any
 }
 
 type Index struct {
@@ -64,17 +51,23 @@ type RowFilter interface {
 
 type TableDriver interface {
 	New(name string, columns []ColumnDef) (TableStore, error)
-	Get(name string) (TableStore, error)
-	ListTableKeys(tableId uint16) (chan Index, error)
+	Get(tableID uint16) (TableStore, error)
+	Delete(tableID uint16) error
+	Close()
+	InvalidateLoc(tableId uint16, rowId string)
+	BulkLoad(tableID uint16, rows chan *Row) error
+
+	// Discovery and Metadata
+	LookupTableID(name string) (uint16, error)
+	ListTableIDs() []uint16
+	GetTableInfo(tableID uint16) (*TableInfo, error)
+
 	GetAllColNames() chan string
 	GetLabels(edges bool, removePrefix bool) chan string
 	RowIdsByHas(field string, value any, op query.Condition) chan Index
-	RowIdsByLabelFieldValue(label string, field string, value any, op query.Condition) chan Index
+	RowIdsByTableFieldValue(tableID uint16, field string, value any, op query.Condition) chan Index
 	List() []string
-	Delete(name string) error
-	Close()
-	BulkLoad(name string, rows chan Row) error
-	GetKV() any // Returns the underlying KV store (PebbleKV or BoltDB wrapper)
+	GetKV() any // Returns the underlying KV store
 }
 
 type TableStore interface {
@@ -84,7 +77,7 @@ type TableStore interface {
 	AddRows(elems []Row) ([]*RowLoc, error)
 	GetRow(loc *RowLoc) (map[string]any, error)
 	GetRowLoc(id string) (*RowLoc, error)
-	GetRows(locs []*RowLoc, section uint16) ([]map[string]any, []error)
+	GetRows(locs []*RowLoc) ([]map[string]any, []error)
 	DeleteRow(loc *RowLoc, id []byte) error
 	MarkDeleteTable(loc *RowLoc) error
 
@@ -103,12 +96,11 @@ type FieldInfo struct {
 	Field string
 }
 
-// FieldDriver exposes field-index lifecycle operations that some callers
-// (such as grip) require beyond the core TableDriver surface.
+// FieldDriver exposes field-index lifecycle operations.
 type FieldDriver interface {
-	AddField(label, field string) error
-	RemoveField(label, field string) error
+	AddField(tableID uint16, field string) error
+	RemoveField(tableID uint16, field string) error
 	ListFields() []FieldInfo
-	DeleteRowField(label, field, rowID string) error
-	GetIDsForLabel(label string) chan string
+	DeleteRowField(tableID uint16, field, rowID string) error
+	GetIDsForTable(tableID uint16) chan string
 }

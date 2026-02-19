@@ -2,6 +2,7 @@ package table
 
 import (
 	"context" // Added
+	"encoding/binary"
 	"fmt"
 	"runtime" // Added
 	"strconv"
@@ -17,9 +18,10 @@ import (
 )
 
 // Helper for cache keys
-func makeCacheKey(section, offset, size uint32) string {
-	// Include size to prevent collision if offsets realign but size changes (unlikely for immutable blocks but good safety)
-	return fmt.Sprintf("%d:%d:%d", section, offset, size)
+func makeCacheKey(tableId, section, offset, size uint32) string {
+	// Include tableId and size to prevent collision between blocks from different tables
+	// that happen to use the same Section ID and Offset.
+	return fmt.Sprintf("%d:%d:%d:%d", tableId, section, offset, size)
 }
 
 type JSONTable struct {
@@ -87,7 +89,7 @@ func (b *JSONTable) AddRows(elems []benchtop.Row) ([]*benchtop.RowLoc, error) {
 		rows       []indexedRow
 	}
 
-	const BATCH_SIZE = 16
+	const BATCH_SIZE = 1
 
 	// 2. Create blocks per partition
 	for pId, rows := range byPartition {
@@ -107,7 +109,10 @@ func (b *JSONTable) AddRows(elems []benchtop.Row) ([]*benchtop.RowLoc, error) {
 				if err != nil {
 					return nil, fmt.Errorf("marshal failed: %w", err)
 				}
-				block.Add(payload)
+				// Copy payload to avoid sonic buffer reuse
+				rowCopy := make([]byte, len(payload))
+				copy(rowCopy, payload)
+				block.Add(rowCopy)
 			}
 
 			compressed, err := block.Serialize(&b.BufferPool)
@@ -167,9 +172,12 @@ func (b *JSONTable) GetRowLoc(id string) (*benchtop.RowLoc, error) {
 }
 
 func (b *JSONTable) GetRow(loc *benchtop.RowLoc) (map[string]any, error) {
-	cacheKey := makeCacheKey(uint32(loc.Section), loc.Offset, loc.Size)
+	if loc.TableId != b.TableId {
+		return nil, fmt.Errorf("table ID mismatch: loc has %d, table has %d (stale index?)", loc.TableId, b.TableId)
+	}
+	cacheKey := makeCacheKey(uint32(b.TableId), uint32(loc.Section), loc.Offset, loc.Size)
 
-	// Use Cache with Loader (handles de-dupe / singleflight)
+	// Use Cache with Loader
 	decompressed, err := b.BlockCache.Get(context.Background(), cacheKey, b.BlockLoader)
 	if err != nil {
 		return nil, err
@@ -191,9 +199,9 @@ func (b *JSONTable) GetRow(loc *benchtop.RowLoc) (map[string]any, error) {
 	return m.Data, nil
 }
 
-func (b *JSONTable) GetRows(locs []*benchtop.RowLoc, sectionID uint16) ([]map[string]any, []error) {
+func (b *JSONTable) GetRows(locs []*benchtop.RowLoc) ([]map[string]any, []error) {
 	results := make([]map[string]any, len(locs))
-	errors := make([]error, len(locs))
+	errs := make([]error, len(locs))
 
 	numWorkers := runtime.NumCPU()
 	if numWorkers > 8 {
@@ -217,25 +225,32 @@ func (b *JSONTable) GetRows(locs []*benchtop.RowLoc, sectionID uint16) ([]map[st
 		go func(s, e int) {
 			defer wg.Done()
 			for j := s; j < e; j++ {
-				// Get Block via Cache (De-duping happens here via Otter)
-				cacheKey := makeCacheKey(uint32(locs[j].Section), locs[j].Offset, locs[j].Size)
+				loc := locs[j]
+				if loc.TableId != b.TableId {
+					log.Errorf("Table lineage mismatch table=%s currentTableId=%d indexLocTableId=%d row=%d/%d: stale index entry?", b.Name, b.TableId, loc.TableId, j, len(locs))
+					errs[j] = fmt.Errorf("table ID mismatch: loc has %d, table has %d (stale index?)", loc.TableId, b.TableId)
+					continue
+				}
+				cacheKey := makeCacheKey(uint32(b.TableId), uint32(loc.Section), loc.Offset, loc.Size)
 				decompressed, err := b.BlockCache.Get(context.Background(), cacheKey, b.BlockLoader)
-
 				if err != nil {
-					errors[j] = err
+					log.Errorf("GetRows(%s): block load failed section=%d offset=%d size=%d error=%v", b.Name, loc.Section, loc.Offset, loc.Size, err)
+					errs[j] = err
 					continue
 				}
 
 				// Extract Row
-				rowBytes, err := block.ExtractRowFromDecompressed(decompressed, locs[j].Index)
+				rowBytes, err := block.ExtractRowFromDecompressed(decompressed, loc.Index)
 				if err != nil {
-					errors[j] = err
+					log.Errorf("GetRows(%s): extract failed index=%d count=%d error=%v", b.Name, loc.Index, binary.LittleEndian.Uint16(decompressed[0:]), err)
+					errs[j] = err
 					continue
 				}
 
 				var m RowData
 				if err := sonic.Unmarshal(rowBytes, &m); err != nil {
-					errors[j] = err
+					log.Errorf("GetRows(%s): unmarshal failed index=%d count=%d error=%v", b.Name, loc.Index, binary.LittleEndian.Uint16(decompressed[0:]), err)
+					errs[j] = err
 					continue
 				}
 
@@ -248,7 +263,7 @@ func (b *JSONTable) GetRows(locs []*benchtop.RowLoc, sectionID uint16) ([]map[st
 	}
 
 	wg.Wait()
-	return results, errors
+	return results, errs
 }
 
 func (b *JSONTable) DeleteRow(loc *benchtop.RowLoc, id []byte) error {
@@ -334,9 +349,8 @@ func (b *JSONTable) ScanId(filter benchtop.RowFilter) chan string {
 	out := make(chan string, 100)
 	go func() {
 		defer close(out)
-		for res := range b.ScanFull(filter) {
-			// ID is in DataMap["_id"] or can be extracted from Data
-			if id, ok := res.DataMap["_id"].(string); ok {
+		for row := range b.ScanDoc(filter) {
+			if id, ok := row["_id"].(string); ok {
 				out <- id
 			}
 		}
@@ -354,6 +368,7 @@ func (b *JSONTable) ScanFull(filter benchtop.RowFilter) chan benchtop.RowLocData
 			// rowLocData.Data is the compressed block of rows
 			var rowIndex uint16 = 0
 			err := block.IterateBlock(rowLocData.Data, &b.BufferPool, func(rowBytes []byte) bool {
+				// Filter logic
 				if filter != nil && !filter.IsNoOp() {
 					if !filter.Matches(rowBytes, b.Name) {
 						rowIndex++
@@ -372,9 +387,10 @@ func (b *JSONTable) ScanFull(filter benchtop.RowFilter) chan benchtop.RowLocData
 				}
 				m.Data["_id"] = m.Key
 
-				// Create a copy of the location and set the correct row index
+				// Create a copy of the location and set the correct row index and TableId
 				loc := *rowLocData.Loc
 				loc.Index = rowIndex
+				loc.TableId = b.TableId
 
 				out <- benchtop.RowLocData{
 					Data:    rowBytes,

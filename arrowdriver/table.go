@@ -1639,7 +1639,7 @@ func (t *ArrowTable) GetRow(loc *benchtop.RowLoc) (map[string]any, error) {
 	return rows[int(loc.Offset)], nil
 }
 
-func (t *ArrowTable) GetRows(locs []*benchtop.RowLoc, section uint16) ([]map[string]any, []error) {
+func (t *ArrowTable) GetRows(locs []*benchtop.RowLoc) ([]map[string]any, []error) {
 	results := make([]map[string]any, len(locs))
 	errs := make([]error, len(locs))
 

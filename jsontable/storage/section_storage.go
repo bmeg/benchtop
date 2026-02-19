@@ -2,13 +2,11 @@ package storage
 
 import (
 	"bytes"
-	"cmp"
 	"encoding/binary"
 	"fmt"
 	"hash/fnv"
 	"os"
 	"path/filepath"
-	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -21,9 +19,7 @@ import (
 )
 
 const (
-	PART_FILE_SUFFIX    = ".partition"
-	SECTION_FILE_SUFFIX = ".section"
-	SECTION_ID_MULT     = 256
+	PART_FILE_SUFFIX = ".partition"
 )
 
 // SectionStorage implements RowStorage using memory-mapped .section files.
@@ -37,6 +33,7 @@ type SectionStorage struct {
 	sections       map[uint16]*section.Section // All active or closed sections
 	activeSections map[uint8]*section.Section  // Current active section for each partition
 	partitionMap   map[uint8][]uint16          // List of section IDs per partition
+	maxSecId       uint16                      // Highest section ID allocated
 
 	lock        sync.RWMutex // Protects map access
 	sectionLock sync.Mutex   // Protects section creation
@@ -153,38 +150,36 @@ func (s *SectionStorage) loadExisting() error {
 
 	type secInfo struct {
 		pId        uint8
+		secId      uint16
 		localSecId int
 		fileName   string
 	}
 	var secList []secInfo
 
 	for _, f := range files {
-		if strings.HasPrefix(f.Name(), base+PART_FILE_SUFFIX) {
-			parts := strings.Split(strings.TrimPrefix(f.Name(), base+PART_FILE_SUFFIX), SECTION_FILE_SUFFIX)
-			if len(parts) != 2 {
-				continue
+		if strings.Contains(f.Name(), ".id") && strings.Contains(f.Name(), ".part") {
+			// New format: data.id[ID].part[P]
+			// Format: basePath.id[ID].part[P]
+			suffix := strings.TrimPrefix(f.Name(), base+".id")
+			parts := strings.Split(suffix, ".part")
+			if len(parts) == 2 {
+				secId, _ := strconv.Atoi(parts[0])
+				pId, _ := strconv.Atoi(parts[1])
+				secList = append(secList, secInfo{
+					pId:        uint8(pId),
+					secId:      uint16(secId),
+					localSecId: -1, // Not used for new format
+					fileName:   f.Name(),
+				})
 			}
-
-			pId, err := strconv.Atoi(parts[0])
-			if err != nil {
-				continue
-			}
-
-			localSecId, err := strconv.Atoi(parts[1])
-			if err != nil {
-				continue
-			}
-
-			secList = append(secList, secInfo{
-				pId:        uint8(pId),
-				localSecId: localSecId,
-				fileName:   f.Name(),
-			})
 		}
 	}
 
 	for _, si := range secList {
-		secId := uint16(si.pId)*SECTION_ID_MULT + uint16(si.localSecId)
+		secId := si.secId
+		if secId > s.maxSecId {
+			s.maxSecId = secId
+		}
 		secPath := filepath.Join(dir, si.fileName)
 
 		handle, err := os.OpenFile(secPath, os.O_RDWR, 0666)
@@ -254,9 +249,10 @@ func (s *SectionStorage) loadExisting() error {
 			var maxId uint16 = 0
 			var maxSec *section.Section
 			for _, sid := range secIds {
+				sec := s.sections[sid]
 				if sid >= maxId {
 					maxId = sid
-					maxSec = s.sections[sid]
+					maxSec = sec
 				}
 			}
 			s.activeSections[pId] = maxSec
@@ -314,139 +310,110 @@ func (s *SectionStorage) Get(loc *benchtop.RowLoc) ([]byte, error) {
 		return nil, fmt.Errorf("section %d not found", loc.Section)
 	}
 
+	sec.Lock.RLock()
+	defer sec.Lock.RUnlock()
+
 	if len(sec.MMap) == 0 {
-		return nil, fmt.Errorf("section %d empty/unmapped", loc.Section)
+		return nil, fmt.Errorf("section %d is empty", loc.Section)
 	}
 
 	start := loc.Offset + benchtop.ROW_HSIZE
 	end := start + loc.Size
 	if end > uint32(len(sec.MMap)) {
-		return nil, fmt.Errorf("out of bounds")
+		return nil, fmt.Errorf("out of bounds for section %d", loc.Section)
 	}
 
-	return sec.MMap[start:end], nil
+	// Copy data to avoid reading from unmapped memory after lock release
+	data := make([]byte, loc.Size)
+	copy(data, sec.MMap[start:end])
+	return data, nil
 }
 
 func (s *SectionStorage) GetBatch(locs []*benchtop.RowLoc) ([][]byte, []error) {
+	// Fallback to individual gets for simplicity and correctness with collisions
 	results := make([][]byte, len(locs))
 	errors := make([]error, len(locs))
 
-	// Group by section and track original indices
-	type locRef struct {
-		idx uint32
-		loc *benchtop.RowLoc
-	}
-	bySection := make(map[uint16][]locRef)
 	for i, loc := range locs {
-		bySection[loc.Section] = append(bySection[loc.Section], locRef{uint32(i), loc})
-	}
-
-	for sectionID, refs := range bySection {
-		s.lock.RLock()
-		sec, exists := s.sections[sectionID]
-		s.lock.RUnlock()
-
-		if !exists || len(sec.MMap) == 0 {
-			for _, ref := range refs {
-				errors[ref.idx] = fmt.Errorf("section %d not found or unmapped", sectionID)
-			}
-			continue
-		}
-
-		// SORT BY OFFSET: This is the critical optimization to ensure linear mmap access
-		slices.SortFunc(refs, func(a, b locRef) int {
-			return cmp.Compare(a.loc.Offset, b.loc.Offset)
-		})
-
-		secLen := uint32(len(sec.MMap))
-		for _, ref := range refs {
-			start := ref.loc.Offset + benchtop.ROW_HSIZE
-			end := start + ref.loc.Size
-			if end > secLen {
-				errors[ref.idx] = fmt.Errorf("out of bounds in section %d", sectionID)
-				continue
-			}
-			// Linear access of the underlying mmap
-			results[ref.idx] = sec.MMap[start:end]
+		res, err := s.Get(loc)
+		if err != nil {
+			errors[i] = err
+		} else {
+			results[i] = res
 		}
 	}
-
 	return results, errors
 }
 
 func (s *SectionStorage) ScanFull(concurrency int) chan benchtop.RowLocData {
-	outChan := make(chan benchtop.RowLocData, 100*len(s.sections))
+	// Scan all sections directly from s.sections map to ensure we visit every file exactly once,
+	// regardless of partition collisions.
+	s.lock.RLock()
+	var allSecs []*section.Section
+	for _, sec := range s.sections {
+		allSecs = append(allSecs, sec)
+	}
+	s.lock.RUnlock()
+
+	outChan := make(chan benchtop.RowLocData, 100*len(allSecs))
 	if concurrency <= 0 {
 		concurrency = 1
 	}
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, concurrency)
 
-	s.lock.RLock()
-	maxPart := s.numPartitions
-	s.lock.RUnlock()
-
 	go func() {
-		for pId := uint8(0); pId < uint8(maxPart); pId++ {
-			s.lock.RLock()
-			secIds := s.partitionMap[pId]
-			currentSecIds := make([]uint16, len(secIds))
-			copy(currentSecIds, secIds)
-			s.lock.RUnlock()
+		for _, sec := range allSecs {
+			if len(sec.MMap) == 0 {
+				continue
+			}
 
-			for _, secId := range currentSecIds {
-				s.lock.RLock()
-				sec, exists := s.sections[secId]
-				s.lock.RUnlock()
+			wg.Add(1)
+			go func(sec *section.Section) {
+				sem <- struct{}{}
+				defer func() { <-sem; wg.Done() }()
 
-				if !exists || len(sec.MMap) == 0 {
-					continue
-				}
+				sec.Lock.RLock()
+				defer sec.Lock.RUnlock()
 
-				wg.Add(1)
-				go func(sec *section.Section) {
-					sem <- struct{}{}
-					defer func() { <-sem; wg.Done() }()
+				m := sec.MMap
+				var offset uint32 = 0
+				for offset+benchtop.ROW_HSIZE <= uint32(len(m)) {
+					header := m[offset : offset+benchtop.ROW_HSIZE]
+					nextOffset := binary.LittleEndian.Uint32(header[:benchtop.ROW_OFFSET_HSIZE])
+					bSize := binary.LittleEndian.Uint32(header[benchtop.ROW_OFFSET_HSIZE:benchtop.ROW_HSIZE])
 
-					m := sec.MMap
-					var offset uint32 = 0
-					for offset+benchtop.ROW_HSIZE <= uint32(len(m)) {
-						header := m[offset : offset+benchtop.ROW_HSIZE]
-						nextOffset := binary.LittleEndian.Uint32(header[:benchtop.ROW_OFFSET_HSIZE])
-						bSize := binary.LittleEndian.Uint32(header[benchtop.ROW_OFFSET_HSIZE:benchtop.ROW_HSIZE])
-
-						if bSize == 0 {
-							if nextOffset == 0 || nextOffset <= offset {
-								break
-							}
-							offset = nextOffset
-							continue
-						}
-
-						jsonStart := offset + benchtop.ROW_HSIZE
-						jsonEnd := jsonStart + bSize
-						if jsonEnd > uint32(len(m)) {
-							break
-						}
-
-						rowData := make([]byte, bSize)
-						copy(rowData, m[jsonStart:jsonEnd])
-						outChan <- benchtop.RowLocData{
-							Data: rowData,
-							Loc: &benchtop.RowLoc{
-								Section: sec.ID,
-								Offset:  offset,
-								Size:    bSize,
-							},
-						}
-
+					if bSize == 0 {
 						if nextOffset == 0 || nextOffset <= offset {
 							break
 						}
 						offset = nextOffset
+						continue
 					}
-				}(sec)
-			}
+
+					jsonStart := offset + benchtop.ROW_HSIZE
+					jsonEnd := jsonStart + bSize
+					if jsonEnd > uint32(len(m)) {
+						break
+					}
+
+					rowData := make([]byte, bSize)
+					copy(rowData, m[jsonStart:jsonEnd])
+					outChan <- benchtop.RowLocData{
+						Data: rowData,
+						Loc: &benchtop.RowLoc{
+							Section: sec.ID,
+							Offset:  offset,
+							Size:    bSize,
+						},
+					}
+
+					if nextOffset == 0 || nextOffset <= offset {
+						break
+					}
+					offset = nextOffset
+				}
+			}(sec)
 		}
 		wg.Wait()
 		close(outChan)
@@ -455,7 +422,7 @@ func (s *SectionStorage) ScanFull(concurrency int) chan benchtop.RowLocData {
 }
 
 func (s *SectionStorage) Scan(concurrency int) chan []byte {
-	out := make(chan []byte, 100*len(s.sections))
+	out := make(chan []byte, 100)
 	go func() {
 		defer close(out)
 		for res := range s.ScanFull(concurrency) {
@@ -474,19 +441,23 @@ func (s *SectionStorage) MarkDelete(loc *benchtop.RowLoc) error {
 		return fmt.Errorf("section %d not found", loc.Section)
 	}
 
+	sec.Lock.RLock()
+	if len(sec.MMap) == 0 || loc.Offset+benchtop.ROW_HSIZE > uint32(len(sec.MMap)) {
+		sec.Lock.RUnlock()
+		return fmt.Errorf("invalid offset or empty section")
+	}
+	sec.Lock.RUnlock()
+
 	file := <-sec.FilePool
 	defer func() { sec.FilePool <- file }()
-
 	_, err := file.WriteAt(bytes.Repeat([]byte{0x00}, 4), int64(loc.Offset+benchtop.ROW_OFFSET_HSIZE))
-	if err != nil {
-		return fmt.Errorf("writeAt failed: %w", err)
+	if err == nil {
+		sec.Lock.Lock()
+		sec.DeletedRows++
+		sec.Lock.Unlock()
+		return nil
 	}
-
-	sec.Lock.Lock()
-	sec.DeletedRows++
-	sec.LiveBytes -= loc.Size
-	sec.Lock.Unlock()
-	return nil
+	return err
 }
 
 func (s *SectionStorage) Sync() error {
@@ -510,6 +481,11 @@ func (s *SectionStorage) Sync() error {
 }
 
 func (s *SectionStorage) Close() error {
+	// Sync before closing to ensure flush
+	if err := s.Sync(); err != nil {
+		log.Errorf("Failed to sync on close: %v", err)
+	}
+
 	s.lock.Lock()
 	defer s.lock.Unlock()
 
@@ -590,11 +566,12 @@ func (s *SectionStorage) createNewSection(partitionId uint8) (*section.Section, 
 func (s *SectionStorage) createNewSectionLocked(partitionId uint8) (*section.Section, error) {
 	// Critical: Update shared map under lock
 	s.lock.Lock()
-	localSecId := len(s.partitionMap[partitionId])
-	secId := uint16(partitionId)*uint16(SECTION_ID_MULT) + uint16(localSecId)
+	s.maxSecId++
+	secId := s.maxSecId
 	s.lock.Unlock()
 
-	path := fmt.Sprintf("%s%s%d.section%d", s.fileName, PART_FILE_SUFFIX, partitionId, localSecId)
+	// Use new naming format to avoid collisions and support unique IDs
+	path := fmt.Sprintf("%s.id%d.part%d", s.fileName, secId, partitionId)
 
 	handle, err := os.Create(path)
 	if err != nil {

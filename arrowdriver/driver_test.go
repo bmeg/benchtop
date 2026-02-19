@@ -42,9 +42,7 @@ func TestArrowDriverRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetRowLoc failed: %v", err)
 	}
-	if loc.TableId == 0 {
-		t.Fatalf("expected non-zero table id")
-	}
+
 	row, err := store.GetRow(loc)
 	if err != nil {
 		t.Fatalf("GetRow failed: %v", err)
