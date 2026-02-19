@@ -84,42 +84,44 @@ func (dr *JSONDriver) getTableInfo(name string) (benchtop.TableInfo, error) {
 	log.Debugf("getTableInfo: searching for %s", name)
 	nkey := benchtop.NewTableKey([]byte(name))
 	value, closer, err := dr.Pkv.Get(nkey)
-	if err != nil {
-		log.Debugf("getTableInfo: direct lookup failed for %s: %v", name, err)
-		if err == pebble.ErrNotFound {
-			// Fallback: Scan headers to see if we can find it
-			prefix := []byte{benchtop.TablePrefix}
-			var found *benchtop.TableInfo
-			_ = dr.Pkv.View(func(it *pebblebulk.PebbleIterator) error {
-				for it.Seek(prefix); it.Valid() && bytes.HasPrefix(it.Key(), prefix); it.Next() {
-					val, err := it.Value()
-					if err != nil {
-						continue
-					}
-					var tinfo benchtop.TableInfo
-					if err := sonic.ConfigFastest.Unmarshal(val, &tinfo); err == nil {
-						if strings.EqualFold(tinfo.Name, name) {
-							found = &tinfo
-							return nil
-						}
-					}
+	if err == nil {
+		defer closer.Close()
+		var tinfo benchtop.TableInfo
+		if err := sonic.ConfigFastest.Unmarshal(value, &tinfo); err == nil {
+			return tinfo, nil
+		}
+		log.Errorf("getTableInfo: failed to unmarshal %s: %v", name, err)
+	}
+
+	// Direct lookup failed or corrupt, try case-insensitive scan fallback
+	log.Debugf("getTableInfo: direct lookup failed for %s, trying scan fallback", name)
+	prefix := []byte{benchtop.TablePrefix}
+	var found *benchtop.TableInfo
+	_ = dr.Pkv.View(func(it *pebblebulk.PebbleIterator) error {
+		for it.Seek(prefix); it.Valid() && bytes.HasPrefix(it.Key(), prefix); it.Next() {
+			val, err := it.Value()
+			if err != nil {
+				continue
+			}
+			var tinfo benchtop.TableInfo
+			if err := sonic.ConfigFastest.Unmarshal(val, &tinfo); err == nil {
+				if strings.EqualFold(tinfo.Name, name) {
+					found = &tinfo
+					return nil
 				}
-				return nil
-			})
-			if found != nil {
-				log.Warningf("Found table %s using scan fallback, primary lookup failed", name)
-				return *found, nil
 			}
 		}
+		return nil
+	})
+	if found != nil {
+		log.Warningf("Found table %s using scan fallback, primary lookup failed (possible case mismatch)", name)
+		return *found, nil
+	}
+
+	if err != nil {
 		return benchtop.TableInfo{}, err
 	}
-	defer closer.Close()
-	var tinfo benchtop.TableInfo
-	if err := sonic.ConfigFastest.Unmarshal(value, &tinfo); err != nil {
-		log.Errorf("getTableInfo: failed to unmarshal %s: %v", name, err)
-		return benchtop.TableInfo{}, err
-	}
-	return tinfo, nil
+	return benchtop.TableInfo{}, pebble.ErrNotFound
 }
 
 func (dr *JSONDriver) AddTableEntryInfo(tx *pebblebulk.PebbleBulk, rowId []byte, rowLoc *benchtop.RowLoc) error {

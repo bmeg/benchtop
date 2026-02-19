@@ -203,3 +203,57 @@ func DecodeRowLoc(v []byte) *RowLoc {
 	}
 	return loc
 }
+
+// Integrated Helpers for Grids
+
+// EncodeVertexValue combines label and RowLoc into a single value
+func EncodeVertexValue(label string, loc *RowLoc) []byte {
+	lBytes := []byte(label)
+	out := make([]byte, len(lBytes)+1+14)
+	copy(out, lBytes)
+	out[len(lBytes)] = 0
+	if loc != nil {
+		copy(out[len(lBytes)+1:], EncodeRowLoc(loc))
+	}
+	return out
+}
+
+// DecodeVertexValue splits label and RowLoc from an integrated value
+func DecodeVertexValue(v []byte) (string, *RowLoc) {
+	idx := bytes.IndexByte(v, 0)
+	if idx < 0 {
+		return string(v), nil
+	}
+	label := string(v[:idx])
+	locBytes := v[idx+1:]
+	if len(locBytes) >= 12 {
+		return label, DecodeRowLoc(locBytes)
+	}
+	return label, nil
+}
+
+// EncodeEdgeValue combines label and RowLoc into a single value
+func EncodeEdgeValue(label string, loc *RowLoc) []byte {
+	lBytes := []byte(label)
+	out := make([]byte, len(lBytes)+1+14)
+	copy(out, lBytes)
+	out[len(lBytes)] = 0
+	if loc != nil {
+		copy(out[len(lBytes)+1:], EncodeRowLoc(loc))
+	}
+	return out
+}
+
+// DecodeEdgeValue splits label and RowLoc from an integrated edge value
+func DecodeEdgeValue(v []byte) (string, *RowLoc) {
+	idx := bytes.IndexByte(v, 0)
+	if idx < 0 {
+		return "", DecodeRowLoc(v)
+	}
+	label := string(v[:idx])
+	locBytes := v[idx+1:]
+	if len(locBytes) >= 12 {
+		return label, DecodeRowLoc(locBytes)
+	}
+	return label, nil
+}

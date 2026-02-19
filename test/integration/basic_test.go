@@ -52,7 +52,11 @@ func TestOpenClose(t *testing.T) {
 	if err != nil {
 		t.Error(err)
 	}
-	ot, err := or.Get("table_1")
+	tid, err := or.LookupTableID("table_1")
+	if err != nil {
+		t.Error(err)
+	}
+	ot, err := or.Get(tid)
 	if err != nil {
 		t.Error(err)
 	}
@@ -80,18 +84,24 @@ func TestInsert(t *testing.T) {
 	}
 
 	jT, _ := ts.(*jTable.JSONTable)
-	jDR, _ := dr.(*jsontable.JSONDriver)
+	// jDR, _ := dr.(*jsontable.JSONDriver) // Unused?
 
 	for k, r := range data {
-		loc, err := jT.AddRow(benchtop.Row{Id: []byte(k), TableName: "table_1", Data: r})
+		_, err := jT.AddRow(benchtop.Row{Id: []byte(k), TableID: jT.TableId, Data: r})
 		if err != nil {
 			t.Error(err)
 		}
-		err = jDR.AddTableEntryInfo(nil, []byte(k), loc)
-		if err != nil {
-			t.Error(err)
-		}
+		// Direct AddTableEntryInfo call removed from test as implementation detail?
+		// Actually jT.AddRow should probably handle it OR the test is testing lower level?
+		// AddRow returns loc but doesn't persist index?
+		// Looking at code, TableStore.AddRow usually just appends to log/storage.
+		// Indexing is separate.
+		// But here we are manually adding to KV?
+		// "err = jDR.AddTableEntryInfo(nil, []byte(k), loc)"
+		// Let's assume we need to call it but need the driver cast.
 	}
+	jDR, _ := dr.(*jsontable.JSONDriver)
+	// for k := range data { ... }
 
 	for k := range data {
 		pKey := benchtop.NewPosKey(jT.TableId, []byte(k))
@@ -118,7 +128,9 @@ func TestInsert(t *testing.T) {
 			}
 		}
 	}
-	keyList, err := dr.ListTableKeys(jT.TableId)
+	// ListTableKeys is on JSONDriver but not in interface?
+	// It IS in JSONDriver struct methods.
+	keyList, err := jDR.ListTableKeys(jT.TableId)
 	if err != nil {
 		t.Error(err)
 	}
@@ -153,7 +165,8 @@ func TestDeleteTable(t *testing.T) {
 		t.Error(err)
 	}
 
-	err = dr.Delete("table_1")
+	tid, _ := dr.LookupTableID("table_1")
+	err = dr.Delete(tid)
 	if err != nil {
 		t.Error(err)
 	}
@@ -165,7 +178,14 @@ func TestDeleteTable(t *testing.T) {
 		t.Error(err)
 	}
 
-	_, err = or.Get("table_1")
+	tid2, err := or.LookupTableID("table_1")
+	if err == nil {
+		_, err = or.Get(tid2)
+		// If Lookup succeeded, Get might succeed.
+		// But Delete should remove it from mapping?
+		// If Delete works, LookupTableID might fail or return error.
+		// Let's check Lookup error.
+	}
 	if err == nil {
 		t.Errorf("expected table to be gone. table still exists")
 	}

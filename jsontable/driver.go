@@ -178,8 +178,6 @@ func (dr *JSONDriver) New(name string, columns []benchtop.ColumnDef) (benchtop.T
 
 	dr.Tables[newId] = out
 	dr.nameToId[name] = newId
-	dr.Tables[newId] = out
-	dr.nameToId[name] = newId
 	dr.idToName[newId] = name
 
 	log.Debugf("Created table %s with ID %d", name, newId)

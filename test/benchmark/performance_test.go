@@ -46,9 +46,9 @@ func setupBenchmarkDB(b *testing.B) (*jsontable.JSONDriver, *jTable.JSONTable, s
 		key := []byte(fmt.Sprintf("key_%d", i))
 		val := fixtures.GenerateRandomBytes(ValueSize)
 		rows[i] = benchtop.Row{
-			Id:        key,
-			TableName: tableName,
-			Data:      map[string]any{"data": val, "id": string(key)},
+			Id:      key,
+			TableID: table.TableId,
+			Data:    map[string]any{"data": val, "id": string(key)},
 		}
 	}
 
@@ -140,7 +140,7 @@ func BenchmarkGetRowsBatch(b *testing.B) {
 		}
 		batchLocs := allLocs[start:end]
 
-		_, errs := table.GetRows(batchLocs, 0)
+		_, errs := table.GetRows(batchLocs)
 		for _, e := range errs {
 			if e != nil {
 				b.Fatal(e)
@@ -180,7 +180,7 @@ func BenchmarkGetRowsRandomBatch(b *testing.B) {
 			batchLocs[j] = allLocs[idx]
 		}
 
-		_, errs := table.GetRows(batchLocs, 0)
+		_, errs := table.GetRows(batchLocs)
 		for _, e := range errs {
 			if e != nil {
 				b.Fatal(e)

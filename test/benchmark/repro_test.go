@@ -32,6 +32,9 @@ func BenchmarkGripFullPipeline(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
+	// driver_test.go (arrow)
+	// tid, _ := drv2.LookupTableID("e_knows") // This line is commented out as drv2 is not defined
+	// t2, err = drv2.Get(tid) // This line is commented out as drv2 is not defined
 	defer driver.Close()
 	jDriver, _ := driver.(*jsontable.JSONDriver)
 
@@ -43,6 +46,15 @@ func BenchmarkGripFullPipeline(b *testing.B) {
 
 	b.ResetTimer()
 
+	// scale_test.go
+	// ch <- benchtop.Row{Id: []byte(k), TableID: tid, Data: v}
+	// Need to get tid first.
+	// But channel is consumed by BulkLoad.
+	// BulkLoad call is AFTER loop? No, concurrently?
+	// The snippet above shows BulkLoad called with channel.
+	// We need tableID inside loop?
+	// "go func() { ... ch <- Row... }"
+	// Pass tid to goroutine.
 	// 1. Client Stream (Input)
 	clientStream := make(chan *MockGraphElement, 100)
 
@@ -64,7 +76,7 @@ func BenchmarkGripFullPipeline(b *testing.B) {
 
 	// 3. Graph BulkAdd (reads elementStream, splits to insert/index streams)
 	insertStream := make(chan *MockGraphElement, 100)
-	indexStream := make(chan benchtop.Row, 100)
+	indexStream := make(chan *benchtop.Row, 100)
 	var graphWG sync.WaitGroup
 	graphWG.Add(2) // Two consumers for the split streams
 
@@ -75,11 +87,14 @@ func BenchmarkGripFullPipeline(b *testing.B) {
 		for elem := range elementStream {
 			insertStream <- elem
 			if elem.Vertex != nil {
-				indexStream <- benchtop.Row{
-					Id:        []byte(elem.Vertex.ID),
-					TableName: "v_" + elem.Vertex.Label,
-					Data:      elem.Vertex.Data,
+				tName := "v_" + elem.Vertex.Label
+				tid, _ := jDriver.LookupTableID(tName)
+				row := benchtop.Row{
+					Id:      []byte(elem.Vertex.ID),
+					TableID: tid,
+					Data:    elem.Vertex.Data,
 				}
+				indexStream <- &row
 			}
 		}
 	}()
@@ -92,14 +107,18 @@ func BenchmarkGripFullPipeline(b *testing.B) {
 	}()
 
 	// Consumer 2: Index (BulkLoad)
+	tid, _ := jDriver.LookupTableID(tableName)
 	go func() {
 		defer graphWG.Done()
-		_ = jDriver.BulkLoad(tableName, indexStream)
+		// scale_test.go
+		// tid, _ := jsonDriver.LookupTableID(Jsonname) // This line is commented out as jsonDriver and Jsonname are not defined
+		// err = jsonDriver.BulkLoad(tid, ch) // This line is commented out as jsonDriver and ch are not defined
+		_ = jDriver.BulkLoad(tid, indexStream)
 	}()
 
 	// Producer
 	for i := 0; i < b.N; i++ {
-		key := fmt.Sprintf("key_%d", i)
+		key := fmt.Sprintf("v%010d", i)
 		elem := &MockGraphElement{
 			Vertex: &MockVertex{
 				ID:    key,
