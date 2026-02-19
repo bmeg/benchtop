@@ -355,28 +355,9 @@ func (dr *JSONDriver) scanRowsByField(tableID uint16, field string, value any, o
 		if op == query.EQ {
 			// If tableID is 0, we can do a SINGLE seek across ALL tables thanks to the new index order
 			if tableID == 0 {
-				prefix := benchtop.FieldValueKey(field, value)
-				if prefix != nil {
-					prefix = append(prefix, benchtop.FieldSep...)
-					_ = dr.Pkv.View(func(it *pebblebulk.PebbleIterator) error {
-						for it.Seek(prefix); it.Valid() && bytes.HasPrefix(it.Key(), prefix); it.Next() {
-							val, err := it.Value()
-							if err != nil {
-								continue
-							}
-							loc := benchtop.DecodeRowLoc(val)
-							if loc == nil {
-								continue
-							}
-							_, _, _, rowID := benchtop.FieldKeyParse(it.Key())
-							out <- benchtop.Index{Key: rowID, Loc: loc}
-						}
-						return nil
-					})
-					return
-				}
+				dr.scanGlobalIndex(field, value, out)
+				return
 			}
-
 			// For specific tables, check if they are indexed
 			allIndexed := true
 			for _, tbl := range targetTables {
@@ -391,51 +372,92 @@ func (dr *JSONDriver) scanRowsByField(tableID uint16, field string, value any, o
 			}
 
 			if allIndexed {
-				_ = dr.Pkv.View(func(it *pebblebulk.PebbleIterator) error {
-					for _, tbl := range targetTables {
-						prefix := benchtop.FieldValueKey(field, value)
-						prefix = append(prefix, benchtop.FieldSep...)
-						idBytes := make([]byte, 2)
-						binary.LittleEndian.PutUint16(idBytes, tbl.TableId)
-						prefix = append(prefix, idBytes...)
-						prefix = append(prefix, benchtop.FieldSep...)
-
-						for it.Seek(prefix); it.Valid() && bytes.HasPrefix(it.Key(), prefix); it.Next() {
-							val, err := it.Value()
-							if err != nil {
-								continue
-							}
-							loc := benchtop.DecodeRowLoc(val)
-							if loc == nil {
-								continue
-							}
-							_, _, _, rowID := benchtop.FieldKeyParse(it.Key())
-							out <- benchtop.Index{Key: rowID, Loc: loc}
-						}
-					}
-					return nil
-				})
+				dr.scanTableIndex(targetTables, field, value, out)
 				return
 			}
 		}
 
 		// SLOW PATH: Sequential scan.
-		cond := &filters.FieldFilter{Field: field, Value: value, Operator: op}
-		for _, tbl := range targetTables {
-			for row := range tbl.ScanFull(nil) {
-				fieldVal := tpath.PathLookup(row.DataMap, field)
-				if !filters.ApplyFilterCondition(fieldVal, cond) {
-					continue
-				}
-				rowID, ok := row.DataMap["_id"].(string)
-				if !ok || rowID == "" {
-					continue
-				}
-				out <- benchtop.Index{Key: []byte(rowID), Loc: row.Loc}
-			}
-		}
+		dr.scanSlow(targetTables, field, value, op, out)
 	}()
 	return out
+}
+
+func (dr *JSONDriver) scanGlobalIndex(field string, value any, out chan<- benchtop.Index) {
+	prefix := benchtop.FieldValueKey(field, value)
+	if prefix == nil {
+		return
+	}
+	prefix = append(prefix, benchtop.FieldSep...)
+
+	_ = dr.Pkv.View(func(it *pebblebulk.PebbleIterator) error {
+		count := 0
+		for it.Seek(prefix); it.Valid() && bytes.HasPrefix(it.Key(), prefix); it.Next() {
+			val, err := it.Value()
+			if err != nil {
+				continue
+			}
+			loc := benchtop.DecodeRowLoc(val)
+			if loc == nil {
+				continue
+			}
+			_, _, _, rowID := benchtop.FieldKeyParse(it.Key())
+			safeID := make([]byte, len(rowID))
+			copy(safeID, rowID)
+			out <- benchtop.Index{Key: safeID, Loc: loc}
+			count++
+			if count%1000 == 0 {
+				log.Debugf("scanGlobalIndex: processed %d items", count)
+			}
+		}
+		return nil
+	})
+}
+
+func (dr *JSONDriver) scanTableIndex(targetTables []*table.JSONTable, field string, value any, out chan<- benchtop.Index) {
+	_ = dr.Pkv.View(func(it *pebblebulk.PebbleIterator) error {
+		for _, tbl := range targetTables {
+			prefix := benchtop.FieldValueKey(field, value)
+			prefix = append(prefix, benchtop.FieldSep...)
+			idBytes := make([]byte, 2)
+			binary.LittleEndian.PutUint16(idBytes, tbl.TableId)
+			prefix = append(prefix, idBytes...)
+			prefix = append(prefix, benchtop.FieldSep...)
+
+			for it.Seek(prefix); it.Valid() && bytes.HasPrefix(it.Key(), prefix); it.Next() {
+				val, err := it.Value()
+				if err != nil {
+					continue
+				}
+				loc := benchtop.DecodeRowLoc(val)
+				if loc == nil {
+					continue
+				}
+				_, _, _, rowID := benchtop.FieldKeyParse(it.Key())
+				safeID := make([]byte, len(rowID))
+				copy(safeID, rowID)
+				out <- benchtop.Index{Key: safeID, Loc: loc}
+			}
+		}
+		return nil
+	})
+}
+
+func (dr *JSONDriver) scanSlow(targetTables []*table.JSONTable, field string, value any, op query.Condition, out chan<- benchtop.Index) {
+	cond := &filters.FieldFilter{Field: field, Value: value, Operator: op}
+	for _, tbl := range targetTables {
+		for row := range tbl.ScanFull(nil) {
+			fieldVal := tpath.PathLookup(row.DataMap, field)
+			if !filters.ApplyFilterCondition(fieldVal, cond) {
+				continue
+			}
+			rowID, ok := row.DataMap["_id"].(string)
+			if !ok || rowID == "" {
+				continue
+			}
+			out <- benchtop.Index{Key: []byte(rowID), Loc: row.Loc}
+		}
+	}
 }
 
 func (dr *JSONDriver) GetIDsForTable(tableID uint16) chan string {

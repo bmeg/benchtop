@@ -10,7 +10,7 @@ import (
 )
 
 const (
-	maxWriterBuffer = 16 << 20
+	maxWriterBuffer = 64 << 20
 )
 
 type PebbleBulk struct {

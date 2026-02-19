@@ -2,7 +2,6 @@ package pebblebulk
 
 import (
 	"io"
-	"log"
 	"runtime"
 	"sync"
 
@@ -30,10 +29,10 @@ func NewPebbleKV(path string) (*PebbleKV, error) {
 	cache := pebble.NewCache(512 << 20)
 	opts := &pebble.Options{
 		Cache:        cache,
-		MemTableSize: 128 << 20,
+		MemTableSize: 256 << 20,
 		// Keep ingest from hitting aggressive write stalls under bulk load.
 		L0CompactionThreshold: 8,
-		L0StopWritesThreshold: 64,
+		L0StopWritesThreshold: 128,
 		LBaseMaxBytes:         512 << 20,
 		MaxConcurrentCompactions: func() int {
 			n := runtime.GOMAXPROCS(0) / 2
@@ -74,14 +73,14 @@ func (pdb *PebbleKV) BulkWrite(u func(tx *PebbleBulk) error) error {
 	// PebbleBulk.Set() does intermediate commit+reset when CurSize exceeds
 	// the threshold, so the batch may already be empty.
 	if ptx.CurSize > 0 {
-		log.Printf("[BulkWrite] final batch.Commit curSize=%d totalInserts=%d", ptx.CurSize, ptx.totalInserts)
+		// log.Printf("[BulkWrite] final batch.Commit curSize=%d totalInserts=%d", ptx.CurSize, ptx.totalInserts)
 		if err := batch.Commit(nil); err != nil {
 			batch.Close()
 			return err
 		}
-		log.Printf("[BulkWrite] final batch.Commit DONE")
+		// log.Printf("[BulkWrite] final batch.Commit DONE")
 	} else {
-		log.Printf("[BulkWrite] skipping final commit, batch already flushed (totalInserts=%d)", ptx.totalInserts)
+		// log.Printf("[BulkWrite] skipping final commit, batch already flushed (totalInserts=%d)", ptx.totalInserts)
 	}
 	batch.Close()
 

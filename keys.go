@@ -55,6 +55,15 @@ var SystemMetaPrefix = byte('S')
 // MaxTableIDKey stores the global counter for Table IDs
 var MaxTableIDKey = []byte{SystemMetaPrefix, 'I'}
 
+// MaxIDKey stores the global counter for Mapping IDs (uint64)
+var MaxIDKey = []byte{SystemMetaPrefix, 'G'}
+
+// IDMappingPrefix (String -> Uint64)
+var IDMappingPrefix = byte('I')
+
+// RIDMappingPrefix (Uint64 -> String)
+var RIDMappingPrefix = byte('B')
+
 func FieldKey(field string, tableID uint16, value any, rowID []byte) []byte {
 	/* creates a full field key for optimizing the beginning of a query */
 	valueBytes, err := sonic.ConfigFastest.Marshal(value)
@@ -232,28 +241,57 @@ func DecodeVertexValue(v []byte) (string, *RowLoc) {
 	return label, nil
 }
 
-// EncodeEdgeValue combines label and RowLoc into a single value
-func EncodeEdgeValue(label string, loc *RowLoc) []byte {
+// EncodeEdgeValue combines label, RowLoc, and optional inlined JSON into a single value
+func EncodeEdgeValue(label string, loc *RowLoc, data map[string]any) []byte {
 	lBytes := []byte(label)
-	out := make([]byte, len(lBytes)+1+14)
+	// Format: [Label]\0[Flags][Payload]
+	// Flags: 0x01 (HasLoc), 0x02 (HasData)
+	var flags byte
+	var payload []byte
+	if loc != nil {
+		flags |= 0x01
+		payload = append(payload, EncodeRowLoc(loc)...)
+	}
+	if data != nil {
+		flags |= 0x02
+		dBytes, _ := sonic.ConfigFastest.Marshal(data)
+		payload = append(payload, dBytes...)
+	}
+
+	out := make([]byte, len(lBytes)+1+1+len(payload))
 	copy(out, lBytes)
 	out[len(lBytes)] = 0
-	if loc != nil {
-		copy(out[len(lBytes)+1:], EncodeRowLoc(loc))
-	}
+	out[len(lBytes)+1] = flags
+	copy(out[len(lBytes)+2:], payload)
 	return out
 }
 
-// DecodeEdgeValue splits label and RowLoc from an integrated edge value
-func DecodeEdgeValue(v []byte) (string, *RowLoc) {
+// DecodeEdgeValue splits label, RowLoc, and optional inlined JSON from an integrated edge value
+func DecodeEdgeValue(v []byte) (string, *RowLoc, map[string]any) {
 	idx := bytes.IndexByte(v, 0)
 	if idx < 0 {
-		return "", DecodeRowLoc(v)
+		return "", DecodeRowLoc(v), nil
 	}
 	label := string(v[:idx])
-	locBytes := v[idx+1:]
-	if len(locBytes) >= 12 {
-		return label, DecodeRowLoc(locBytes)
+	if len(v) <= idx+1 {
+		return label, nil, nil
 	}
-	return label, nil
+	flags := v[idx+1]
+	payload := v[idx+2:]
+
+	var loc *RowLoc
+	var data map[string]any
+	offset := 0
+	if flags&0x01 != 0 {
+		if len(payload) >= 14 {
+			loc = DecodeRowLoc(payload[:14])
+			offset = 14
+		}
+	}
+	if flags&0x02 != 0 {
+		if len(payload) > offset {
+			sonic.ConfigFastest.Unmarshal(payload[offset:], &data)
+		}
+	}
+	return label, loc, data
 }
