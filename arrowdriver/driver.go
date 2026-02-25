@@ -8,15 +8,19 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/bmeg/benchtop"
 	"github.com/bmeg/benchtop/query"
 	"github.com/bmeg/grip/log"
+	"github.com/bytedance/sonic"
 	"go.etcd.io/bbolt"
 )
 
 const driverMetaName = "driver.meta"
 const bulkLoadBatchRows = 20000
+const postBulkCompactRowsPerSection = 200000
+const schemaGraphSuffix = "__schema__"
 
 var (
 	bucketTablesByName = []byte("tables_by_name")
@@ -28,12 +32,20 @@ type ArrowDriver struct {
 	base    string
 	zoneDir string
 
-	lock      sync.RWMutex
-	tables    map[string]*ArrowTable
-	tableIDs  map[string]uint16
-	idToTable map[uint16]string
-	fields    map[string]map[string]struct{}
-	metaDB    *bbolt.DB
+	lock                sync.RWMutex
+	tables              map[string]*ArrowTable
+	tableIDs            map[string]uint16
+	idToTable           map[uint16]string
+	fields              map[string]map[string]struct{}
+	schemaHints         map[string]tableWriteHints
+	schemaHintsLoaded   bool
+	schemaHintsBuilding bool
+	metaDB              *bbolt.DB
+}
+
+type tableWriteHints struct {
+	keys []string
+	enc  map[string]columnEncoding
 }
 
 func NewArrowDriver(path string) (benchtop.TableDriver, error) {
@@ -49,14 +61,15 @@ func NewArrowDriver(path string) (benchtop.TableDriver, error) {
 	}
 
 	d := &ArrowDriver{
-		base:      path,
-		zoneDir:   zoneDir,
-		lock:      sync.RWMutex{},
-		tables:    make(map[string]*ArrowTable),
-		tableIDs:  make(map[string]uint16),
-		idToTable: make(map[uint16]string),
-		fields:    make(map[string]map[string]struct{}),
-		metaDB:    metaDB,
+		base:        path,
+		zoneDir:     zoneDir,
+		lock:        sync.RWMutex{},
+		tables:      make(map[string]*ArrowTable),
+		tableIDs:    make(map[string]uint16),
+		idToTable:   make(map[uint16]string),
+		fields:      make(map[string]map[string]struct{}),
+		schemaHints: make(map[string]tableWriteHints),
+		metaDB:      metaDB,
 	}
 
 	if err := d.initMeta(); err != nil {
@@ -250,9 +263,11 @@ func (d *ArrowDriver) New(name string, columns []benchtop.ColumnDef) (benchtop.T
 	name = d.resolveTableName(name)
 
 	if t, ok := d.tables[name]; ok {
+		log.Debugf("arrowdriver.New reuse_open_table name=%s", name)
 		return t, nil
 	}
 	if _, ok := d.tableIDs[name]; ok {
+		log.Debugf("arrowdriver.New load_existing_table name=%s", name)
 		return d.getOrLoadLocked(name)
 	}
 
@@ -269,11 +284,13 @@ func (d *ArrowDriver) New(name string, columns []benchtop.ColumnDef) (benchtop.T
 		return nil, err
 	}
 	d.tables[name] = t
+	d.applySchemaHintsLocked(name, t)
 	d.tableIDs[name] = tableID
 	d.idToTable[tableID] = name
 	if _, ok := d.fields[name]; !ok {
 		d.fields[name] = make(map[string]struct{})
 	}
+	log.Infof("arrowdriver.New created_table name=%s tableID=%d columns=%d", name, tableID, len(columns))
 	return t, nil
 }
 
@@ -281,6 +298,7 @@ func (d *ArrowDriver) getOrLoadLocked(name string) (*ArrowTable, error) {
 	if t, ok := d.tables[name]; ok {
 		return t, nil
 	}
+	start := time.Now()
 	t, err := loadArrowTable(d.zoneDir, name)
 	if err != nil {
 		return nil, err
@@ -302,7 +320,190 @@ func (d *ArrowDriver) getOrLoadLocked(name string) (*ArrowTable, error) {
 	for _, idxField := range t.IndexedFields() {
 		d.fields[name][idxField] = struct{}{}
 	}
+	d.applySchemaHintsLocked(name, t)
+	log.Debugf("arrowdriver.getOrLoad loaded_table name=%s tableID=%d indexedFields=%d elapsed=%s", name, t.TableID(), len(t.IndexedFields()), time.Since(start).Round(time.Millisecond))
 	return t, nil
+}
+
+func (d *ArrowDriver) applySchemaHintsLocked(tableName string, t *ArrowTable) {
+	if strings.HasSuffix(tableName, schemaGraphSuffix) || t == nil {
+		return
+	}
+	if !d.schemaHintsLoaded && !d.schemaHintsBuilding {
+		d.refreshSchemaHintsLocked()
+	}
+	if hint, ok := d.schemaHints[tableName]; ok && len(hint.keys) > 0 {
+		// Keep schema hints additive so structural/runtime fields
+		// (for example edge linkage fields) are not dropped.
+		t.SetWriteHints(hint.keys, hint.enc, false)
+		log.Infof("arrowdriver.schema_hints_applied table=%s hintedFields=%d", tableName, len(hint.keys))
+	}
+}
+
+func (d *ArrowDriver) refreshSchemaHintsLocked() {
+	if d.schemaHintsBuilding {
+		return
+	}
+	d.schemaHintsBuilding = true
+	defer func() {
+		d.schemaHintsBuilding = false
+		d.schemaHintsLoaded = true
+	}()
+	out := map[string]tableWriteHints{}
+	for tableName := range d.tableIDs {
+		if !strings.HasSuffix(tableName, schemaGraphSuffix) {
+			continue
+		}
+		store, err := d.getOrLoadLocked(tableName)
+		if err != nil {
+			continue
+		}
+		for row := range store.ScanDoc(nil) {
+			label, keys, enc, ok := extractWriteHintsFromSchemaRow(row)
+			if !ok {
+				continue
+			}
+			targets := []string{label, "v_" + label, "e_" + label}
+			for _, target := range targets {
+				merged := mergeWriteHints(out[target], keys, enc)
+				out[target] = merged
+			}
+		}
+	}
+	d.schemaHints = out
+}
+
+func mergeWriteHints(cur tableWriteHints, keys []string, enc map[string]columnEncoding) tableWriteHints {
+	keySet := map[string]struct{}{}
+	for _, k := range cur.keys {
+		keySet[k] = struct{}{}
+	}
+	for _, k := range keys {
+		if k == "" || k == idColumn || k == dataColumn {
+			continue
+		}
+		if _, ok := keySet[k]; ok {
+			continue
+		}
+		keySet[k] = struct{}{}
+		cur.keys = append(cur.keys, k)
+	}
+	sort.Strings(cur.keys)
+	if cur.enc == nil {
+		cur.enc = map[string]columnEncoding{}
+	}
+	for k, v := range enc {
+		if _, ok := keySet[k]; ok {
+			cur.enc[k] = v
+		}
+	}
+	return cur
+}
+
+func extractWriteHintsFromSchemaRow(row map[string]any) (string, []string, map[string]columnEncoding, bool) {
+	src := row
+	if v, ok := row["vertex"].(map[string]any); ok {
+		src = v
+	} else if v, ok := row["vertex"].(string); ok && v != "" {
+		tmp := map[string]any{}
+		if err := sonic.ConfigFastest.Unmarshal([]byte(v), &tmp); err == nil && len(tmp) > 0 {
+			src = tmp
+		}
+	} else if v, ok := row["vertex"].([]byte); ok && len(v) > 0 {
+		tmp := map[string]any{}
+		if err := sonic.ConfigFastest.Unmarshal(v, &tmp); err == nil && len(tmp) > 0 {
+			src = tmp
+		}
+	}
+	label := schemaLabelFromMap(src)
+	if label == "" {
+		label = schemaLabelFromMap(row)
+	}
+	if label == "" {
+		return "", nil, nil, false
+	}
+
+	keys := []string{}
+	enc := map[string]columnEncoding{}
+	if props, ok := src["properties"].(map[string]any); ok {
+		for field, def := range props {
+			if field == "" || field == idColumn || field == dataColumn {
+				continue
+			}
+			keys = append(keys, field)
+			enc[field] = schemaTypeToEncoding(def)
+		}
+	} else {
+		for field, def := range src {
+			if field == "" || strings.HasPrefix(field, "_") || field == "id" || field == "$id" || field == "label" || field == "title" {
+				continue
+			}
+			keys = append(keys, field)
+			enc[field] = schemaTypeToEncoding(def)
+		}
+	}
+	if len(keys) == 0 {
+		return "", nil, nil, false
+	}
+	sort.Strings(keys)
+	return label, keys, enc, true
+}
+
+func schemaLabelFromMap(m map[string]any) string {
+	for _, k := range []string{"_label", "label", "title", "name"} {
+		if s, ok := m[k].(string); ok && s != "" {
+			return normalizeSchemaLabel(s)
+		}
+	}
+	if s, ok := m["_id"].(string); ok && s != "" {
+		return normalizeSchemaLabel(s)
+	}
+	if s, ok := m["id"].(string); ok && s != "" {
+		return normalizeSchemaLabel(s)
+	}
+	return ""
+}
+
+func normalizeSchemaLabel(s string) string {
+	if i := strings.LastIndex(s, "/"); i >= 0 && i+1 < len(s) {
+		s = s[i+1:]
+	}
+	if strings.HasPrefix(s, "v_") || strings.HasPrefix(s, "e_") {
+		return s[2:]
+	}
+	return s
+}
+
+func schemaTypeToEncoding(v any) columnEncoding {
+	switch tv := v.(type) {
+	case string:
+		switch strings.ToLower(tv) {
+		case "string":
+			return encString
+		case "boolean", "bool":
+			return encBool
+		case "number", "integer", "float", "double", "long", "int":
+			return encFloat64
+		default:
+			return encJSON
+		}
+	case map[string]any:
+		if t, ok := tv["type"]; ok {
+			return schemaTypeToEncoding(t)
+		}
+		return encJSON
+	case []any:
+		// JSON schema can expose union types in arrays, prefer scalar when present.
+		for _, e := range tv {
+			enc := schemaTypeToEncoding(e)
+			if enc != encJSON {
+				return enc
+			}
+		}
+		return encJSON
+	default:
+		return encJSON
+	}
 }
 
 func (d *ArrowDriver) Get(tableID uint16) (benchtop.TableStore, error) {
@@ -329,6 +530,7 @@ func (d *ArrowDriver) List() []string {
 }
 
 func (d *ArrowDriver) BulkLoad(tableID uint16, rows chan *benchtop.Row) error {
+	start := time.Now()
 	tableStore, err := d.Get(tableID)
 	if err != nil {
 		log.Errorf("BulkLoad Get error: %v", err)
@@ -338,25 +540,42 @@ func (d *ArrowDriver) BulkLoad(tableID uint16, rows chan *benchtop.Row) error {
 	if !ok {
 		return fmt.Errorf("table ID %d is not ArrowTable", tableID)
 	}
+	log.Infof("arrowdriver.BulkLoad start table=%s tableID=%d batchSize=%d", at.name, tableID, bulkLoadBatchRows)
 
 	batch := make([]benchtop.Row, 0, bulkLoadBatchRows)
+	var totalRows int
+	var flushes int
 	for row := range rows {
 		if row == nil {
 			continue
 		}
 		batch = append(batch, *row)
+		totalRows++
 		if len(batch) >= bulkLoadBatchRows {
+			flushStart := time.Now()
 			if err := at.BulkLoad(batch); err != nil {
 				return err
 			}
+			flushes++
+			log.Debugf("arrowdriver.BulkLoad flush table=%s tableID=%d rows=%d flush=%d elapsed=%s", at.name, tableID, len(batch), flushes, time.Since(flushStart).Round(time.Millisecond))
 			batch = batch[:0]
 		}
 	}
 	if len(batch) > 0 {
+		flushStart := time.Now()
 		if err := at.BulkLoad(batch); err != nil {
 			return err
 		}
+		flushes++
+		log.Debugf("arrowdriver.BulkLoad flush table=%s tableID=%d rows=%d flush=%d elapsed=%s", at.name, tableID, len(batch), flushes, time.Since(flushStart).Round(time.Millisecond))
 	}
+	compactStart := time.Now()
+	if err := at.CompactSections(postBulkCompactRowsPerSection); err != nil {
+		log.Warningf("arrowdriver.BulkLoad compact_error table=%s tableID=%d err=%v", at.name, tableID, err)
+	} else {
+		log.Infof("arrowdriver.BulkLoad compact_done table=%s tableID=%d targetRowsPerSection=%d elapsed=%s", at.name, tableID, postBulkCompactRowsPerSection, time.Since(compactStart).Round(time.Millisecond))
+	}
+	log.Infof("arrowdriver.BulkLoad done table=%s tableID=%d rows=%d flushes=%d elapsed=%s", at.name, tableID, totalRows, flushes, time.Since(start).Round(time.Millisecond))
 	return nil
 }
 
@@ -364,6 +583,8 @@ func (d *ArrowDriver) RowIdsByHas(field string, value any, op query.Condition) c
 	out := make(chan benchtop.Index, 100)
 	go func() {
 		defer close(out)
+		start := time.Now()
+		total := 0
 		for _, name := range d.List() {
 			tableStore, err := d.Get(d.tableIDs[name]) // Changed to use tableID
 			if err != nil {
@@ -373,14 +594,16 @@ func (d *ArrowDriver) RowIdsByHas(field string, value any, op query.Condition) c
 			if !ok {
 				continue
 			}
-			for id := range table.RowIdsByHas(field, value, op) {
-				loc, err := table.GetRowLoc(id)
-				if err != nil {
-					continue
-				}
-				out <- benchtop.Index{Key: []byte(id), Loc: loc}
+			tableStart := time.Now()
+			matched := 0
+			for idx := range table.RowIndexesByHas(field, value, op) {
+				out <- idx
+				matched++
+				total++
 			}
+			log.Debugf("arrowdriver.RowIdsByHas table=%s field=%s op=%d matched=%d elapsed=%s", name, field, op, matched, time.Since(tableStart).Round(time.Millisecond))
 		}
+		log.Debugf("arrowdriver.RowIdsByHas done field=%s op=%d total=%d elapsed=%s", field, op, total, time.Since(start).Round(time.Millisecond))
 	}()
 	return out
 }
@@ -457,12 +680,8 @@ func (d *ArrowDriver) RowIdsByTableFieldValue(tableID uint16, field string, valu
 		if !ok {
 			return
 		}
-		for id := range table.RowIdsByHas(field, value, op) {
-			loc, err := table.GetRowLoc(id)
-			if err != nil {
-				continue
-			}
-			out <- benchtop.Index{Key: []byte(id), Loc: loc}
+		for idx := range table.RowIndexesByHas(field, value, op) {
+			out <- idx
 		}
 	}()
 	return out
@@ -558,7 +777,15 @@ func (d *ArrowDriver) AddField(tableID uint16, field string) error {
 	}
 	d.fields[name][field] = struct{}{}
 	d.lock.Unlock()
-	return t.EnsureFieldIndex(field)
+	start := time.Now()
+	log.Infof("arrowdriver.AddField ensure_index_start table=%s tableID=%d field=%s", name, tableID, field)
+	err = t.EnsureFieldIndex(field)
+	if err != nil {
+		log.Errorf("arrowdriver.AddField ensure_index_error table=%s tableID=%d field=%s err=%v", name, tableID, field, err)
+		return err
+	}
+	log.Infof("arrowdriver.AddField ensure_index_done table=%s tableID=%d field=%s elapsed=%s", name, tableID, field, time.Since(start).Round(time.Millisecond))
+	return nil
 }
 
 func (d *ArrowDriver) RemoveField(tableID uint16, field string) error {
@@ -577,7 +804,15 @@ func (d *ArrowDriver) RemoveField(tableID uint16, field string) error {
 		delete(fields, field)
 	}
 	d.lock.Unlock()
-	return t.RemoveFieldIndex(field)
+	start := time.Now()
+	log.Infof("arrowdriver.RemoveField remove_index_start table=%s tableID=%d field=%s", name, tableID, field)
+	err = t.RemoveFieldIndex(field)
+	if err != nil {
+		log.Errorf("arrowdriver.RemoveField remove_index_error table=%s tableID=%d field=%s err=%v", name, tableID, field, err)
+		return err
+	}
+	log.Infof("arrowdriver.RemoveField remove_index_done table=%s tableID=%d field=%s elapsed=%s", name, tableID, field, time.Since(start).Round(time.Millisecond))
+	return nil
 }
 
 func (d *ArrowDriver) ListFields() []benchtop.FieldInfo {

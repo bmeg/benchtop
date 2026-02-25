@@ -184,3 +184,46 @@ func TestArrowDriverReloadPreservesTableIDAndData(t *testing.T) {
 		t.Fatalf("expected idx file to exist: %v", err)
 	}
 }
+
+func TestArrowDriverRowIdsByHasContainsOnListField(t *testing.T) {
+	base := t.TempDir()
+
+	drvRaw, err := NewArrowDriver(base)
+	if err != nil {
+		t.Fatalf("NewArrowDriver failed: %v", err)
+	}
+	drv := drvRaw.(*ArrowDriver)
+	defer drv.Close()
+
+	storeRaw, err := drv.New("v_species", []benchtop.ColumnDef{{Key: "eye_colors"}})
+	if err != nil {
+		t.Fatalf("New table failed: %v", err)
+	}
+	store := storeRaw.(*ArrowTable)
+
+	_, err = store.AddRows([]benchtop.Row{
+		{Id: []byte("s1"), Data: map[string]any{"eye_colors": []any{"blue", "yellow"}}},
+		{Id: []byte("s2"), Data: map[string]any{"eye_colors": []any{"yellow"}}},
+		{Id: []byte("s3"), Data: map[string]any{"eye_colors": []any{"red"}}},
+	})
+	if err != nil {
+		t.Fatalf("AddRows failed: %v", err)
+	}
+
+	got := map[string]struct{}{}
+	for id := range store.RowIdsByHas("eye_colors", "yellow", query.CONTAINS) {
+		got[id] = struct{}{}
+	}
+	if len(got) != 2 {
+		t.Fatalf("expected 2 matches, got %d", len(got))
+	}
+	if _, ok := got["s1"]; !ok {
+		t.Fatalf("expected s1 in contains result")
+	}
+	if _, ok := got["s2"]; !ok {
+		t.Fatalf("expected s2 in contains result")
+	}
+	if _, ok := got["s3"]; ok {
+		t.Fatalf("did not expect s3 in contains result")
+	}
+}

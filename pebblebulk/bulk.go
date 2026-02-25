@@ -2,6 +2,7 @@ package pebblebulk
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"sync"
 
@@ -53,6 +54,17 @@ func (pb *PebbleBulk) Set(id []byte, val []byte, opts *pebble.WriteOptions) erro
 }
 
 func (pb *PebbleBulk) Get(key []byte) ([]byte, io.Closer, error) {
+	pb.mu.Lock()
+	defer pb.mu.Unlock()
+	if pb.Batch != nil {
+		val, closer, err := pb.Batch.Get(key)
+		if err == nil {
+			return val, closer, nil
+		}
+		if !errors.Is(err, pebble.ErrNotFound) {
+			return nil, nil, err
+		}
+	}
 	return pb.Db.Get(key)
 }
 

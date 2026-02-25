@@ -55,10 +55,6 @@ func (dr *JSONDriver) processBatch(tx *pebblebulk.PebbleBulk, entries []*benchto
 		byTable[row.TableID] = append(byTable[row.TableID], row)
 	}
 
-	// 1. Create a Snapshot to see what is already committed to the DB
-	snap := dr.Pkv.Db.NewSnapshot()
-	defer snap.Close()
-
 	var errs *multierror.Error
 
 	for tid, rows := range byTable {
@@ -77,24 +73,16 @@ func (dr *JSONDriver) processBatch(tx *pebblebulk.PebbleBulk, entries []*benchto
 
 		// uniqueRows will hold only rows that don't exist in the DB or this batch
 		uniqueRows := make([]benchtop.Row, 0, len(rows))
-		seenInBatch := make(map[string]struct{})
 
 		for _, r := range rows {
-			idStr := string(r.Id)
-
-			// 2. Internal Batch Deduplication
-			// Prevents duplicates if the same ID appears twice in this 1000-row batch
-			if _, seen := seenInBatch[idStr]; seen {
-				continue
-			}
-
-			// 3. Persistent Existence Check
+			// Persistent Existence Check
 			// Uses NewPosKey (P | TableID | rowID) to check the Primary Index
+			// tx.Get is now batch-aware, so it sees both the DB and previous writes in this session.
 			pKey := benchtop.NewPosKey(tid, r.Id)
-			_, closer, err := snap.Get(pKey)
+			_, closer, err := tx.Get(pKey)
 			if err == nil {
 				closer.Close()
-				continue // Row already exists in Pebble, skip storage writing
+				continue // Row already exists, skip
 			}
 
 			// If the error is anything other than NotFound, we have a DB issue
@@ -103,8 +91,6 @@ func (dr *JSONDriver) processBatch(tx *pebblebulk.PebbleBulk, entries []*benchto
 				continue
 			}
 
-			// Mark as seen in this batch and add to the unique slice
-			seenInBatch[idStr] = struct{}{}
 			uniqueRows = append(uniqueRows, *r)
 		}
 

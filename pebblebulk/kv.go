@@ -62,8 +62,9 @@ func (pdb *PebbleKV) Set(id []byte, val []byte, opts *pebble.WriteOptions) error
 }
 
 func (pdb *PebbleKV) BulkWrite(u func(tx *PebbleBulk) error) error {
-	batch := pdb.Db.NewBatch()
+	batch := pdb.Db.NewIndexedBatch()
 	ptx := &PebbleBulk{pdb.Db, batch, nil, nil, 0, sync.Mutex{}, 0}
+
 	err := u(ptx)
 	if err != nil {
 		batch.Close()

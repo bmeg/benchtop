@@ -1,22 +1,23 @@
 package query
 
-import "github.com/bmeg/grip/gripql"
-
-type Condition = gripql.Condition
+// Condition is benchtop's internal filter operator enum.
+// Values are kept aligned with GripQL condition numeric values for compatibility.
+type Condition int32
 
 const (
-	EQ       Condition = gripql.Condition_EQ
-	NEQ      Condition = gripql.Condition_NEQ
-	GT       Condition = gripql.Condition_GT
-	GTE      Condition = gripql.Condition_GTE
-	LT       Condition = gripql.Condition_LT
-	LTE      Condition = gripql.Condition_LTE
-	INSIDE   Condition = gripql.Condition_INSIDE
-	OUTSIDE  Condition = gripql.Condition_OUTSIDE
-	BETWEEN  Condition = gripql.Condition_BETWEEN
-	WITHIN   Condition = gripql.Condition_WITHIN
-	WITHOUT  Condition = gripql.Condition_WITHOUT
-	CONTAINS Condition = gripql.Condition_CONTAINS
+	UNKNOWN_CONDITION Condition = 0
+	EQ                Condition = 1
+	NEQ               Condition = 2
+	GT                Condition = 3
+	GTE               Condition = 4
+	LT                Condition = 5
+	LTE               Condition = 6
+	INSIDE            Condition = 7
+	OUTSIDE           Condition = 8
+	BETWEEN           Condition = 9
+	WITHIN            Condition = 10
+	WITHOUT           Condition = 11
+	CONTAINS          Condition = 12
 )
 
 type FieldFilter struct {
