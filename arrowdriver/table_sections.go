@@ -564,7 +564,13 @@ func (t *ArrowTable) readSectionRows(section uint16) ([]map[string]any, []string
 		}
 	}
 	t.setCachedSectionRows(section, rows)
-	return rows, ids, nil
+
+	// Return clones to ensure the caller cannot modify the maps stored in the cache.
+	clonedRows := make([]map[string]any, len(rows))
+	for i, r := range rows {
+		clonedRows[i] = cloneRowMap(r)
+	}
+	return clonedRows, ids, nil
 }
 
 func (t *ArrowTable) readSectionTopLevelColumn(section uint16, field string) ([]any, bool, error) {
