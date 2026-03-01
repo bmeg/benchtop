@@ -275,6 +275,161 @@ func (t *ArrowTable) GetRows(locs []*benchtop.RowLoc) ([]map[string]any, []error
 	return results, errs
 }
 
+// GetRowsRawPayload returns raw JSON payload strings aligned with the provided
+// locations. Each payload is the stored row body without injected metadata keys.
+func (t *ArrowTable) GetRowsRawPayload(locs []*benchtop.RowLoc) ([]string, []error) {
+	results := make([]string, len(locs))
+	errs := make([]error, len(locs))
+
+	bySection := map[uint16][]int{}
+	for i, loc := range locs {
+		if loc == nil {
+			errs[i] = fmt.Errorf("nil row location")
+			continue
+		}
+		bySection[loc.Section] = append(bySection[loc.Section], i)
+	}
+
+	type sectionWork struct {
+		sec  uint16
+		idxs []int
+	}
+	workCh := make(chan sectionWork, len(bySection))
+	var wg sync.WaitGroup
+	workers := runtime.NumCPU()
+	if workers < 2 {
+		workers = 2
+	}
+	if workers > 16 {
+		workers = 16
+	}
+
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for work := range workCh {
+				offsets := map[uint32]struct{}{}
+				for _, i := range work.idxs {
+					offsets[locs[i].Offset] = struct{}{}
+				}
+
+				rawRows, complete, err := t.readSectionRawRowsByOffsets(work.sec, offsets)
+				if err != nil || !complete {
+					for _, i := range work.idxs {
+						errs[i] = err
+						if errs[i] == nil {
+							errs[i] = fmt.Errorf("incomplete raw read section=%d", work.sec)
+						}
+					}
+					continue
+				}
+				for _, i := range work.idxs {
+					loc := locs[i]
+					raw, ok := rawRows[loc.Offset]
+					if !ok {
+						errs[i] = fmt.Errorf("row not found at section=%d offset=%d", loc.Section, loc.Offset)
+						continue
+					}
+					if raw.payload == "" {
+						errs[i] = fmt.Errorf("empty payload at section=%d offset=%d", loc.Section, loc.Offset)
+						continue
+					}
+					results[i] = raw.payload
+				}
+			}
+		}()
+	}
+	for sec, idxs := range bySection {
+		workCh <- sectionWork{sec: sec, idxs: idxs}
+	}
+	close(workCh)
+	wg.Wait()
+
+	return results, errs
+}
+
+// GetRowsProjected reads only requested top-level fields for the provided row
+// locations. It falls back to GetRows when projection cannot be safely pushed
+// down (for example nested paths).
+func (t *ArrowTable) GetRowsProjected(locs []*benchtop.RowLoc, fields []string) ([]map[string]any, []error) {
+	if len(fields) == 0 {
+		return t.GetRows(locs)
+	}
+
+	for _, field := range fields {
+		if field == "" || field == "_id" {
+			continue
+		}
+		if !isTopLevelField(field) {
+			return t.GetRows(locs)
+		}
+	}
+
+	results := make([]map[string]any, len(locs))
+	errs := make([]error, len(locs))
+
+	bySection := map[uint16][]int{}
+	for i, loc := range locs {
+		if loc == nil {
+			errs[i] = fmt.Errorf("nil row location")
+			continue
+		}
+		bySection[loc.Section] = append(bySection[loc.Section], i)
+	}
+
+	type sectionWork struct {
+		sec  uint16
+		idxs []int
+	}
+	workCh := make(chan sectionWork, len(bySection))
+	var wg sync.WaitGroup
+	workers := runtime.NumCPU()
+	if workers < 2 {
+		workers = 2
+	}
+	if workers > 16 {
+		workers = 16
+	}
+
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for work := range workCh {
+				offsets := map[uint32]struct{}{}
+				for _, i := range work.idxs {
+					offsets[locs[i].Offset] = struct{}{}
+				}
+				rowsByOffset, err := t.readSectionProjectedRowsByOffsets(work.sec, fields, offsets)
+				if err != nil {
+					for _, i := range work.idxs {
+						errs[i] = err
+					}
+					continue
+				}
+				for _, i := range work.idxs {
+					loc := locs[i]
+					row, ok := rowsByOffset[loc.Offset]
+					if !ok {
+						errs[i] = fmt.Errorf("row not found at section=%d offset=%d", loc.Section, loc.Offset)
+						continue
+					}
+					results[i] = row
+				}
+			}
+		}()
+	}
+
+	for sec, idxs := range bySection {
+		workCh <- sectionWork{sec: sec, idxs: idxs}
+	}
+	close(workCh)
+	wg.Wait()
+
+	return results, errs
+}
+
 func (t *ArrowTable) ListTableKeys() (chan benchtop.Index, error) {
 	out := make(chan benchtop.Index, 100)
 	go func() {

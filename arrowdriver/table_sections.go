@@ -690,7 +690,7 @@ func (t *ArrowTable) readSectionProjectedRows(section uint16, fields []string) (
 					if arr.IsNull(i) {
 						continue
 					}
-					row[field] = arr.Value(i)
+					row[field] = decodeJSONTextCell(arr.Value(i))
 				case *array.Float64:
 					if arr.IsNull(i) {
 						continue
@@ -843,6 +843,104 @@ func (t *ArrowTable) readSectionTopLevelColumns(section uint16, fields []string)
 	}
 
 	return outIDs, outCols, nil
+}
+
+type rawSectionRow struct {
+	id      string
+	payload string
+}
+
+func (t *ArrowTable) scanSectionRawByOffsets(section uint16, offsets map[uint32]struct{}, fn func(offset uint32, id string, payload string, hasPayload bool) bool) (bool, error) {
+	if len(offsets) == 0 {
+		return true, nil
+	}
+	maxOffset := uint32(0)
+	remaining := len(offsets)
+	for off := range offsets {
+		if off > maxOffset {
+			maxOffset = off
+		}
+	}
+
+	f, err := os.Open(t.sectionPath(section))
+	if err != nil {
+		return false, err
+	}
+	defer f.Close()
+
+	reader, err := ipc.NewReader(f)
+	if err != nil {
+		return false, err
+	}
+	defer reader.Release()
+
+	complete := true
+	var offset uint32
+	for reader.Next() {
+		rec := reader.Record()
+		schema := rec.Schema()
+		idIdx := schema.FieldIndices(idColumn)
+		if len(idIdx) == 0 {
+			return false, fmt.Errorf("missing _id column")
+		}
+		idArr, ok := rec.Column(idIdx[0]).(*array.String)
+		if !ok {
+			return false, fmt.Errorf("_id column is not string")
+		}
+		dataIdx := schema.FieldIndices(dataColumn)
+		if len(dataIdx) == 0 {
+			return false, nil
+		}
+		dataArr, ok := rec.Column(dataIdx[0]).(*array.String)
+		if !ok {
+			return false, nil
+		}
+
+		for i := 0; i < int(rec.NumRows()); i++ {
+			if offset > maxOffset || remaining == 0 {
+				return complete, nil
+			}
+			if _, ok := offsets[offset]; !ok {
+				offset++
+				continue
+			}
+			id := idArr.Value(i)
+			hasPayload := !dataArr.IsNull(i)
+			payload := ""
+			if hasPayload {
+				payload = dataArr.Value(i)
+			} else {
+				complete = false
+			}
+			if fn != nil {
+				if !fn(offset, id, payload, hasPayload) {
+					return complete, nil
+				}
+			}
+			remaining--
+			offset++
+		}
+	}
+	if remaining > 0 {
+		complete = false
+	}
+	return complete, nil
+}
+
+func (t *ArrowTable) readSectionRawRowsByOffsets(section uint16, offsets map[uint32]struct{}) (map[uint32]rawSectionRow, bool, error) {
+	out := map[uint32]rawSectionRow{}
+	complete, err := t.scanSectionRawByOffsets(section, offsets, func(offset uint32, id string, payload string, hasPayload bool) bool {
+		row := rawSectionRow{id: id}
+		if hasPayload {
+			row.payload = payload
+		}
+		out[offset] = row
+		return true
+	})
+	if err != nil {
+		return nil, false, err
+	}
+	return out, complete, nil
 }
 
 func (t *ArrowTable) readSectionRowsByOffsets(section uint16, offsets map[uint32]struct{}) (map[uint32]map[string]any, error) {
@@ -1024,7 +1122,7 @@ func (t *ArrowTable) readSectionProjectedRowsByOffsets(section uint16, fields []
 				switch arr := col.(type) {
 				case *array.String:
 					if !arr.IsNull(i) {
-						row[field] = arr.Value(i)
+						row[field] = decodeJSONTextCell(arr.Value(i))
 					}
 				case *array.Float64:
 					if !arr.IsNull(i) {

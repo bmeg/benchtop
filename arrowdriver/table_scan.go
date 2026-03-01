@@ -3,11 +3,107 @@ package arrowdriver
 import (
 	"runtime"
 	"sort"
+	"strconv"
 	"sync"
 
 	"github.com/bmeg/benchtop"
 	"github.com/bytedance/sonic"
 )
+
+type requiredFieldsProvider interface {
+	RequiredFields() []string
+}
+
+type rawPayloadMatcher interface {
+	MatchesRawPayload(id string, payload string, tableName string) bool
+}
+
+func rowFilterNeedsID(filter benchtop.RowFilter) bool {
+	if filter == nil {
+		return false
+	}
+	r, ok := filter.(requiredFieldsProvider)
+	if !ok {
+		return false
+	}
+	for _, f := range r.RequiredFields() {
+		if f == "_id" {
+			return true
+		}
+	}
+	return false
+}
+
+func rawPayloadForFilter(id, payload string, includeID bool) []byte {
+	if !includeID {
+		return []byte(payload)
+	}
+	buf := make([]byte, 0, len(payload)+len(id)+16)
+	buf = append(buf, '{')
+	buf = append(buf, '"', '_', 'i', 'd', '"', ':')
+	buf = strconv.AppendQuote(buf, id)
+	if len(payload) > 1 && payload[0] == '{' && payload[len(payload)-1] == '}' {
+		if len(payload) > 2 {
+			buf = append(buf, ',')
+			buf = append(buf, payload[1:len(payload)-1]...)
+		}
+		buf = append(buf, '}')
+		return buf
+	}
+	if len(payload) > 0 {
+		buf = append(buf, ',', '"', '_', 'd', 'a', 't', 'a', '"', ':')
+		buf = append(buf, payload...)
+	}
+	buf = append(buf, '}')
+	return buf
+}
+
+func (t *ArrowTable) rawFilterRows(section uint16, secRows []indexedRow, filter benchtop.RowFilter) (map[uint32]map[string]any, bool) {
+	if filter == nil || len(secRows) == 0 {
+		return nil, false
+	}
+	needed := make(map[uint32]struct{}, len(secRows))
+	for _, r := range secRows {
+		needed[r.loc.Offset] = struct{}{}
+	}
+
+	rawMatcher, hasRawMatcher := filter.(rawPayloadMatcher)
+	includeID := false
+	if !hasRawMatcher {
+		includeID = rowFilterNeedsID(filter)
+	}
+
+	out := make(map[uint32]map[string]any, len(secRows))
+	complete, err := t.scanSectionRawByOffsets(section, needed, func(offset uint32, id string, payload string, hasPayload bool) bool {
+		if !hasPayload {
+			return true
+		}
+		matched := false
+		if hasRawMatcher {
+			matched = rawMatcher.MatchesRawPayload(id, payload, t.name)
+		} else {
+			matched = filter.Matches(rawPayloadForFilter(id, payload, includeID), t.name)
+		}
+		if !matched {
+			return true
+		}
+
+		var row map[string]any
+		if err := sonic.UnmarshalString(payload, &row); err != nil {
+			return true
+		}
+		if row == nil {
+			row = map[string]any{}
+		}
+		row[idColumn] = id
+		out[offset] = row
+		return true
+	})
+	if err != nil || !complete {
+		return nil, false
+	}
+	return out, true
+}
 
 func (t *ArrowTable) ScanDoc(filter benchtop.RowFilter) chan map[string]any {
 	out := make(chan map[string]any, 100)
@@ -145,23 +241,33 @@ func (t *ArrowTable) ScanDoc(filter benchtop.RowFilter) chan map[string]any {
 			go func() {
 				defer wg.Done()
 				for sec := range secCh {
+					secSet := bySection[sec]
+					if filterActive {
+						if matchedRows, ok := t.rawFilterRows(sec, secSet, filter); ok {
+							matched := make([]map[string]any, 0, len(matchedRows))
+							for _, r := range secSet {
+								if row, ok := matchedRows[r.loc.Offset]; ok {
+									matched = append(matched, row)
+								}
+							}
+							resCh <- sectionDocResult{sec: sec, rows: matched}
+							continue
+						}
+					}
 					secRows, _, err := t.readSectionRows(sec)
 					if err != nil {
 						resCh <- sectionDocResult{sec: sec, rows: nil}
 						continue
 					}
-					matched := make([]map[string]any, 0, len(bySection[sec]))
-					for _, r := range bySection[sec] {
+					matched := make([]map[string]any, 0, len(secSet))
+					for _, r := range secSet {
 						if int(r.loc.Offset) >= len(secRows) {
 							continue
 						}
 						row := secRows[int(r.loc.Offset)]
 						if filterActive {
 							payload, err := sonic.ConfigFastest.Marshal(row)
-							if err != nil {
-								continue
-							}
-							if !filter.Matches(payload, t.name) {
+							if err != nil || !filter.Matches(payload, t.name) {
 								continue
 							}
 						}
@@ -343,6 +449,28 @@ func (t *ArrowTable) ScanDocProjected(fields []string, filter benchtop.RowFilter
 				}
 			}
 
+			if filterActive {
+				if matchedRows, ok := t.rawFilterRows(sec, bySection[sec], filter); ok {
+					for _, r := range bySection[sec] {
+						full, ok := matchedRows[r.loc.Offset]
+						if !ok {
+							continue
+						}
+						proj := map[string]any{"_id": full["_id"]}
+						for _, f := range fields {
+							if f == "_id" {
+								continue
+							}
+							if v, ok := full[f]; ok {
+								proj[f] = v
+							}
+						}
+						out <- proj
+					}
+					continue
+				}
+			}
+
 			secRows, _, err := t.readSectionRows(sec)
 			if err != nil {
 				continue
@@ -482,13 +610,26 @@ func (t *ArrowTable) ScanFull(filter benchtop.RowFilter) chan benchtop.RowLocDat
 			go func() {
 				defer wg.Done()
 				for sec := range secCh {
+					secSet := bySection[sec]
+					if filterActive {
+						if matchedRows, ok := t.rawFilterRows(sec, secSet, filter); ok {
+							matched := make([]benchtop.RowLocData, 0, len(matchedRows))
+							for _, r := range secSet {
+								if row, ok := matchedRows[r.loc.Offset]; ok {
+									matched = append(matched, benchtop.RowLocData{DataMap: row, Loc: r.loc})
+								}
+							}
+							resCh <- sectionFullResult{sec: sec, rows: matched}
+							continue
+						}
+					}
 					secRows, _, err := t.readSectionRows(sec)
 					if err != nil {
 						resCh <- sectionFullResult{sec: sec, rows: nil}
 						continue
 					}
-					matched := make([]benchtop.RowLocData, 0, len(bySection[sec]))
-					for _, r := range bySection[sec] {
+					matched := make([]benchtop.RowLocData, 0, len(secSet))
+					for _, r := range secSet {
 						if int(r.loc.Offset) >= len(secRows) {
 							continue
 						}

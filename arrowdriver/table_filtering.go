@@ -4,6 +4,7 @@ import (
 	"reflect"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -15,6 +16,7 @@ import (
 	"github.com/bmeg/benchtop/query"
 	"github.com/bmeg/benchtop/util"
 	"github.com/bmeg/grip/log"
+	"github.com/bytedance/sonic"
 )
 
 func isTopLevelField(field string) bool {
@@ -217,6 +219,70 @@ func (t *ArrowTable) tryIndexedConjunction(filters []query.FieldFilter) (map[uin
 		}
 	}
 	return groupIndexedRowsBySection(rows), true
+}
+
+func parseRawPath(path string) ([]any, bool) {
+	path = strings.TrimSpace(path)
+	if path == "" || strings.Contains(path, "*") {
+		return nil, false
+	}
+	path = strings.TrimPrefix(path, "$")
+	path = strings.TrimPrefix(path, ".")
+	if path == "" {
+		return nil, false
+	}
+
+	parts := make([]any, 0, len(path)/2+1)
+	var start int
+	for i := 0; i < len(path); i++ {
+		switch path[i] {
+		case '.':
+			if i > start {
+				parts = append(parts, path[start:i])
+			}
+			start = i + 1
+		case '[':
+			if i > start {
+				parts = append(parts, path[start:i])
+			}
+			j := i + 1
+			for j < len(path) && path[j] != ']' {
+				j++
+			}
+			if j >= len(path) || j == i+1 {
+				return nil, false
+			}
+			idx, err := strconv.Atoi(path[i+1 : j])
+			if err != nil {
+				return nil, false
+			}
+			parts = append(parts, idx)
+			i = j
+			start = i + 1
+		}
+	}
+	if start < len(path) {
+		parts = append(parts, path[start:])
+	}
+	if len(parts) == 0 {
+		return nil, false
+	}
+	return parts, true
+}
+
+func lookupRawPayload(payload string, parsedPath []any) any {
+	if len(parsedPath) == 0 {
+		return nil
+	}
+	node, err := sonic.GetFromString(payload, parsedPath...)
+	if err != nil {
+		return nil
+	}
+	v, err := node.Interface()
+	if err != nil {
+		return nil
+	}
+	return v
 }
 
 func applyConditionsOnOffset(filters []query.FieldFilter, ids []string, cols map[string][]any, offset uint32, label string) bool {
@@ -444,6 +510,8 @@ func (t *ArrowTable) RowIdsByHas(field string, value any, op query.Condition) ch
 		sort.Ints(sections)
 
 		materializedField := !strings.Contains(field, "*")
+		rawPath, rawPathOK := parseRawPath(field)
+		cond := &query.FieldFilter{Field: field, Operator: op, Value: value}
 
 		for _, secInt := range sections {
 			sec := uint16(secInt)
@@ -462,6 +530,27 @@ func (t *ArrowTable) RowIdsByHas(field string, value any, op query.Condition) ch
 				}
 			}
 
+			if rawPathOK {
+				needed := map[uint32]struct{}{}
+				for _, r := range bySection[sec] {
+					needed[r.loc.Offset] = struct{}{}
+				}
+				rawRows, complete, err := t.readSectionRawRowsByOffsets(sec, needed)
+				if err == nil && complete {
+					for _, r := range bySection[sec] {
+						raw, ok := rawRows[r.loc.Offset]
+						if !ok || raw.payload == "" {
+							continue
+						}
+						fieldVal := lookupRawPayload(raw.payload, rawPath)
+						if bfilters.ApplyFilterCondition(fieldVal, cond) {
+							out <- r.id
+						}
+					}
+					continue
+				}
+			}
+
 			secRows, _, err := t.readSectionRows(sec)
 			if err != nil {
 				continue
@@ -472,7 +561,7 @@ func (t *ArrowTable) RowIdsByHas(field string, value any, op query.Condition) ch
 				}
 				row := secRows[int(r.loc.Offset)]
 				fieldVal := tpath.PathLookup(row, field)
-				if bfilters.ApplyFilterCondition(fieldVal, &query.FieldFilter{Field: field, Operator: op, Value: value}) {
+				if bfilters.ApplyFilterCondition(fieldVal, cond) {
 					out <- r.id
 				}
 			}
