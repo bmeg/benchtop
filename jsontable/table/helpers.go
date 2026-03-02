@@ -38,3 +38,9 @@ func (b *JSONTable) GetTableEntryInfo(snap *pebble.Snapshot, id []byte) (*bencht
 	defer closer.Close()
 	return &benchtop.RowLoc{}, nil
 }
+func TableLabel(tableName string) string {
+	if len(tableName) > 2 && (tableName[:2] == "v_" || tableName[:2] == "e_") {
+		return tableName[2:]
+	}
+	return tableName
+}

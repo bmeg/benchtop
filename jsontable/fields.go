@@ -446,7 +446,15 @@ func (dr *JSONDriver) scanSlow(targetTables []*table.JSONTable, field string, va
 	cond := &filters.FieldFilter{Field: field, Value: value, Operator: op}
 	for _, tbl := range targetTables {
 		for row := range tbl.ScanFull(nil) {
-			fieldVal := tpath.PathLookup(row.DataMap, field)
+			var fieldVal any
+			switch field {
+			case "_label":
+				fieldVal = table.TableLabel(tbl.Name)
+			case "_id":
+				fieldVal = row.DataMap["_id"]
+			default:
+				fieldVal = tpath.PathLookup(row.DataMap, field)
+			}
 			if !filters.ApplyFilterCondition(fieldVal, cond) {
 				continue
 			}

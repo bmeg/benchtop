@@ -11,7 +11,18 @@ import (
 
 type FieldFilter = query.FieldFilter
 
+// FieldAbsentType is a sentinel type returned by field lookups when a field
+// does not exist in the row data. This is distinct from nil (JSON null).
+type FieldAbsentType struct{}
+
+// FieldAbsent is the singleton sentinel for a missing field.
+var FieldAbsent any = FieldAbsentType{}
+
 func ApplyFilterCondition(val any, cond *FieldFilter) bool {
+	// A missing field never satisfies any condition.
+	if _, absent := val.(FieldAbsentType); absent {
+		return false
+	}
 	condVal := cond.Value
 	if (val == nil || condVal == nil) &&
 		cond.Operator != query.EQ &&
@@ -44,21 +55,24 @@ func ApplyFilterCondition(val any, cond *FieldFilter) bool {
 		}
 
 	case query.NEQ:
+		if condVal == nil {
+			return val != nil
+		}
 		switch v := val.(type) {
 		case string:
 			condS, ok := condVal.(string)
-			return ok && v != condS
+			return !ok || v != condS
 		case int:
 			condI, ok := condVal.(int)
-			return ok && v != condI
+			return !ok || v != condI
 		case float64:
 			condF, ok := condVal.(float64)
-			return ok && v != condF
+			return !ok || v != condF
 		case bool:
 			condB, ok := condVal.(bool)
-			return ok && v != condB
+			return !ok || v != condB
 		case nil:
-			return condVal != nil
+			return true // condVal != nil checked above
 		default:
 			return !reflect.DeepEqual(val, condVal)
 		}
@@ -123,7 +137,7 @@ func ApplyFilterCondition(val any, cond *FieldFilter) bool {
 			return false
 		}
 		for _, v := range vals {
-			if reflect.DeepEqual(val, v) {
+			if looseCompare(val, v) {
 				return true
 			}
 		}
@@ -135,7 +149,7 @@ func ApplyFilterCondition(val any, cond *FieldFilter) bool {
 			return false
 		}
 		for _, v := range vals {
-			if reflect.DeepEqual(val, v) {
+			if looseCompare(val, v) {
 				return false
 			}
 		}
@@ -147,13 +161,34 @@ func ApplyFilterCondition(val any, cond *FieldFilter) bool {
 			return false
 		}
 		for _, v := range vals {
-			if reflect.DeepEqual(v, condVal) {
+			if looseCompare(v, condVal) {
 				return true
 			}
 		}
 		return false
 	}
 
+	return false
+}
+
+// looseCompare performs an equality check that tries to coerce numbers.
+func looseCompare(a, b any) bool {
+	if a == nil && b == nil {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+	if reflect.DeepEqual(a, b) {
+		return true
+	}
+	// Try coercing both to float64, since JSON numbers often parse as float64
+	// but incoming queries might use int/int64
+	aF, errA := getFloat64(a)
+	bF, errB := getFloat64(b)
+	if errA == nil && errB == nil {
+		return aF == bF
+	}
 	return false
 }
 
