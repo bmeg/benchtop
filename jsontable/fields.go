@@ -188,6 +188,10 @@ func (dr *JSONDriver) LoadFields() error {
 	err := dr.Pkv.View(func(it *pebblebulk.PebbleIterator) error {
 		for it.Seek(fPrefix); it.Valid() && bytes.HasPrefix(it.Key(), fPrefix); it.Next() {
 			field, tableID, _, _ := benchtop.FieldKeyParse(it.Key())
+			if field == "" {
+				log.Warnf("LoadFields: skipping malformed field key: %x", it.Key())
+				continue
+			}
 
 			dr.Lock.RLock()
 			tbl, exists := dr.Tables[tableID]

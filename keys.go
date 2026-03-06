@@ -86,18 +86,39 @@ func FieldKey(field string, tableID uint16, value any, rowID []byte) []byte {
 }
 
 func FieldKeyParse(fieldKey []byte) (field string, tableID uint16, value any, rowID []byte) {
-	parts := bytes.Split(fieldKey, FieldSep)
-	if len(parts) < 5 {
+	// Expected layout:
+	// F | sep | field | sep | value(json) | sep | tableID(2 bytes) | sep | rowID
+	// We cannot use bytes.Split here because tableID is raw binary and may contain sep.
+	if len(fieldKey) < 8 || fieldKey[0] != FieldPrefix[0] || fieldKey[1] != FieldSep[0] {
 		return "", 0, nil, nil
 	}
-	// With the new order, value is parts[2], tableID is parts[3], rowID is parts[len-1]
-	err := sonic.ConfigFastest.Unmarshal(parts[2], &value)
+
+	fieldStart := 2
+	fieldEndRel := bytes.IndexByte(fieldKey[fieldStart:], FieldSep[0])
+	if fieldEndRel < 0 {
+		return "", 0, nil, nil
+	}
+	fieldEnd := fieldStart + fieldEndRel
+
+	lastSep := bytes.LastIndexByte(fieldKey, FieldSep[0])
+	// Need at least 2 tableID bytes and the separator before tableID.
+	if lastSep < 4 {
+		return "", 0, nil, nil
+	}
+	tableStart := lastSep - 2
+	valueEndSep := tableStart - 1
+	if valueEndSep <= fieldEnd || fieldKey[valueEndSep] != FieldSep[0] {
+		return "", 0, nil, nil
+	}
+
+	valueBytes := fieldKey[fieldEnd+1 : valueEndSep]
+	err := sonic.ConfigFastest.Unmarshal(valueBytes, &value)
 	if err != nil {
 		log.Infoln("FieldKey Unmarshal Err: ", err)
 	}
-	tid := binary.LittleEndian.Uint16(parts[3])
-	rid := parts[len(parts)-1]
-	return string(parts[1]), tid, value, rid
+	tid := binary.LittleEndian.Uint16(fieldKey[tableStart:lastSep])
+	rid := fieldKey[lastSep+1:]
+	return string(fieldKey[fieldStart:fieldEnd]), tid, value, rid
 }
 
 // FieldValueKey returns a prefix for global seek of a specific field value across all tables
