@@ -189,7 +189,7 @@ func (dr *JSONDriver) LoadFields() error {
 		for it.Seek(fPrefix); it.Valid() && bytes.HasPrefix(it.Key(), fPrefix); it.Next() {
 			field, tableID, _, _ := benchtop.FieldKeyParse(it.Key())
 			if field == "" {
-				log.Warnf("LoadFields: skipping malformed field key: %x", it.Key())
+				log.Infof("LoadFields: skipping malformed field key: %x", it.Key())
 				continue
 			}
 
