@@ -10,6 +10,11 @@ import (
 const CURRENT = "_current"
 
 func PathLookup(v map[string]any, path string) any {
+	// Optimization: if it's a simple top-level field, return it directly.
+	if !strings.Contains(path, ".") && !strings.Contains(path, "$") {
+		return v[path]
+	}
+
 	/* Expects that special fields like '_id' and '_label'
 	   are added to the map before reaching this function
 	*/
@@ -63,5 +68,8 @@ func ToLocalPath(path string) string {
 	if strings.HasPrefix(parts[0], "$") {
 		parts[0] = "$"
 	}
-	return strings.Join(parts, ".")
+	local := strings.Join(parts, ".")
+	// jsonpath expects array indexes as "field[0]" instead of "field.[0]"
+	local = strings.ReplaceAll(local, ".[", "[")
+	return local
 }

@@ -52,3 +52,41 @@ func TestPosValueParse(t *testing.T) {
 		t.Errorf("%d != %d", size, loc.Size)
 	}
 }
+
+func TestFieldKeyParse_TableIDContainsFieldSepLowByte(t *testing.T) {
+	tableID := uint16(31) // 0x1F in low byte
+	key := benchtop.FieldKey("name", tableID, "value", []byte("row-1"))
+
+	field, parsedTableID, value, rowID := benchtop.FieldKeyParse(key)
+	if field != "name" {
+		t.Fatalf("field mismatch: got %q", field)
+	}
+	if parsedTableID != tableID {
+		t.Fatalf("table id mismatch: got %d expected %d", parsedTableID, tableID)
+	}
+	if value != "value" {
+		t.Fatalf("value mismatch: got %#v", value)
+	}
+	if string(rowID) != "row-1" {
+		t.Fatalf("row id mismatch: got %q", string(rowID))
+	}
+}
+
+func TestFieldKeyParse_TableIDContainsFieldSepHighByte(t *testing.T) {
+	tableID := uint16(7936) // 0x1F00 in little-endian high byte
+	key := benchtop.FieldKey("name", tableID, "value", []byte("row-2"))
+
+	field, parsedTableID, value, rowID := benchtop.FieldKeyParse(key)
+	if field != "name" {
+		t.Fatalf("field mismatch: got %q", field)
+	}
+	if parsedTableID != tableID {
+		t.Fatalf("table id mismatch: got %d expected %d", parsedTableID, tableID)
+	}
+	if value != "value" {
+		t.Fatalf("value mismatch: got %#v", value)
+	}
+	if string(rowID) != "row-2" {
+		t.Fatalf("row id mismatch: got %q", string(rowID))
+	}
+}

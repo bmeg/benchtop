@@ -10,6 +10,8 @@ import (
 	"github.com/bmeg/benchtop/jsontable"
 	"github.com/bmeg/benchtop/jsontable/table"
 	jTable "github.com/bmeg/benchtop/jsontable/table"
+	"github.com/bmeg/benchtop/query"
+	"github.com/bmeg/benchtop/util"
 	"github.com/bytedance/sonic"
 	"github.com/bytedance/sonic/ast"
 	"google.golang.org/protobuf/types/known/structpb"
@@ -17,8 +19,6 @@ import (
 	"github.com/bmeg/benchtop/test/fixtures"
 	"github.com/bmeg/grip/gripql"
 	"github.com/bmeg/grip/log"
-
-	"github.com/bmeg/benchtop/util"
 )
 
 type FieldFilters []filters.FieldFilter
@@ -71,7 +71,7 @@ func localMatchesHasExpression(row []byte, stmt *gripql.HasExpression, tableName
 		return filters.ApplyFilterCondition(
 			lookupVal,
 			&filters.FieldFilter{
-				Operator: cond.Condition,
+				Operator: query.Condition(cond.Condition),
 				Field:    cond.Key,
 				Value:    cond.Value.AsInterface(),
 			},
@@ -121,7 +121,7 @@ func (ff FieldFilters) Matches(row []byte, tableStr string) bool {
 		condition := &gripql.HasExpression_Condition{
 			Condition: &gripql.HasCondition{
 				Key:       filter.Field,
-				Condition: filter.Operator,
+				Condition: gripql.Condition(filter.Operator),
 				Value:     valuePB,
 			},
 		}
@@ -195,7 +195,7 @@ func TestScan(t *testing.T) {
 		jDr.LocCache.Set(k, loc)
 	}
 
-	filters1 := FieldFilters{filters.FieldFilter{Field: "name", Operator: gripql.Condition_EQ, Value: "alice"}}
+	filters1 := FieldFilters{filters.FieldFilter{Field: "name", Operator: query.Condition(gripql.Condition_EQ), Value: "alice"}}
 	lenscanChan1 := 0
 	for elem := range jT.ScanDoc(filters1) {
 		lenscanChan1++
@@ -214,7 +214,7 @@ func TestScan(t *testing.T) {
 	// Second test case: "field1" == 0.2
 	for elem := range jT.ScanDoc(
 		FieldFilters{filters.FieldFilter{
-			Field: "field1", Operator: gripql.Condition_EQ, Value: 0.2},
+			Field: "field1", Operator: query.Condition(gripql.Condition_EQ), Value: 0.2},
 		},
 	) {
 		t.Log("scanChantwo: ", elem)
@@ -229,7 +229,7 @@ func TestScan(t *testing.T) {
 	}
 
 	// Third test case: "field1" > 0.2
-	filters3 := FieldFilters{filters.FieldFilter{Field: "field1", Operator: gripql.Condition_GT, Value: 0.2}}
+	filters3 := FieldFilters{filters.FieldFilter{Field: "field1", Operator: query.Condition(gripql.Condition_GT), Value: 0.2}}
 	scanChan3 := jT.ScanDoc(filters3)
 
 	scanChanLen3 := 0
@@ -260,7 +260,7 @@ func TestScan(t *testing.T) {
 		FieldFilters{
 			filters.FieldFilter{
 				Field:    "name",
-				Operator: gripql.Condition_EQ,
+				Operator: query.Condition(gripql.Condition_EQ),
 				Value:    "mnbv",
 			},
 		},

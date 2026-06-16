@@ -5,30 +5,25 @@ import (
 	"reflect"
 	"strconv"
 
-	"github.com/bmeg/grip/gripql"
-	"github.com/bmeg/grip/log"
+	"github.com/bmeg/benchtop/query"
 	"github.com/spf13/cast"
 )
 
-type FieldFilter struct {
-	Field    string
-	Operator gripql.Condition
-	Value    any
-}
+type FieldFilter = query.FieldFilter
 
 func ApplyFilterCondition(val any, cond *FieldFilter) bool {
 	condVal := cond.Value
 	if (val == nil || condVal == nil) &&
-		cond.Operator != gripql.Condition_EQ &&
-		cond.Operator != gripql.Condition_NEQ &&
-		cond.Operator != gripql.Condition_WITHIN &&
-		cond.Operator != gripql.Condition_WITHOUT &&
-		cond.Operator != gripql.Condition_CONTAINS {
+		cond.Operator != query.EQ &&
+		cond.Operator != query.NEQ &&
+		cond.Operator != query.WITHIN &&
+		cond.Operator != query.WITHOUT &&
+		cond.Operator != query.CONTAINS {
 		return false
 	}
 
 	switch cond.Operator {
-	case gripql.Condition_EQ:
+	case query.EQ:
 		switch v := val.(type) {
 		case string:
 			condS, ok := condVal.(string)
@@ -48,7 +43,7 @@ func ApplyFilterCondition(val any, cond *FieldFilter) bool {
 			return reflect.DeepEqual(val, condVal)
 		}
 
-	case gripql.Condition_NEQ:
+	case query.NEQ:
 		switch v := val.(type) {
 		case string:
 			condS, ok := condVal.(string)
@@ -68,7 +63,7 @@ func ApplyFilterCondition(val any, cond *FieldFilter) bool {
 			return !reflect.DeepEqual(val, condVal)
 		}
 
-	case gripql.Condition_GT, gripql.Condition_GTE, gripql.Condition_LT, gripql.Condition_LTE:
+	case query.GT, query.GTE, query.LT, query.LTE:
 		valN, err := getFloat64(val) // Use optimized getter
 		if err != nil {
 			return false
@@ -78,27 +73,30 @@ func ApplyFilterCondition(val any, cond *FieldFilter) bool {
 			return false
 		}
 
-		if cond.Operator == gripql.Condition_GT {
+		if cond.Operator == query.GT {
 			return valN > condN
 		}
-		if cond.Operator == gripql.Condition_GTE {
+		if cond.Operator == query.GTE {
 			return valN >= condN
 		}
-		if cond.Operator == gripql.Condition_LT {
+		if cond.Operator == query.LT {
 			return valN < condN
 		}
-		if cond.Operator == gripql.Condition_LTE {
+		if cond.Operator == query.LTE {
 			return valN <= condN
 		}
 		return false // Should not be reached
 
-	case gripql.Condition_INSIDE, gripql.Condition_OUTSIDE, gripql.Condition_BETWEEN:
+	case query.INSIDE, query.OUTSIDE, query.BETWEEN:
 		// Still requires slice check, but we can use the optimized getFloat64 inside
 		vals, err := cast.ToSliceE(condVal)
 		if err != nil || len(vals) != 2 {
 			return false
 		}
-
+		valN, err := getFloat64(val)
+		if err != nil {
+			return false
+		}
 		lower, err := getFloat64(vals[0])
 		if err != nil {
 			return false
@@ -107,70 +105,56 @@ func ApplyFilterCondition(val any, cond *FieldFilter) bool {
 		if err != nil {
 			return false
 		}
-		valF, err := getFloat64(val)
-		if err != nil {
-			return false
-		}
 
-		if cond.Operator == gripql.Condition_INSIDE {
-			return valF > lower && valF < upper
+		if cond.Operator == query.INSIDE {
+			return valN > lower && valN < upper
 		}
-		if cond.Operator == gripql.Condition_OUTSIDE {
-			return valF < lower || valF > upper
+		if cond.Operator == query.BETWEEN {
+			return valN >= lower && valN <= upper
 		}
-		if cond.Operator == gripql.Condition_BETWEEN {
-			return valF >= lower && valF < upper
+		if cond.Operator == query.OUTSIDE {
+			return valN < lower || valN > upper
 		}
 		return false
 
-	case gripql.Condition_WITHIN:
-		// val is the single document value. condVal is the slice of allowed values.
-		// Check if val is EQ to any element in condVal slice.
-		condSlice, ok := condVal.([]any)
-		if !ok {
-			log.Debugf("UserError: expected slice not %T for WITHIN condition value", condVal)
+	case query.WITHIN:
+		vals, err := cast.ToSliceE(condVal)
+		if err != nil {
 			return false
 		}
-		for _, v := range condSlice {
-			if ApplyFilterCondition(val, &FieldFilter{Operator: gripql.Condition_EQ, Value: v}) {
-				return true // Found a match
+		for _, v := range vals {
+			if reflect.DeepEqual(val, v) {
+				return true
 			}
 		}
 		return false
 
-	case gripql.Condition_WITHOUT:
-		condSlice, ok := condVal.([]any)
-		if !ok {
-			log.Debugf("UserError: expected slice not %T for WITHIN condition value", condVal)
-			return true
+	case query.WITHOUT:
+		vals, err := cast.ToSliceE(condVal)
+		if err != nil {
+			return false
 		}
-		for _, v := range condSlice {
-			if ApplyFilterCondition(val, &FieldFilter{Operator: gripql.Condition_EQ, Value: v}) {
+		for _, v := range vals {
+			if reflect.DeepEqual(val, v) {
 				return false
 			}
 		}
 		return true
 
-	case gripql.Condition_CONTAINS:
-		// val is the slice from the document. condVal is the single target element.
-		// Check if any element in val slice is EQ to condVal.
-		valSlice, ok := val.([]any)
-		if !ok {
-			log.Debugf("UserError: expected slice not %T for CONTAINS condition value", val)
+	case query.CONTAINS:
+		vals, err := cast.ToSliceE(val)
+		if err != nil {
 			return false
 		}
-		for _, v := range valSlice {
-			// Use the optimized EQ check recursively instead of reflect.DeepEqual(v, condVal)
-			// Note: Arguments are v (slice element) and condVal (target).
-			if ApplyFilterCondition(v, &FieldFilter{Operator: gripql.Condition_EQ, Value: condVal}) {
-				return true // Found a match
+		for _, v := range vals {
+			if reflect.DeepEqual(v, condVal) {
+				return true
 			}
 		}
 		return false
-
-	default:
-		return false
 	}
+
+	return false
 }
 
 // getFloat64 is a highly optimized helper to convert 'any' value to float64,

@@ -27,7 +27,12 @@ var Cmd = &cobra.Command{
 			return err
 		}
 
-		table, err := driver.Get(tableName)
+		tid, err := driver.LookupTableID(tableName)
+		if err != nil {
+			return err
+		}
+
+		table, err := driver.Get(tid)
 		if err != nil {
 			return err
 		}

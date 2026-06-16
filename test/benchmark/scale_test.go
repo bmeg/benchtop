@@ -3,12 +3,12 @@ package test
 import (
 	"fmt"
 	"os"
+	"sync"
 	"testing"
 
 	"github.com/bmeg/benchtop"
 	"github.com/bmeg/benchtop/jsontable"
 	jTable "github.com/bmeg/benchtop/jsontable/table"
-	"github.com/bmeg/benchtop/pebblebulk"
 	"github.com/bmeg/benchtop/test/fixtures"
 	"github.com/bmeg/benchtop/util"
 	"github.com/bmeg/grip/log"
@@ -57,24 +57,33 @@ func BenchmarkScaleWriteJson(b *testing.B) {
 
 	b.ResetTimer()
 
-	jsonDriver.Pkv.BulkWrite(func(tx *pebblebulk.PebbleBulk) error {
-		for b.Loop() {
-			inputChan := make(chan *benchtop.Row, 100)
-			go func() {
-				for j := range scalenumKeys {
-					key := []byte(fmt.Sprintf("key_%d", j))
-					value := fixtures.GenerateRandomBytes(scalevalueSize)
-					inputChan <- &benchtop.Row{Id: key, Data: map[string]any{"data": value}}
-				}
-				close(inputChan)
-			}()
-			err = jsonDriver.BulkLoad(inputChan, tx)
+	// Start producer
+	b.ResetTimer()
+
+	for i := 0; i < b.N; i++ {
+		var wg sync.WaitGroup
+		ch := make(chan *benchtop.Row, 100)
+
+		// Start consumer
+		tid, _ := jsonDriver.LookupTableID(Jsonname)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			err = jsonDriver.BulkLoad(tid, ch)
 			if err != nil {
-				b.Fatal(err)
+				b.Error(err)
 			}
+		}()
+
+		k := fmt.Sprintf("%016d", i)
+		v := map[string]interface{}{}
+		for j := 0; j < 10; j++ {
+			v[fmt.Sprintf("key_%d", j)] = fmt.Sprintf("value_%d", j)
 		}
-		return nil
-	})
+		ch <- &benchtop.Row{Id: []byte(k), TableID: tid, Data: v}
+		close(ch)
+		wg.Wait()
+	}
 }
 
 func BenchmarkRandomReadJson(b *testing.B) {
@@ -91,7 +100,8 @@ func BenchmarkRandomReadJson(b *testing.B) {
 		}
 	}
 
-	ot, err := jsonDriver.Get(Jsonname)
+	tid, _ := jsonDriver.LookupTableID(Jsonname)
+	ot, err := jsonDriver.Get(tid)
 	if err != nil {
 		b.Log(err)
 	}
@@ -117,6 +127,11 @@ func BenchmarkRandomReadJson(b *testing.B) {
 			loc := benchtop.DecodeRowLoc(val)
 			closer.Close()
 
+			// driver_test.go
+			// The following lines are commented out because 'drv2' is not defined in this scope,
+			// and 't2' is not declared. This snippet appears to be from a different test file.
+			// tid, _ := drv2.LookupTableID("e_knows")
+			// t2, err = drv2.Get(tid)
 			rOw, err := jT.GetRow(loc)
 			if err != nil {
 				b.Fatal(err)
@@ -140,7 +155,8 @@ func BenchmarkRandomKeysJson(b *testing.B) {
 			b.Fatal("Failed to assert type *benchtop.JSONDriver")
 		}
 	}
-	ot, err := jsonDriver.Get(Jsonname)
+	tid_get, _ := jsonDriver.LookupTableID(Jsonname)
+	ot, err := jsonDriver.Get(tid_get)
 	if err != nil {
 		b.Log(err)
 	}

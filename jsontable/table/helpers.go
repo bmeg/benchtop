@@ -1,6 +1,8 @@
 package table
 
 import (
+	"fmt"
+
 	"github.com/bmeg/benchtop"
 	"github.com/cockroachdb/pebble"
 )
@@ -18,6 +20,12 @@ func (b *JSONTable) PackData(entry map[string]any, key string) *RowData {
 }
 
 func (b *JSONTable) GetTableEntryInfo(snap *pebble.Snapshot, id []byte) (*benchtop.RowLoc, error) {
+	if b == nil {
+		return nil, fmt.Errorf("JSONTable is nil")
+	}
+	if snap == nil {
+		return nil, fmt.Errorf("snapshot is nil")
+	}
 	// Really only want to see if anything was returned or not. Since this doesn't interact
 	// with the pebble indices, keep it in JSONTable
 	_, closer, err := snap.Get(benchtop.NewPosKey(b.TableId, id))

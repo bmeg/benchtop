@@ -34,7 +34,7 @@ func TestCompact(t *testing.T) {
 	jT, _ := ts.(*jTable.JSONTable)
 
 	for k, r := range fixtures.ScanData {
-		loc, err := jT.AddRow(benchtop.Row{Id: []byte(k), TableName: "table_1", Data: r})
+		loc, err := jT.AddRow(benchtop.Row{Id: []byte(k), TableID: jT.TableId, Data: r})
 		if err != nil {
 			t.Fatal(err)
 		}

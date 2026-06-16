@@ -4,7 +4,6 @@ import (
 	"fmt"
 
 	"github.com/bmeg/benchtop/jsontable"
-	jTable "github.com/bmeg/benchtop/jsontable/table"
 
 	"github.com/spf13/cobra"
 )
@@ -24,14 +23,18 @@ var Cmd = &cobra.Command{
 			return err
 		}
 
-		table, err := driver.Get(tableName)
+		tid, err := driver.LookupTableID(tableName)
 		if err != nil {
 			return err
 		}
 
-		jT, _ := table.(*jTable.JSONTable)
+		// ListTableKeys is not part of TableDriver interface, need to cast
+		jd, ok := driver.(*jsontable.JSONDriver)
+		if !ok {
+			return fmt.Errorf("driver is not a JSONDriver")
+		}
 
-		keys, err := driver.ListTableKeys(jT.TableId)
+		keys, err := jd.ListTableKeys(tid)
 		if err != nil {
 			return err
 		}

@@ -6,7 +6,6 @@ import (
 	"os"
 	"sync"
 
-	"github.com/DataDog/zstd"
 	"github.com/bmeg/benchtop"
 	"github.com/edsrzf/mmap-go"
 )
@@ -39,13 +38,12 @@ func (s *Section) WriteJsonEntryToSection(payload []byte) (*benchtop.RowLoc, err
 	s.Lock.Lock()
 	defer s.Lock.Unlock()
 
-	cPayload, err := zstd.Compress(s.CompressScratch[:0], payload)
-	if err != nil {
-		return nil, fmt.Errorf("compress failed: %w", err)
+	dataLen := uint32(len(payload))
+	writeEnd64 := uint64(s.LiveBytes) + uint64(benchtop.ROW_HSIZE) + uint64(dataLen)
+	if writeEnd64 > uint64(^uint32(0)) {
+		return nil, fmt.Errorf("write offset overflow: live=%d len=%d", s.LiveBytes, dataLen)
 	}
-
-	compressedLen := uint32(len(cPayload))
-	writeEnd := s.LiveBytes + benchtop.ROW_HSIZE + compressedLen
+	writeEnd := uint32(writeEnd64)
 
 	// Check if write is outside the CURRENT mapped region
 	if writeEnd > uint32(len(s.MMap)) {
@@ -70,19 +68,36 @@ func (s *Section) WriteJsonEntryToSection(payload []byte) (*benchtop.RowLoc, err
 	}
 
 	oldLiveBytes := s.LiveBytes
-	nextOffset := s.LiveBytes + benchtop.ROW_HSIZE + compressedLen
+	nextOffset64 := uint64(s.LiveBytes) + uint64(benchtop.ROW_HSIZE) + uint64(dataLen)
+	if nextOffset64 > uint64(^uint32(0)) {
+		return nil, fmt.Errorf("next offset overflow: live=%d len=%d", s.LiveBytes, dataLen)
+	}
+	nextOffset := uint32(nextOffset64)
+	headerEnd := oldLiveBytes + benchtop.ROW_HSIZE
+	if headerEnd < oldLiveBytes || headerEnd > uint32(len(s.MMap)) {
+		return nil, fmt.Errorf("invalid header bounds: off=%d end=%d mmap=%d", oldLiveBytes, headerEnd, len(s.MMap))
+	}
+	payloadStart := headerEnd
+	payloadEnd := payloadStart + dataLen
+	if payloadEnd < payloadStart || payloadEnd > uint32(len(s.MMap)) {
+		return nil, fmt.Errorf("invalid payload bounds: start=%d end=%d mmap=%d", payloadStart, payloadEnd, len(s.MMap))
+	}
 
-	headerTarget := s.MMap[oldLiveBytes : oldLiveBytes+benchtop.ROW_HSIZE]
-	binary.LittleEndian.PutUint32(headerTarget[:4], nextOffset)    // next row offset
-	binary.LittleEndian.PutUint32(headerTarget[4:], compressedLen) // compressed size
-	copy(s.MMap[oldLiveBytes+benchtop.ROW_HSIZE:], cPayload)
+	headerTarget := s.MMap[oldLiveBytes:headerEnd]
+	binary.LittleEndian.PutUint32(headerTarget[:4], nextOffset) // next row offset
+	binary.LittleEndian.PutUint32(headerTarget[4:], dataLen)    // data size
+	copy(s.MMap[payloadStart:payloadEnd], payload)
+
+	// Force flush to ensure visibility to other readers/mappers
+	// This prevents "stale zeros" issues where header is visible but payload is not
+	s.MMap.Flush()
+
 	s.LiveBytes = nextOffset
-	// Save the buffer for next time. If the buffer allocated to be larger, use the larger one.
-	s.CompressScratch = cPayload
+
 	return &benchtop.RowLoc{
 		Section: s.ID,
 		Offset:  oldLiveBytes,
-		Size:    compressedLen,
+		Size:    dataLen,
 	}, nil
 }
 
@@ -129,12 +144,9 @@ func (s *Section) RemapReadOnly() error {
 func (s *Section) GrowAndRemap(newSize int64) error {
 	// 1. Unmap the old region
 	if s.MMap != nil {
-		// Crucial: ensure any pending data is flushed before unmap
+		// Ensure data is synced before unmapping/resizing
 		if err := s.MMap.Flush(); err != nil {
-			return fmt.Errorf("flush before unmap failed: %w", err)
-		}
-		if err := s.File.Sync(); err != nil {
-			return fmt.Errorf("sync failed: %w", err)
+			return fmt.Errorf("flush failed before resize: %w", err)
 		}
 		if err := s.MMap.Unmap(); err != nil {
 			return fmt.Errorf("unmap failed: %w", err)
